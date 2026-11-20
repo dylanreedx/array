@@ -2230,6 +2230,14 @@ final class AgentSupervisor {
         return "Held (\(pending) pending from you): \(name) \(why). Held messages run in order, each as sent, only when the user resumes it; one held longer than 24 h is bundled into a 'while you were away' note on its next turn, never dropped, and you are told."
     }
 
+    private var signalKilledAgents: Set<AgentID> = []
+    /// "Claude Code exited (code 143) without finishing the turn": 128 + signal.
+    private static func exitedOnSignal(_ error: String?) -> Bool {
+        guard let error, let range = error.range(of: #"exited \(code (1[2-5][0-9])\)"#, options: .regularExpression),
+              let code = Int(error[range].filter(\.isNumber)) else { return false }
+        return (129...159).contains(code)
+    }
+
     private func pauseQueue(_ id: AgentID, _ reason: ComposerQueueRailState.Pause) {
         // An ordinary terminal outcome cannot hide uncertain input custody.
         if pausedQueues.contains(id), queuePauseReasons[id] == .unconfirmed, reason != .unconfirmed { return }
@@ -14766,6 +14774,17 @@ final class AgentSupervisor {
             notifyTurnCapabilitiesChanged(id)
             return
         }
+        // Killed from outside: nothing relaunches it and nothing drains into a
+        // fresh process until the user or its lead sends or presses Resume.
+        if outcome == .interrupted, signalKilledAgents.remove(id) != nil {
+            if let message = inFlightMessage, lastAssistantEntryID(id) == turnReplyFloors[id]?.entryID,
+               let store = submissionRecoveryStore {
+                runQueueOp(for: id) { await store.requeueWorkItemAtFront(.prompt(message), for: id) }
+            }
+            pauseQueue(id, .afterStop)
+            notifyTurnCapabilitiesChanged(id)
+            return
+        }
         // A usage stop is not a Stop: the agent resumes by itself when usage
         // returns, and that resume releases this hold (`resumeUsagePaused`,
         // or `releaseUsageQueueHold` when the pause ends another way). Draining
@@ -15906,6 +15925,15 @@ final class AgentSupervisor {
         // interrupted turn that keeps the CLI's own line.
         if case let .turnCompleted(threadId, turnId, .failed, error) = event,
            openUsagePause(for: id, error: error, now: now) {
+            event = .turnCompleted(threadId: threadId, turnId: turnId, outcome: .interrupted, errorMessage: error)
+        }
+        // A runner killed by a signal Array did not send (kill, Activity Monitor)
+        // is the user's or a lead's decision, not a failure to retry: delivered
+        // as interrupted, and its queue is held (`handleQueueOnTurnCompleted`).
+        if case let .turnCompleted(threadId, turnId, .failed, error) = event,
+           Self.exitedOnSignal(error), !stopRequestedAgents.contains(id), !userStoppedAgents.contains(id) {
+            signalKilledAgents.insert(id)
+            appendAgentDiagnostics("runner exited on a signal Array did not send; queue held, no relaunch", agentID: id)
             event = .turnCompleted(threadId: threadId, turnId: turnId, outcome: .interrupted, errorMessage: error)
         }
         if case .turnStarted = event, usagePauses.removeValue(forKey: id) != nil {

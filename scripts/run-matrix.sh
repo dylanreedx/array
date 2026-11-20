@@ -1948,6 +1948,8 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --agent-usage-limit-check
 run_app_check .build/debug/Array --agent-usage-resume-check
 # A window opening resumes at most 2 leads, never helpers (2026-11-20 herd).
 run_app_check .build/debug/Array --usage-resume-herd-check
+# A runner killed by a signal Array did not send stays down, queue held.
+run_app_check .build/debug/Array --runner-signal-kill-check
 # A paused queue logs why, and agent messages cannot be stranded in one.
 run_app_check .build/debug/Array --agent-queue-drain-check
 # A usage pause ends when the account in use becomes one with room; retryOf

@@ -4085,6 +4085,21 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        // Usage hotfix: a runner killed from outside stays down, queue held.
+        if CommandLine.arguments.contains("--runner-signal-kill-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runRunnerSignalKillChecks()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         // .plans/101: account identity and live limits, read with no turn,
         // through a real supervisor into real attached tiles.
         if CommandLine.arguments.contains("--agent-account-usage-check") {
