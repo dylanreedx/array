@@ -33,6 +33,7 @@ check --agent-paused-elsewhere-check
 check --agent-presence-check
 check --agent-process-tracker-check
 check --agent-prompt-image-contract-check
+check --agent-queue-drain-check
 check --agent-record-archive-check
 check --agent-report-contract-check
 check --agent-restore-check
@@ -213,6 +214,7 @@ check --helper-watchdog-check
 check --helper-worktree-check
 check --hidden-agent-ingest-check
 check --hide-external-rows-check
+check --idle-waker-check
 check --inbox-parent-fold-check
 check --inbox-reveal-project-check
 check --input-gate-check
@@ -315,6 +317,7 @@ check --reserved-dispatch-check
 check --resize-corner-cursor-check
 check --resize-dimensions-hud-check
 check --resize-snap-check
+check --resource-bundle-layout-check
 check --restore-delivery-scaling-check
 check --restore-scaling-check
 check --retired-flat-write-check
@@ -607,6 +610,7 @@ leg run_app_check .build/debug/Array --agent-observer-independence-check
 leg run_app_check .build/debug/Array --agent-paused-elsewhere-check
 leg run_app_check .build/debug/Array --agent-presence-check
 leg run_app_check .build/debug/Array --agent-process-tracker-check
+leg run_app_check .build/debug/Array --agent-queue-drain-check
 leg run_app_check .build/debug/Array --agent-record-archive-check
 leg run_app_check .build/debug/Array --agent-restore-check
 leg run_app_check .build/debug/Array --agent-status-check
@@ -770,6 +774,7 @@ leg run_app_check .build/debug/Array --helper-watchdog-check
 leg run_app_check .build/debug/Array --helper-worktree-check
 leg run_app_check .build/debug/Array --hidden-agent-ingest-check
 leg run_app_check .build/debug/Array --hide-external-rows-check
+leg run_app_check .build/debug/Array --idle-waker-check
 leg run_app_check .build/debug/Array --inbox-parent-fold-check
 leg run_app_check .build/debug/Array --inbox-reveal-project-check
 leg run_app_check .build/debug/Array --input-gate-check
@@ -1117,6 +1122,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-live-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --project-standards-index-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --provider-context-support-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --resource-bundle-layout-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --role-registry-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --settings-schema-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --sidebar-history-scope-check
@@ -1206,7 +1212,7 @@ count ContinuumRevivedAgentContentChecks 25
 count ContinuumRevivedAgentUIChecks 24
 count ContinuumRevivedCollaborationChecks 25
 count ContinuumRevivedCollaborationServiceChecks 29
-count ContinuumRevivedCoreChecks 217
+count ContinuumRevivedCoreChecks 218
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0
