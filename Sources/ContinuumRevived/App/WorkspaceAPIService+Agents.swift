@@ -187,6 +187,7 @@ extension WorkspaceAPIService {
         response.liveness = supervisor.helperLiveness[target.id]
         if let waiting = supervisor.idleWaitingFact(for: target.id, now: now) { response.liveness = waiting }
         response.contextDiet = HelperContextDiet.status(for: target)
+        response.headlessCalls = supervisor.processTracker.flatMap { AgentProcessAttribution.headlessCallsLabel($0.headlessCallCount(for: target.id)) }
         if let document {
             response.promptTitle = Self.promptTitle(from: document)
             let bounded = AgentInspectExcerpt.bound(

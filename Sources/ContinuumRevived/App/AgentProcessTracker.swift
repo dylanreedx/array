@@ -37,6 +37,24 @@ final class AgentProcessTracker {
     static let legacyPacing = ProcessInfo.processInfo.environment["CONTINUUM_QA_PROCESS_TRACKER_LEGACY_PACING"] == "1"
 
     private(set) var jobsByAgent: [AgentID: [AgentBackgroundJob]] = [:]
+    /// Every distinct headless `claude -p` call each agent's scripts started
+    /// since Array launched (pid + start time). Counted, never blocked.
+    private var headlessCallIDs: [AgentID: Set<String>] = [:]
+    var onHeadlessCalls: ((AgentID, Int) -> Void)?
+    func headlessCallCount(for agent: AgentID) -> Int { headlessCallIDs[agent]?.count ?? 0 }
+
+    func recordHeadlessCalls(_ raw: [String: [String]]) {
+        let known = knownAgents()
+        for (tag, ids) in raw {
+            guard let uuid = UUID(uuidString: tag) else { continue }
+            let agent = AgentID(rawValue: uuid)
+            guard known.contains(agent) else { continue }
+            let before = headlessCallIDs[agent]?.count ?? 0
+            headlessCallIDs[agent, default: []].formUnion(ids)
+            let after = headlessCallIDs[agent]?.count ?? 0
+            if after > before { onHeadlessCalls?(agent, after) }
+        }
+    }
 
     /// Agents this app owns. A tag from another install (an agent in the prod
     /// app that built this one) names an agent this app has never heard of.
@@ -118,7 +136,8 @@ final class AgentProcessTracker {
             // Every job, however young; `minimumJobAge` is applied here so the
             // tracker knows when the youngest will be old enough to list.
             let began = Date()
-            let raw = worker.reader.agentJobs(internalPathPrefixes: prefixes, minimumAge: 0)
+            let scan = worker.reader.agentScan(internalPathPrefixes: prefixes, minimumAge: 0)
+            let raw = scan.jobs
             let took = Date().timeIntervalSince(began)
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
@@ -140,6 +159,7 @@ final class AgentProcessTracker {
                 }
                 let before = self.jobsByAgent
                 self.publish(ready)
+                self.recordHeadlessCalls(scan.headlessCalls)
                 self.quietScans = (self.jobsByAgent.isEmpty && before.isEmpty) ? self.quietScans + 1 : 0
                 self.watchExits()
                 if self.rescanQueued {

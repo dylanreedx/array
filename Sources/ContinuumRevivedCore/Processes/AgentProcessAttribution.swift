@@ -197,6 +197,35 @@ public enum AgentProcessAttribution {
         return result
     }
 
+    /// `claude -p` / `claude --print` processes an agent's own scripts started.
+    /// They spend the account without a transcript, so Array counts them (never
+    /// blocks them). The agent's own CLI (a child of the host, or what that CLI
+    /// execs into) is not one. Ids are pid + start time, stable per call.
+    public static func headlessClaudeCalls(in samples: [ProcessSample], hostPid: Int32) -> [String: [String]] {
+        let owners = owners(in: samples, hostPid: hostPid)
+        let byPid = Dictionary(samples.map { ($0.pid, $0) }, uniquingKeysWith: { first, _ in first })
+        var result: [String: [String]] = [:]
+        for sample in samples {
+            guard let owner = owners[sample.pid], sample.parentPid != hostPid,
+                  isHeadlessClaude(sample),
+                  !(byPid[sample.parentPid].map(isHeadlessClaude) ?? false) else { continue }
+            result[owner, default: []].append("\(sample.pid)-\(Int(sample.startedAt.timeIntervalSince1970 * 1000))")
+        }
+        return result
+    }
+
+    static func isHeadlessClaude(_ sample: ProcessSample) -> Bool {
+        func name(_ path: String) -> String { (path as NSString).lastPathComponent }
+        let isClaude = name(sample.executablePath) == "claude"
+            || sample.arguments.prefix(2).contains { name($0) == "claude" || $0.hasSuffix("/claude-code/cli.js") }
+        return isClaude && sample.arguments.contains { $0 == "-p" || $0 == "--print" }
+    }
+
+    /// What the panel, the diagnostics log and the inbox say; nil for none.
+    public static func headlessCallsLabel(_ count: Int) -> String? {
+        count > 0 ? "ran \(count) headless claude call\(count == 1 ? "" : "s")" : nil
+    }
+
     static let shellNames: Set<String> = ["sh", "bash", "zsh", "dash", "fish", "ksh", "tcsh", "csh", "-zsh", "-bash"]
     static let interpreterNames: Set<String> = ["node", "python", "python3", "ruby", "bun", "deno", "perl", "php"]
 

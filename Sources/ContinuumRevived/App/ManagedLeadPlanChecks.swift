@@ -200,7 +200,7 @@ enum ManagedLeadPlanChecks {
         legacy.removeValue(forKey: "leadPlanCollapsed")
         let old = try JSONDecoder().decode(AgentRecord.self, from: JSONSerialization.data(withJSONObject: legacy))
         try expect(!old.leadPlanCollapsed, "old record default is not expanded")
-        try expect(AgentReport.wordCount(ManagedLeadHookState.brief) <= 190 && ManagedLeadHookState.brief.contains("array_status"), "brief lacks plan or exceeds 190 words")
+        try expect(AgentReport.wordCount(ManagedLeadHookState.brief) <= 230 && ManagedLeadHookState.brief.contains("array_status"), "brief lacks plan or exceeds 230 words")
         print("Managed lead plan passed: production MCP/store/tile, bounds, self-only, live helper states/watchdog, urgency, image disclosure, relaunch, free/helper suppression, light/dark renders")
     }
 

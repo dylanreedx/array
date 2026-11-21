@@ -169,6 +169,16 @@ extension ProcessTableReader {
         now: Date = Date(),
         minimumAge: TimeInterval = AgentProcessAttribution.minimumJobAge
     ) -> [String: [AgentBackgroundJob]] {
+        agentScan(hostPid: hostPid, internalPathPrefixes: internalPathPrefixes, now: now, minimumAge: minimumAge).jobs
+    }
+
+    /// `agentJobs` plus the headless `claude -p` calls seen in the same sample.
+    public func agentScan(
+        hostPid: Int32 = getpid(),
+        internalPathPrefixes: [String],
+        now: Date = Date(),
+        minimumAge: TimeInterval = AgentProcessAttribution.minimumJobAge
+    ) -> (jobs: [String: [AgentBackgroundJob]], headlessCalls: [String: [String]]) {
         var samples = sample()
         let currentOwners = AgentProcessAttribution.owners(in: samples, hostPid: hostPid)
         for index in samples.indices {
@@ -192,8 +202,9 @@ extension ProcessTableReader {
             samples[index].listeningPorts = Self.listeningPorts(samples[index].pid)
                 .filter { !hostPorts.contains($0) }
         }
-        return AgentProcessAttribution.jobs(
-            in: samples, hostPid: hostPid, internalPathPrefixes: internalPathPrefixes, now: now, minimumAge: minimumAge)
+        return (AgentProcessAttribution.jobs(
+            in: samples, hostPid: hostPid, internalPathPrefixes: internalPathPrefixes, now: now, minimumAge: minimumAge),
+            AgentProcessAttribution.headlessClaudeCalls(in: samples, hostPid: hostPid))
     }
 }
 

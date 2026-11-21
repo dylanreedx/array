@@ -290,6 +290,40 @@ func runAgentCompactionUIChecks() async throws {
             throw Failure(description: "\(harness) stale automatic request compacted a new provider epoch")
         }
 
+        // A big window must not let a conversation grow to 90% of 1M: 310k of a
+        // 1M window compacts at the turn boundary; 250k does not.
+        for (used, expectCompact) in [(250_000, false), (310_000, true)] {
+            let capRoot = root.appendingPathComponent("cap-\(used)-\(harness.rawValue)")
+            let capRunner = CompactionScriptRunner()
+            let capSupervisor = AgentSupervisor(
+                store: AgentStore(applicationSupportDirectory: capRoot), makeRunner: { _ in capRunner },
+                submissionRecoveryStore: AgentComposerDraftStore(applicationSupportDirectory: capRoot, debounceInterval: 0))
+            capSupervisor.qaContextAutoCompactionThreshold = { 0.90 }
+            let capConfig = AgentModelConfig.resolvedFromDefaults(harness: harness)
+            let capID = capSupervisor.spawn(role: nil, prompt: nil, cwd: root,
+                harness: harness, model: capConfig.model, thinking: capConfig.thinking)
+            guard capSupervisor.send("cap seed", to: capID) else {
+                throw Failure(description: "\(harness) cap witness seed refused")
+            }
+            try await expectEventually("\(harness) cap witness seed did not settle") {
+                !capSupervisor.isRunning(capID) && capRunner.snapshotOperations() == ["run:cap seed"]
+            }
+            capSupervisor.qaDeliver(.contextWindowUpdated(threadId: "cap", snapshot: AgentContextWindowSnapshot(
+                usedTokens: used, maxTokens: 1_000_000, observedAt: Date(),
+                source: .providerSessionStats, freshness: .live)), to: capID)
+            if expectCompact {
+                try await expectEventually("\(harness) \(used) tokens of a 1M window did not compact at the 300k cap") {
+                    capRunner.snapshotOperations() == ["run:cap seed", "compact"]
+                }
+            } else {
+                try await Task.sleep(nanoseconds: 300_000_000)
+                guard capRunner.snapshotOperations() == ["run:cap seed"] else {
+                    throw Failure(description: "\(harness) \(used) tokens compacted below the 300k cap")
+                }
+            }
+            capSupervisor.stopAll()
+        }
+
         let recoveryRoot = root.appendingPathComponent("recovery-\(harness.rawValue)")
         let recoveryRunner = CompactionScriptRunner(firstTurnContextFull: true)
         let recoveryStore = AgentComposerDraftStore(applicationSupportDirectory: recoveryRoot, debounceInterval: 0)

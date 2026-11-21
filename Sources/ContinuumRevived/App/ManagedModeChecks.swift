@@ -193,7 +193,7 @@ enum ManagedModeChecks {
         let start: [String: Any] = ["hook_event_name": "SessionStart", "source": "startup", "session_id": "s"]
         if ProcessInfo.processInfo.environment["CONTINUUM_MANAGED_CHECK_SECTION"] != "budget" {
             let first = try await hook(b, managed, start)
-            try expect(first["additionalContext"] as? String == ManagedLeadHookState.brief && AgentReport.wordCount(ManagedLeadHookState.brief) <= 190 && ManagedLeadHookState.brief.contains("array_status"), "managed startup brief absent or too long")
+            try expect(first["additionalContext"] as? String == ManagedLeadHookState.brief && AgentReport.wordCount(ManagedLeadHookState.brief) <= 230 && ManagedLeadHookState.brief.contains("array_status") && ManagedLeadHookState.brief.contains("claude -p") && ManagedLeadHookState.brief.contains("Sonnet"), "managed startup brief absent, too long (cap 230: the usage practices cost ~45 words once per lead), or missing the usage practices")
             // The delivered brief tells the lead to use each tool it starts with loaded.
             let delivered = first["additionalContext"] as? String ?? ""
             // A lead ends its turn only when nothing is independent of its helpers, and says what it waits on.

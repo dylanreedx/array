@@ -1055,6 +1055,10 @@ final class AgentSupervisor {
     weak var processTracker: AgentProcessTracker? {
         didSet {
             processTracker?.onJobsEnded = { [weak self] agent, jobs in self?.idleWaker.jobsEnded(agent, jobs) }
+            processTracker?.onHeadlessCalls = { [weak self] agent, count in
+                guard let label = AgentProcessAttribution.headlessCallsLabel(count) else { return }
+                self?.appendAgentDiagnostics("headless claude calls=\(count) (\(label); counted, never blocked)", agentID: agent)
+            }
         }
     }
 
@@ -1742,7 +1746,7 @@ final class AgentSupervisor {
     private func requestAutomaticContextCompaction(after reading: AgentContextWindowSnapshot, for id: AgentID) {
         guard let threshold = contextAutoCompactionThreshold(),
               let used = reading.usedTokens, let max = reading.maxTokens, max > 0,
-              Double(used) / Double(max) >= threshold, reading.compacting != true,
+              AgentContextAutoCompactionPolicy.shouldCompact(used: used, max: max, threshold: threshold), reading.compacting != true,
               let record = records[id], automaticContextCompactionEpochs[id] != record.contextEpoch,
               !activeCompactionOperations.contains(id), !compactingAgents.contains(id),
               submissionRecoveryStore != nil else { return }
@@ -2703,6 +2707,12 @@ final class AgentSupervisor {
     }
 
     nonisolated static func claudeRunnerConfig(for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil) -> ClaudeAgentRunner.Config {
+        var config = claudeRunnerBaseConfig(for: record, workspaceMCP: workspaceMCP)
+        config.disableAutoMemory = HelperContextDiet.disablesClaudeAutoMemory(record)
+        return config
+    }
+
+    private nonisolated static func claudeRunnerBaseConfig(for record: AgentRecord, workspaceMCP: WorkspaceMCPConfiguration? = nil) -> ClaudeAgentRunner.Config {
         // B7.2 — a pending `/clear` rotation overrides the normal sessionId
         // choice entirely: this ONE launch resumes-and-forks the OLD session
         // (`record.pendingSessionForkFrom`) instead of continuing on

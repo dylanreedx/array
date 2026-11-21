@@ -45,6 +45,42 @@ enum AgentProcessTrackerChecks {
                    && CodexAgentRunner.childEnvironment(workspaceMCP: nil, processOwner: owners[2])[AgentProcessAttribution.ownerEnvironmentKey] == tag,
                    "the claude and codex child environments must carry the agent id")
 
+        // Headless `claude -p` calls from an agent's scripts are counted and shown,
+        // never blocked: the runner's own CLI (a child of the host, and what it
+        // execs into) and a plain interactive claude are not calls.
+        do {
+            let host: Int32 = 100, start = Date()
+            func sample(_ pid: Int32, _ parent: Int32, _ args: [String], tagged: Bool = false) -> ProcessSample {
+                ProcessSample(pid: pid, parentPid: parent, startedAt: start.addingTimeInterval(Double(pid)),
+                              executablePath: "/usr/local/bin/" + (args.first ?? "x"), arguments: args, ownerTag: tagged ? tag : nil)
+            }
+            let samples = [
+                sample(200, host, ["claude", "-p", "--output-format", "stream-json"], tagged: true), // the runner's CLI
+                sample(201, 200, ["claude", "--print"]),                                              // its exec'd child
+                sample(300, 200, ["zsh", "-c", "run.py"]),                                            // a tool shell
+                sample(301, 300, ["claude", "-p", "--no-session-persistence"]),
+                sample(302, 300, ["claude", "--print", "--model", "x"]),
+                sample(303, 300, ["claude", "--resume", "abc"]),                                      // not headless
+            ]
+            let found = AgentProcessAttribution.headlessClaudeCalls(in: samples, hostPid: host)
+            try expect(found[tag]?.count == 2, "exactly the two script calls count, not the runner CLI or an interactive claude: \(found)")
+            tracker.recordHeadlessCalls(found)
+            tracker.recordHeadlessCalls(found)
+            try expect(tracker.headlessCallCount(for: fixture.agentId) == 2, "a call seen on two scans counts once")
+            let roots = [fixture.tempRoot] + (ProcessInfo.processInfo.environment["CONTINUUM_APP_SUPPORT"].map { [URL(fileURLWithPath: $0)] } ?? [])
+            let logURLs = roots.flatMap { root in (FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)?
+                .compactMap { $0 as? URL } ?? []).filter { $0.lastPathComponent == "agent-diagnostics.log" } }
+            let log = logURLs.compactMap { try? String(contentsOf: $0, encoding: .utf8) }.joined()
+            try expect(log.contains("headless claude calls=2"), "the diagnostics line must carry the count")
+            _ = supervisor.setWorkspaceToolsEnabled(agentID: fixture.agentId, true)
+            let reply = fixture.api.dispatch(agentId: fixture.agentId, requestId: "headless-inspect", op: "agent.inspect",
+                                             payload: ["agentId": fixture.agentId.rawValue.uuidString])
+            guard case .result(let inspected) = reply,
+                  inspected["headlessCalls"]?.string == "ran 2 headless claude calls" else {
+                throw Failure(message: "agent.inspect must say how many headless claude calls the agent ran; got \(reply)")
+            }
+        }
+
         // 2. A stand-in CLI, launched with that environment, leaves listeners.
         let directory = fixture.tempRoot.appendingPathComponent("jobs", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

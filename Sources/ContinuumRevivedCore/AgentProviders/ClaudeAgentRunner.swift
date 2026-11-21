@@ -242,6 +242,10 @@ public final class ClaudeAgentRunner: @unchecked Sendable, AgentSessionPrewarmin
         public var hostInstructions: (@Sendable () -> String?)?
         /// A strict Managed lead's checkout (`ManagedStrictLead`); nil otherwise.
         public var strictWriteRoot: String?
+        /// Sets the CLI's own `CLAUDE_CODE_DISABLE_AUTO_MEMORY` for this process:
+        /// the personal memory index is not loaded. Delegated helpers only
+        /// (`HelperContextDiet.disablesClaudeAutoMemory`). Not an auth setting.
+        public var disableAutoMemory = false
 
         public init(
             model: String,
@@ -997,7 +1001,7 @@ public final class ClaudeAgentRunner: @unchecked Sendable, AgentSessionPrewarmin
                 // account the agent is pinned to and nothing inherited overrides it.
                 environment: Self.childEnvironment(
                     workspaceMCP: config.workspaceMCP, processOwner: config.processOwner,
-                    configDirectory: config.configDirectory),
+                    configDirectory: config.configDirectory, disableAutoMemory: config.disableAutoMemory),
                 currentDirectory: config.cwd,
                 standardInput: .pipe
             )
@@ -1111,9 +1115,11 @@ public final class ClaudeAgentRunner: @unchecked Sendable, AgentSessionPrewarmin
     /// claude's environment: every Bash call claude makes inherits that, and
     /// `env` printed the capability token into a transcript.
     public static func childEnvironment(
-        workspaceMCP: WorkspaceMCPConfiguration?, processOwner: String? = nil, configDirectory: String? = nil
+        workspaceMCP: WorkspaceMCPConfiguration?, processOwner: String? = nil, configDirectory: String? = nil,
+        disableAutoMemory: Bool = false
     ) -> [String: String] {
         var environment = PiAgentRunner.childEnvironment(processOwner: processOwner)
+        if disableAutoMemory { environment["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1" }
         if let configDirectory, !configDirectory.isEmpty {
             environment["CLAUDE_CONFIG_DIR"] = configDirectory
         } else {

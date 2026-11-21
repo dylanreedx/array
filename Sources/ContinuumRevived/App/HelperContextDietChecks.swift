@@ -287,6 +287,26 @@ enum HelperContextDietChecks {
             try WorkspaceAgentReportChecks.expect(HelperContextDiet.status(for: unsupported)?.automaticSkillDiscovery == "unsupported"
                 && HelperContextDiet.arguments(for: unsupported).isEmpty, "unsupported harness must not receive a speculative override")
         }
+        // A delegated Claude helper launches with the CLI's own memory switch (same
+        // on resume: the config is rebuilt from the record); its lead keeps memory,
+        // and nothing about login changes.
+        do {
+            func launchEnvironment(_ record: AgentRecord) -> [String: String] {
+                let config = AgentSupervisor.claudeRunnerConfig(for: record)
+                return ClaudeAgentRunner.childEnvironment(workspaceMCP: nil, processOwner: config.processOwner,
+                    configDirectory: config.configDirectory, disableAutoMemory: config.disableAutoMemory)
+            }
+            var claudeHelper = restored
+            claudeHelper.harness = .claudeCode
+            var claudeLead = claudeHelper
+            claudeLead.parentAgentID = nil
+            claudeLead.delegationContext = nil
+            let helperEnvironment = launchEnvironment(claudeHelper)
+            try WorkspaceAgentReportChecks.expect(helperEnvironment["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1", "delegated claude helper must launch without personal memory")
+            try WorkspaceAgentReportChecks.expect(launchEnvironment(claudeLead)["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == nil, "lead keeps its memory")
+            try WorkspaceAgentReportChecks.expect(helperEnvironment["ANTHROPIC_API_KEY"] == launchEnvironment(claudeLead)["ANTHROPIC_API_KEY"],
+                "the memory switch must not touch credentials")
+        }
         try await AgentPresenceChecks.eventually("helper did not settle", timeout: 15) { !b.supervisor.isRunning(child) }
         try WorkspaceAgentReportChecks.expect(restored.delegationContext?.contract?.decisions == ["KEEP-PROJECT-HAZARD"], "contract retained")
         try WorkspaceAgentReportChecks.expect(b.supervisor.send("DIET-RETRY-HOLD", to: child), "resume refused")

@@ -318,6 +318,9 @@ public struct AgentInspectResponse: Codable, Equatable, Sendable {
     public var liveness: HelperLivenessFact?
     /// Stored launch policy and explicit unknown/unsupported scope.
     public var contextDiet: HelperContextDietStatus?
+    /// "ran 12 headless claude calls": `claude -p` processes this agent's scripts
+    /// started, which spend the account with no transcript. Absent when none seen.
+    public var headlessCalls: String?
 
     public init(
         agent: AgentProjectionIdentity, isCaller: Bool, lastActivityAt: Date, latestPromptAt: Date?,

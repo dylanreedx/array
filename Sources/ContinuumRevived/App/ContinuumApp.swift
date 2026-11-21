@@ -19310,7 +19310,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         tracker.agentDetail = { [weak self] agent in
             guard let record = self?.agentSupervisor.records[agent] else { return nil }
             let folder = ((record.projectRoot ?? record.cwd) as NSString).lastPathComponent
-            return [record.harness?.rawValue, folder.isEmpty ? nil : folder, record.worktreeBranch]
+            return [record.harness?.rawValue, folder.isEmpty ? nil : folder, record.worktreeBranch,
+                    AgentProcessAttribution.headlessCallsLabel(self?.agentProcessTracker.headlessCallCount(for: agent) ?? 0)]
                 .compactMap { $0 }.joined(separator: " · ")
         }
         tracker.openURL = { [weak self] url, agent in
