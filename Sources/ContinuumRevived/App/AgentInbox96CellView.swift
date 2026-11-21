@@ -726,6 +726,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// Whether this row draws the icon plate instead of the classic fold glyph.
     static var leadPlateOn: Bool { InboxLeadIconVariant.current != .off && AgentCharacterController.shared.isEnabled }
     private var showsLeadPlate = false
+    var leadPlateShownForQA: Bool { showsLeadPlate && !leadPlate.isHidden }
+    var leadPlateForQA: InboxLeadIconPlate { leadPlate }
+    var foldGlyphVisibleForQA: Bool { !disclosureButton.isHidden && disclosureButton.alphaValue > 0.5 }
     var leadPlateStateForQA: String { "shows=\(showsLeadPlate) hidden=\(leadPlate.isHidden) frame=\(leadPlate.frame) alpha=\(disclosureButton.alphaValue)" }
     var onToggleDisclosure: (() -> Void)?
     private let settleNudge = InboxSettleNudgeButton(frame: .zero)
@@ -933,7 +936,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// Whether motion is allowed. Injected rather than read from the system here so
     /// the QA seam the list already owns (`AgentInboxView.prefersReducedMotion`) can
     /// drive it, and so a check can render both branches.
-    private let prefersReducedMotion: () -> Bool
+    var prefersReducedMotion: () -> Bool
     /// Whether hover may MOVE anything (the deck breathe). Set by the list to
     /// its own preference, which production reads from the system on every
     /// hover; the fill still cross-fades either way.

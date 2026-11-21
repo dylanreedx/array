@@ -3527,6 +3527,19 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        // 0.7.59: the Halo default, with no env override set.
+        if CommandLine.arguments.contains("--sidebar-halo-default-check") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    print(try SidebarHaloDefaultChecks.run())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL sidebar halo default: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
         // Design round only: the lead's icon as its fold control.
         if CommandLine.arguments.contains("--sidebar-lead-icon-round") {
             _ = NSApplication.shared

@@ -4667,6 +4667,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         if !keepsContent { configureHoverActions(on: cell, for: model) }
         if let redesigned = cell as? AgentInbox96CellView {
             redesigned.reducesHoverMotion = { [weak self] in self?.prefersReducedMotion() ?? false }
+            redesigned.prefersReducedMotion = redesigned.reducesHoverMotion
             redesigned.workspaceMarkColour = marksWorkspaces
                 ? model.workspaceId.map { workspaceColour($0).withAlphaComponent(0.85) } : nil
             redesigned.setPeekAlpha(

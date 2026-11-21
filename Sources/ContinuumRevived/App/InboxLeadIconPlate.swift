@@ -3,20 +3,20 @@ import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import QuartzCore
 
-/// DESIGN ROUND ONLY (array/sidebar-character-expander). Never merged as is.
+/// 0.7.59 Halo sidebar. Default on whenever agent icons are enabled.
 ///
 /// A lead row's agent icon, moved to the row's leading edge and made the fold
 /// control. It is the tile header's own renderer — `TileAgentBubbleLayer` around a
 /// `CharacterSpriteLayer`, in the tile's chosen Inline / Squircle / Orb / Minimal
 /// plate — not a new drawing. With agent icons off the classic fold control stays.
 ///
-/// The temporary QA switch is `ARRAY_SIDEBAR_LEAD_ICON` = `settle` | `halo` | `lift`
-/// (anything else is off). Each is one motion for the same click.
+/// `ARRAY_SIDEBAR_LEAD_ICON` = `off` | `settle` | `halo` | `lift` is a QA override
+/// only; unset means `halo`. Each is one motion for the same click.
 enum InboxLeadIconVariant: String {
     case off, settle, halo, lift
 
     @MainActor static var current: InboxLeadIconVariant = {
-        ProcessInfo.processInfo.environment["ARRAY_SIDEBAR_LEAD_ICON"].flatMap(InboxLeadIconVariant.init(rawValue:)) ?? .off
+        ProcessInfo.processInfo.environment["ARRAY_SIDEBAR_LEAD_ICON"].flatMap(InboxLeadIconVariant.init(rawValue:)) ?? .halo
     }()
 
     static let expandDuration: CFTimeInterval = 0.32
@@ -41,6 +41,8 @@ final class InboxLeadIconPlate: NSView {
     /// The helper count, on the plate's lower right corner.
     private let badge = NSTextField(labelWithString: "")
     private static let badgeFont = NSFont.monospacedDigitSystemFont(ofSize: 9, weight: .semibold)
+    var animationKeysForQA: [String] { (host.animationKeys() ?? []) + (halo.animationKeys() ?? []) }
+    var haloStrokeEndForQA: CGFloat { halo.strokeEnd }
     var badgeText: String { badge.isHidden ? "" : badge.stringValue }
 
     /// One record per parent: a fold rebuilds cells, so the motion's clock is the
