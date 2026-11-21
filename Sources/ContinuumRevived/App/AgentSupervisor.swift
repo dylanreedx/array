@@ -8163,7 +8163,12 @@ final class AgentSupervisor {
         }
         helperFoldEligibleSince[id] = nil
         var status = status
-        if status.plan == nil { status.plan = record.declaredStatus?.plan }
+        if status.plan == nil {
+            status.plan = record.declaredStatus?.plan
+            // The plan was not rewritten, so it keeps its own age; records from
+            // before `planDeclaredAt` fall back to their last status time.
+            if status.plan != nil { status.planDeclaredAt = record.declaredStatus?.planDeclaredAt ?? record.declaredStatus?.declaredAt }
+        }
         record.declaredStatus = status
         guard persist(record) else { return false }
         onSelfReportChanged?(id)
@@ -11352,7 +11357,9 @@ final class AgentSupervisor {
         if first {
             task.plan = plan; chooserRequests[id] = task
             let previous = record.declaredStatus
-            guard declareStatus(.init(now: plan.line, next: previous?.next, needsYou: previous?.needsYou, plan: previous?.plan, declaredAt: Date()), for: id) else {
+            guard declareStatus(.init(now: plan.line, next: previous?.next, needsYou: previous?.needsYou, plan: previous?.plan, declaredAt: Date(),
+                                      planDeclaredAt: previous?.plan == nil ? nil : (previous?.planDeclaredAt ?? previous?.declaredAt),
+                                      options: previous?.options), for: id) else {
                 task.plan = nil; chooserRequests[id] = task
                 return .failure(.init(code: .durabilityFailed, message: "The visible choice could not be saved."))
             }

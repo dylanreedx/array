@@ -721,6 +721,12 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     static let subagentTitleFont = NSFont.systemFont(ofSize: Typography.style(for: .body).size)
     private let jumpHint = InboxJumpHintView()
     private let disclosureButton = InboxSwarmFoldControl(frame: .zero)
+    /// Design round: the lead's agent icon as its fold control (`InboxLeadIconPlate`).
+    private let leadPlate = InboxLeadIconPlate(frame: .zero)
+    /// Whether this row draws the icon plate instead of the classic fold glyph.
+    static var leadPlateOn: Bool { InboxLeadIconVariant.current != .off && AgentCharacterController.shared.isEnabled }
+    private var showsLeadPlate = false
+    var leadPlateStateForQA: String { "shows=\(showsLeadPlate) hidden=\(leadPlate.isHidden) frame=\(leadPlate.frame) alpha=\(disclosureButton.alphaValue)" }
     var onToggleDisclosure: (() -> Void)?
     private let settleNudge = InboxSettleNudgeButton(frame: .zero)
     private var onSettleNudge: (() -> Void)?
@@ -1121,6 +1127,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         card.addSubview(titleShimmer)
         card.addSubview(pulseDots)
 
+        card.addSubview(leadPlate)
+        leadPlate.isHidden = true
         disclosureButton.target = self
         disclosureButton.action = #selector(disclosureClicked)
         disclosureButton.prefersReducedMotion = prefersReducedMotion
@@ -1267,6 +1275,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// cannot disagree.
     static func disclosureTrailing(for disclosure: RowDisclosure, childCount: Int) -> CGFloat {
         guard disclosure != .none else { return 0 }
+        if leadPlateOn { return InboxSwarmFoldControl.glyphCentreX + InboxLeadIconPlate.side / 2 }
         return InboxSwarmFoldControl.width(childCount: childCount)
     }
 
@@ -1375,6 +1384,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         guard let row = shown?.row,
               let atlas = controller.atlas(for: row.id, appearance: AgentCharacterController.appearance(of: self),
                                            name: row.characterName) else {
+            releaseLeadPlate()
             if characterSize != nil {
                 characterSize = nil
                 sprite.clear()
@@ -1386,18 +1396,87 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             state: Self.showsWorkingGlyph(row, rollup: shown?.rollup) ? .working : row.state,
             attention: row.attention, activity: row.characterActivity ?? .init(),
             title: row.title, allowsMotion: !prefersReducedMotion())
-        sprite.show(controller.plan(for: snapshot, now: now), sprite: atlas,
+        let plan = controller.plan(for: snapshot, now: now)
+        let plateOn = Self.leadPlateOn && !isSubagentRow
+        if plateOn {
+            sprite.clear()
+            if !showsLeadPlate { showsLeadPlate = true; needsLayout = true }
+            disclosureButton.alphaValue = 0
+            let tint = row.identityColor.map(AgentInboxView.identityDotColour(named:))
+            leadPlate.show(plan: plan, atlas: atlas, phase: controller.phase(for: row.id), now: now, tint: tint,
+                           working: snapshot.state == .working, workingPhase: InboxOwnershipClock.phase(for: row.id),
+                           reduceMotion: { [weak self] in self?.prefersReducedMotion() ?? false })
+            leadPlate.setCount(shown?.disclosure == RowDisclosure.none ? 0 : (shown?.rollup?.children ?? 0))
+            disclosureButton.onPointerChange = { [weak self] inside in
+                self?.leadPlate.setHovered(inside, variant: InboxLeadIconVariant.current)
+            }
+            leadPlate.setExpanded(shown?.disclosure == .expanded, parent: row.id, variant: InboxLeadIconVariant.current,
+                                  animated: !prefersReducedMotion())
+            if characterSize != nil { characterSize = nil; needsLayout = true }
+            return
+        }
+        releaseLeadPlate()
+        sprite.show(plan, sprite: atlas,
                     phase: controller.phase(for: row.id), now: now)
         // Plan 110 › size: a lead's character takes the size setting, at a whole
         // number of device pixels per art pixel. A subagent's one-line 20 pt row
         // inside its lead's card keeps the small one, as transcript chips do.
-        let size = controller.spriteSize(of: atlas, backingScale: metadataRasterScale,
+        var size = controller.spriteSize(of: atlas, backingScale: metadataRasterScale,
                                          size: isSubagentRow ? .small : nil)
+        if haloHelperIcon, size.height > 0 {
+            let k = min(Self.haloHelperIconHeight / size.height, Self.haloHelperColumn / max(size.width, 1))
+            size = NSSize(width: (size.width * k).rounded(), height: (size.height * k).rounded())
+        }
         if characterSize != size {
             characterSize = size
             needsLayout = true
         }
         reconcileCharacterVisibility()
+        applyHaloHelperMotion()
+    }
+
+    /// Halo: a resting helper (no helpers of its own) shows its plain character
+    /// where its dots would be, a little bigger; working rows keep dots + right icon.
+    private var haloHelperIcon: Bool {
+        guard Self.leadPlateOn, isSubagentRow else { return false }
+        return (shown?.disclosure ?? RowDisclosure.none) == RowDisclosure.none
+    }
+    private static let haloHelperIconHeight: CGFloat = 14
+    /// Fixed leading column for a helper's icon, so every helper title starts at one x.
+    private static let haloHelperColumn: CGFloat = 24
+
+    /// Working = a soft bob and breath on the icon itself (no dots); failed = muted.
+    /// Static under Reduce Motion, and still while the cell is paused or hidden.
+    private func applyHaloHelperMotion() {
+        let layer = decorations.characterLayer
+        let key = "haloWorking"
+        let state = shown?.row.state
+        let on = haloHelperIcon && characterSize != nil
+        layer.opacity = on && state == .failed ? 0.5 : 1
+        let visible = window.map { AgentCharacterController.shared.windowIsVisible($0) } ?? false
+        let moving = on && state == .working && !prefersReducedMotion() && visible && !isHiddenOrHasHiddenAncestor
+        guard moving else { layer.removeAnimation(forKey: key); return }
+        guard layer.animation(forKey: key) == nil else { return }
+        let bob = CABasicAnimation(keyPath: "transform.translation.y")
+        bob.fromValue = -1; bob.toValue = 1
+        let breath = CABasicAnimation(keyPath: "opacity")
+        breath.fromValue = 1; breath.toValue = 0.7
+        let group = CAAnimationGroup()
+        group.animations = [bob, breath]
+        group.duration = 0.9
+        group.autoreverses = true
+        group.repeatCount = .infinity
+        group.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        layer.add(group, forKey: key)
+    }
+
+    private func releaseLeadPlate() {
+        guard showsLeadPlate || !leadPlate.isHidden || disclosureButton.alphaValue != 1 else { return }
+        showsLeadPlate = false
+        disclosureButton.onPointerChange = nil
+        leadPlate.hide()
+        disclosureButton.alphaValue = 1
+        needsLayout = true
     }
 
     /// Hold the character still while nobody can see it: out of a window, under a
@@ -1405,6 +1484,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     func reconcileCharacterVisibility() {
         let visible = window.map { AgentCharacterController.shared.windowIsVisible($0) } ?? false
         decorations.characterLayer.setPaused(!visible || isHiddenOrHasHiddenAncestor)
+        leadPlate.setPaused(!visible || isHiddenOrHasHiddenAncestor)
+        applyHaloHelperMotion()
     }
 
     override func viewDidHide() {
@@ -2266,6 +2347,22 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                                                    width: width, height: card.bounds.height - inset * 2))
             disclosureButton.glyphCentreY = l1 - inset
             x = InboxOwnershipChrome.foldX + width + 6
+            if showsLeadPlate {
+                // The icon is the control: centred on the connector lane, mid-card.
+                let side = InboxLeadIconPlate.side
+                leadPlate.frame = inCard(NSRect(x: InboxOwnershipChrome.laneX - side / 2,
+                                                y: snapped((card.bounds.height - side) / 2),
+                                                width: side, height: side))
+                x += 2
+            }
+        } else if showsLeadPlate {
+            // No helpers: the same gutter, so every title starts at one x.
+            let trailing = InboxSwarmFoldControl.glyphCentreX + InboxLeadIconPlate.side / 2
+            let side = InboxLeadIconPlate.side
+            leadPlate.frame = inCard(NSRect(x: InboxOwnershipChrome.laneX - side / 2,
+                                            y: snapped((card.bounds.height - side) / 2),
+                                            width: side, height: side))
+            x = InboxOwnershipChrome.foldX + trailing + 6 + 2
         }
         if let name = shown.row.identityColor {
             let side = AgentInboxView.identityDotSide
@@ -2444,7 +2541,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         settleNudge.frame = .zero
         statusGlyph.isHidden = true
         let dots = InboxPulseDotsView.size
-        pulseDots.frame = inCard(NSRect(x: x0 - 1, y: snapped(mid - dots.height / 2), width: dots.width, height: dots.height))
+        let leftIcon = haloHelperIcon && characterSize != nil
+        pulseDots.frame = leftIcon ? .zero
+            : inCard(NSRect(x: x0 - 1, y: snapped(mid - dots.height / 2), width: dots.width, height: dots.height))
         var actionsLeft = right
         if !hoverPopOut.isHidden || !hoverStop.isHidden {
             var cx = right
@@ -2497,7 +2596,11 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         }
         // Plan 110: a helper's character, just left of its mark while it rests;
         // the hover controls take both places.
-        if let size = characterSize {
+        if leftIcon, let size = characterSize {
+            decorations.setCharacterSlot(
+                NSRect(x: x0 + 2 + ((Self.haloHelperColumn - size.width) / 2).rounded(),
+                       y: snapped(mid - size.height / 2), width: size.width, height: size.height))
+        } else if let size = characterSize {
             let gap = decorations.mark == nil ? 7 : Self.characterGap
             decorations.setCharacterSlot(showsResting
                 ? NSRect(x: right - restingWidth - gap - size.width,
@@ -2508,7 +2611,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         }
         let used = restingWidth
         defer { fadeTextUnderActions(leftEdge: actionsLeft) }
-        let titleX = x0 + 14
+        let titleX = x0 + 14 + (Self.leadPlateOn ? Self.haloHelperColumn - 8 : 0)
         let titleMax = max(0, right - used - 12 - titleX)
         let titleNatural = Self.width(of: titleLabel)
         place(titleLabel, x: titleX, centre: mid, width: min(titleNatural, titleMax))

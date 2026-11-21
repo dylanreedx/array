@@ -863,6 +863,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             guard let self, let supervisor, let record = supervisor.records[agentID] else { return }
             _ = supervisor.setLeadPlanCollapsed(!record.leadPlanCollapsed, for: agentID)
         }
+        leadPlanView.onRevealOwner = { [weak self] helperID in self?.onRevealAgent?(helperID, agentID) }
+        leadPlanView.onChoose = { [weak self] answer in self?.v2Composer?.acceptDecisionAnswer(answer) }
         refreshLeadPlan()
         followsSupervisorPresence = true
         backgroundJobsObserver = NotificationCenter.default.addObserver(

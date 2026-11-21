@@ -1828,6 +1828,10 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     /// does: the observer fires, the draft is journaled, and the send path sees
     /// nothing special. Deliberately does NOT send: the user presses send, and a
     /// wrongly-detected chip costs them a word to delete, not a turn.
+    /// A lead's offered answer to its own `needsYou`, chosen on the plan drawer.
+    /// Same rule as a reply chip: it lands in the editor, and the user sends it.
+    func acceptDecisionAnswer(_ answer: String) { acceptReplyOption(answer) }
+
     private func acceptReplyOption(_ option: String) {
         let fullRange = NSRange(location: 0, length: (textView.string as NSString).length)
         textView.insertCompletion(option, replacementRange: fullRange)
