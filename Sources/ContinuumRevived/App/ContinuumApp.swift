@@ -9087,7 +9087,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             .map { ChoiceItem(id: "writer-" + $0.id.rawValue.uuidString, title: "Give control to " + $0.displayName) } : []
         view.setAgentControl(name: record?.displayName ?? "Agent",
             colour: record?.identityColor.map { ZoneChromeNSView.color(named: $0) }, engaged: engaged, userDriving: userDriving,
-            takeControl: { [weak self] in self?.workspaceAPI.takeBackBrowser(tileId: tileId) },
+            takeControl: { [weak self] in self?.workspaceAPI.takeBackBrowser(tileId: tileId, explicit: true) },
             returnToAgent: canvasView?.tileRecord(for: tileId)?.metadata.browserControllingAgentId == agentId ? { [weak self] in _ = self?.workspaceAPI.returnBrowserToAgent(tileId: tileId, agentId: agentId) } : nil,
             writerChoices: writerChoices,
             transferWriter: { [weak self] selection in
@@ -11513,6 +11513,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             workspaceAPI.browserLeaseLedger?.release(tileId: id)
             workspaceAPI.browserHandOvers[id] = nil
             workspaceAPI.browserUserTakenOver.remove(id)
+            workspaceAPI.browserUserHolds.remove(id)
             workspaceAPI.clearBrowserAudit(for: id)
             workspaceAPI.browserGateInstallations[id] = nil
             if let owner, let runtime = owner.browserRuntimes.first(where: { $0.tileId == id }) {

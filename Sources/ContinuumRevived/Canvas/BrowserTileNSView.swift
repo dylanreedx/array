@@ -122,6 +122,7 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         profileMenuButton.translatesAutoresizingMaskIntoConstraints = false
 
         agentControlButton.translatesAutoresizingMaskIntoConstraints = false
+        agentControlButton.identifier = BrowserAutomation.controlChipIdentifier
 
         urlField.delegate = self
         urlField.translatesAutoresizingMaskIntoConstraints = false
