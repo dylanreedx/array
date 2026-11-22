@@ -541,7 +541,9 @@ final class InboxDisplayLatest: @unchecked Sendable {
 }
 
 /// Runs one build on the serial queue, skipping it when a newer request has
-/// already been made, and hands the answer to main.
+/// already been made, and hands the answer to main. A build that started is
+/// always delivered: discarding it because a newer request arrived meanwhile
+/// meant a push stream faster than one build never delivered anything.
 nonisolated enum InboxDisplayHandoff {
     static func run(
         _ inputs: InboxDisplayInputs, generation: Int, latest: InboxDisplayLatest, queue: DispatchQueue,
@@ -550,7 +552,6 @@ nonisolated enum InboxDisplayHandoff {
         queue.async {
             guard latest.current == generation else { return }
             let model = InboxDisplayBuilder.build(inputs)
-            guard latest.current == generation else { return }
             let box = UncheckedModel(model)
             DispatchQueue.main.async { MainActor.assumeIsolated { deliver(box.model) } }
         }

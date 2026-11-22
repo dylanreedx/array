@@ -2531,9 +2531,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// push itself only hands the snapshot to the queue.
     private(set) var qaOffMainSwapNanos: UInt64 = 0
 
+    /// Builds requested at or before this generation belong to a push a synchronous
+    /// render already replaced; their answers are never applied.
+    private var offMainFloor = 0
+
     private func cancelOffMainApply() {
         pendingOffMain = nil
-        _ = offMainLatest.next()
+        offMainFloor = offMainLatest.next()
     }
 
     private func enqueueOffMainApply(
@@ -2566,13 +2570,42 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
         historyReuseHint = nil
         let generation = offMainLatest.next()
         let latest = offMainLatest
+        let built = (rows: pending.rows, epoch: pending.epoch)
         InboxDisplayHandoff.run(inputs, generation: generation, latest: latest, queue: Self.displayQueue) { [weak self] model in
-            self?.offMainModelReady(model, generation: generation)
+            self?.offMainModelReady(model, generation: generation, built: built)
         }
     }
 
-    private func offMainModelReady(_ model: InboxDisplayModel, generation: Int) {
-        guard generation == offMainLatest.current, var pending = pendingOffMain else { return }
+    /// A finished build is applied even when a newer push arrived while it ran.
+    /// Throwing it away for the newer one starved the list: agents streaming
+    /// faster than one build meant no swap ever landed, so a deleted row stayed
+    /// drawn and a fold re-rendered from rows that were already gone. The older
+    /// answer goes on screen now; the newer push stays pending and follows it.
+    private func offMainModelReady(
+        _ model: InboxDisplayModel, generation: Int, built: (rows: [AgentInboxRow], epoch: Int)
+    ) {
+        guard generation > offMainFloor, var pending = pendingOffMain else { return }
+        guard generation == offMainLatest.current else {
+            // A newer build is coming. An older answer built from view state that
+            // has since moved adds nothing to it, and one arriving during a camera
+            // gesture waits for it like any swap, up to the same cap.
+            guard built.epoch == displayEpoch else { return }
+            if holdsDisplaySwap() {
+                let now = ProcessInfo.processInfo.systemUptime
+                let started = pending.holdStartedAt ?? now
+                if now - started < Self.offMainHoldCap {
+                    pending.holdStartedAt = started
+                    pendingOffMain = pending
+                    return
+                }
+            }
+            qaOffMainSwapCount += 1
+            let started = DispatchTime.now().uptimeNanoseconds
+            applyNow(rows: built.rows, changed: pending.changed,
+                     chatterPatchedAgentIDs: pending.chatterPatchedAgentIDs, model: model)
+            qaOffMainSwapNanos += DispatchTime.now().uptimeNanoseconds - started
+            return
+        }
         if holdsDisplaySwap() {
             let now = ProcessInfo.processInfo.systemUptime
             let started = pending.holdStartedAt ?? now
@@ -2580,7 +2613,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 pending.holdStartedAt = started
                 pendingOffMain = pending
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-                    self?.offMainModelReady(model, generation: generation)
+                    self?.offMainModelReady(model, generation: generation, built: built)
                 }
                 return
             }
@@ -8042,6 +8075,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// intentionally a visibility seam rather than a raw clip offset: an
     /// incremental height change must preserve the content anchor the person was
     /// looking at, not merely leave the scroll view's numeric origin untouched.
+    /// The agents whose cells the table actually holds in its viewport, read off
+    /// the live row views rather than the row model: what the person can see.
+    var drawnAgentIdsForQA: [UUID] {
+        let visible = tableView.rows(in: tableView.visibleRect)
+        guard visible.length > 0 else { return [] }
+        return (visible.location..<NSMaxRange(visible)).compactMap { row -> UUID? in
+            guard let raw = tableView.view(atColumn: 0, row: row, makeIfNecessary: false)?.identifier?.rawValue,
+                  raw.hasPrefix("agent-inbox-row-") else { return nil }
+            return UUID(uuidString: String(raw.dropFirst("agent-inbox-row-".count).prefix(36)))
+        }
+    }
+
     var visibleAgentIdsForQA: [UUID] {
         let visibleRect = scrollView.contentView.convert(
             scrollView.contentView.bounds, to: tableView)
