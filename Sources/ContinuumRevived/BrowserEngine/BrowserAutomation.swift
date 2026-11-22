@@ -119,6 +119,9 @@ final class BrowserAutomation {
     static let evaluateResultCap = 64 * 1_024
     /// A type waits this long after the user's last key in the tile.
     static let userTypingQuiet: TimeInterval = 1.0
+    /// A takeover the user started by using the tile ends after this long
+    /// without input, even with keyboard focus still in the tile.
+    static let userIdleHandback: TimeInterval = 15
     static let maxWait: TimeInterval = 30
 
     private weak var runtime: WKWebViewBrowserRuntime?
@@ -181,6 +184,7 @@ final class BrowserAutomation {
     var _duringAgentClickForChecks: (() -> Void)?
     var _afterAgentCharacterForChecks: (() -> Void)?
     private(set) var lastUserKeyAt: Date?
+    private(set) var lastUserInputAt: Date?
     private var inputSurfaceIds: Set<ObjectIdentifier> = []
     private var agentDeliveryDepth = 0
     private struct AgentInputFingerprint: Hashable {
@@ -249,6 +253,10 @@ final class BrowserAutomation {
         isEngaged = false
         deliveryWindow = nil
     }
+
+    /// The tile's own control chip. Pressing it chooses who drives; counting
+    /// that press as use of the tile took control before the menu opened.
+    static let controlChipIdentifier = NSUserInterfaceItemIdentifier("array.browser.agent-control")
 
     /// Include the tile chrome as well as the web view in takeover detection.
     func trackInputSurface(_ surface: NSView) {
@@ -992,17 +1000,33 @@ final class BrowserAutomation {
             }
         }
         while let current = view {
+            if current.identifier == controlChipIdentifier { return }
             if let engine = registry[ObjectIdentifier(current)]?.engine {
                 guard engine.agentDeliveryDepth == 0 || engine.supportsFocusFreeInput else { return }
                 engine.suppressionInterrupted = true
                 engine.setResponderSuppression(false)
                 engine.userInputCount += 1
+                engine.lastUserInputAt = Date()
                 if event.type == .keyDown { engine.lastUserKeyAt = Date() }
                 engine.onUserInput?()
                 return
             }
             view = current.superview
         }
+    }
+
+    /// The handback rule's test: the user has stopped using this tile when
+    /// they have made no input in it for `userTypingQuiet` and keyboard focus
+    /// is outside it, or no input for `userIdleHandback` wherever focus is.
+    func userHasLeftTile(surface: NSView?) -> Bool {
+        guard let last = lastUserInputAt else { return true }
+        let quiet = Date().timeIntervalSince(last)
+        if quiet >= Self.userIdleHandback { return true }
+        guard quiet >= Self.userTypingQuiet else { return false }
+        guard let focus = webView.window?.firstResponder as? NSView else { return true }
+        let focusInTile = focus === webView || focus.isDescendant(of: webView)
+            || surface.map { focus === $0 || focus.isDescendant(of: $0) } == true
+        return !focusInTile
     }
 
     private func waitForUserQuiet(deadline: Date) async throws {

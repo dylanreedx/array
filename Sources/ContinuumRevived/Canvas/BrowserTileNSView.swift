@@ -122,6 +122,7 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
         profileMenuButton.translatesAutoresizingMaskIntoConstraints = false
 
         agentControlButton.translatesAutoresizingMaskIntoConstraints = false
+        agentControlButton.identifier = BrowserAutomation.controlChipIdentifier
 
         urlField.delegate = self
         urlField.translatesAutoresizingMaskIntoConstraints = false
@@ -600,6 +601,7 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
     }
 
     var qaAgentControlItems: [String] { agentControlButton.items.map(\.id) }
+    var qaAgentControlButton: ChoiceButton { agentControlButton }
 
     func qaChooseAgentControl(_ id: String) {
         guard let item = agentControlButton.items.first(where: { $0.id == id }) else { return }

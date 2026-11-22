@@ -108,8 +108,10 @@ extension WorkspaceAPIService {
         case .success(let target): tile = target
         }
         guard tile.metadata.browserControllingAgentId == nil || (!browserUserTakenOver.contains(tileId) && tile.metadata.browserControlPaused != true) else {
-            return .failure(WorkspaceAPIError(code: .targetConflict,
-                message: "The user has control. Wait for Return to agent in this tile, then take a fresh snapshot. Do not retry mutations.",
+            let message = browserUserHolds.contains(tileId)
+                ? "The user took control of this browser. Wait for Return to agent in this tile, then take a fresh snapshot. Do not retry mutations."
+                : "The user is using this browser. Control returns when they stop (focus leaves the tile, or \(Int(BrowserAutomation.userIdleHandback)) s without input) or press Return to agent. Wait, then take a fresh snapshot before acting."
+            return .failure(WorkspaceAPIError(code: .targetConflict, message: message,
                 action: BrowserActionResult(state: .takeover, effects: .none, retry: .waitForHandback, freshSnapshotRequired: true)))
         }
         if let owner = tile.metadata.browserControllingAgentId {
@@ -207,15 +209,18 @@ extension WorkspaceAPIService {
         browser.automation.invalidateDocumentIdentity()
         browser.automation.onUserInput = { [weak self] in self?.takeBackBrowser(tileId: tileId) }
         browserUserTakenOver.remove(tileId)
+        browserUserHolds.remove(tileId)
         browserNeedsHandbackSnapshot.insert(tileId)
         browserControlPresentation?(tileId, next, false, false)
         return true
     }
 
+    /// An action already running when the user took over keeps running either
+    /// way, so it must not block Return: the document fence and the snapshot
+    /// requirement below already stop its stale intent from continuing.
     @discardableResult
     func returnBrowserToAgent(tileId: UUID, agentId: AgentID) -> Bool {
-        guard !browserActionQueue.isActive(tileId: tileId),
-              let canvas = canvasProvider(), var tile = canvas.tileRecord(for: tileId),
+        guard let canvas = canvasProvider(), var tile = canvas.tileRecord(for: tileId),
               tile.metadata.browserControllingAgentId == agentId,
               let browser = liveBrowser(tileId: tileId),
               let zone = canvas.installedZoneIds(containing: tileId).first,
@@ -231,13 +236,31 @@ extension WorkspaceAPIService {
         }
         browser.automation.invalidateDocumentIdentity()
         browserUserTakenOver.remove(tileId)
+        browserUserHolds.remove(tileId)
         browserNeedsHandbackSnapshot.insert(tileId)
         browser.automation.onUserInput = { [weak self] in self?.takeBackBrowser(tileId: tileId) }
-        browserControlPresentation?(tileId, agentId, false, false)
+        // The lease touch above may already have presented the agent as
+        // driving; presenting "not engaged" over it hid Take control.
+        browserControlPresentation?(tileId, agentId, browser.automation.isEngaged, false)
         return true
     }
 
-    func takeBackBrowser(tileId: UUID) {
+    /// The handback rule. A takeover by ordinary input ends once the user has
+    /// stopped using the tile (`BrowserAutomation.userHasLeftTile`); the
+    /// owning agent's next browser call then hands back exactly as Return to
+    /// agent does, so a mutation still needs a fresh snapshot first. Take
+    /// control is a deliberate hold and waits for Return to agent.
+    @discardableResult
+    func resumeBrowserIfUserLeft(tileId: UUID, agentId: AgentID) -> Bool {
+        guard !browserUserHolds.contains(tileId),
+              browserUserTakenOver.contains(tileId) || observedBrowserTile(tileId)?.metadata.browserControlPaused == true,
+              let browser = liveBrowser(tileId: tileId),
+              browser.automation.userHasLeftTile(surface: canvasProvider()?.tileView(for: tileId)) else { return false }
+        return returnBrowserToAgent(tileId: tileId, agentId: agentId)
+    }
+
+    func takeBackBrowser(tileId: UUID, explicit: Bool = false) {
+        if explicit { browserUserHolds.insert(tileId) }
         if let canvas = canvasProvider(), var tile = canvas.tileRecord(for: tileId) {
             tile.metadata.browserControlPaused = true
             canvas.updateTile(tile, recalculateZoneBounds: false)
@@ -561,6 +584,7 @@ extension WorkspaceAPIService {
                 completion(prior); return
             }
         }
+        resumeBrowserIfUserLeft(tileId: tileId, agentId: agentId)
         if !readOnly && operation != .browserSnapshot && (browserNeedsHandbackSnapshot.contains(tileId) || observedBrowserTile(tileId)?.metadata.browserControlPaused == false) {
             completion(.error(WorkspaceAPIError(code: .targetConflict, message: "Take a fresh snapshot after handback before sending a mutation."))); return
         }

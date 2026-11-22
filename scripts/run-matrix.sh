@@ -1080,6 +1080,7 @@ if [[ "$FOCUS_SAFE_INPUT_ONLY" -eq 1 ]]; then
   run_app_check .build/debug/Array --browser-writer-transfer-check
   ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-durable-takeover-check
   run_app_check .build/debug/Array --browser-durable-takeover-check
+  run_app_check .build/debug/Array --browser-handback-check
   run_app_check .build/debug/Array --browser-action-queue-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-exposure-check
   run_leg .build/debug/ContinuumRevivedCoreChecks --workspace-api-contract-check
@@ -1827,6 +1828,7 @@ run_app_check .build/debug/Array --browser-action-results-check
 run_app_check .build/debug/Array --browser-writer-transfer-check
 ARRAY_FOCUS_FREE_TIER_A=1 run_app_check .build/debug/Array --browser-durable-takeover-check
 run_app_check .build/debug/Array --browser-durable-takeover-check
+run_app_check .build/debug/Array --browser-handback-check
 run_app_check .build/debug/Array --browser-action-queue-check
 run_app_check .build/debug/Array --browser-lease-check
 run_app_check .build/debug/Array --palette-first-responder-restore-check

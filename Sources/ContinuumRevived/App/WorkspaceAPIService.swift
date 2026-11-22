@@ -176,6 +176,9 @@ final class WorkspaceAPIService {
     }
     var browserHandOvers: [UUID: BrowserHandOver] = [:]
     var browserUserTakenOver: Set<UUID> = []
+    /// Takeovers the user chose with Take control. They end only at Return to
+    /// agent; a takeover by ordinary input ends when the user stops.
+    var browserUserHolds: Set<UUID> = []
     var browserNeedsHandbackSnapshot: Set<UUID> = []
     enum BrowserDomainDecision { case deny, allowOnce, allowForSession, allowForProjectSession }
     /// Closes a browser approval that is still on screen. Its request answers
