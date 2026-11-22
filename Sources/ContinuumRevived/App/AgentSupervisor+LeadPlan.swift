@@ -103,6 +103,8 @@ extension AgentSupervisor {
     static let leadPlanStaleAfter: TimeInterval = 24 * 3600
     static let leadPlanRosterLimit = 6
     static let leadPlanDoneWindow: TimeInterval = 24 * 3600
+    /// Helper activity repaints the drawer at most this often.
+    static let leadPlanActivityCadence: TimeInterval = 0.25
 
     func leadPlan(for id: AgentID, now: Date = Date()) -> LeadPlanPresentation? {
         guard let lead = records[id], lead.mode == .managed, lead.parentAgentID == nil else { return nil }

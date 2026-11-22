@@ -51,8 +51,11 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         isHidden = true
     }
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
+    /// Checks only: every change the drawer actually takes.
+    var qaOnUpdate: ((LeadPlanPresentation?) -> Void)?
     func update(_ value: LeadPlanPresentation?) {
         guard value != presentation else { return }
+        defer { qaOnUpdate?(value) }
         let oldHeight = intrinsicContentSize.height
         presentation = value
         isHidden = value == nil
