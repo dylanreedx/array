@@ -11169,6 +11169,7 @@ final class AgentSupervisor {
     }
 
     var leadPlanObservers: [UUID: (AgentID, () -> Void)] = [:]
+    var leadPlanActivityPending: Set<AgentID> = []
     private var managedHookStates: [AgentID: ManagedLeadHookState] = [:]
 
     // Claude chooser is launch-scoped. Changing the preference never weakens
@@ -16220,7 +16221,7 @@ final class AgentSupervisor {
             continuation.yield(event)
         }
         for observe in deliveredEventObservers.values { observe(id, event) }
-        notifyLeadPlanChanged(id)
+        noteLeadPlanActivity(id)
 
         // T1 — an IN-TURN compaction (claude's `status: compacting`, pi's
         // `compaction_start`) has no operation of its own to finish it; only a

@@ -228,6 +228,7 @@ check --layout-commit-scope-check
 check --layout-commit-truth-check
 check --lead-character-check
 check --lead-checkout-ledger-check
+check --lead-plan-steady-check
 check --leader-activation-check
 check --leader-composer-hold-check
 check --leader-jump-check
@@ -808,6 +809,7 @@ leg run_app_check .build/debug/Array --managed-codex-launch-check
 leg run_app_check .build/debug/Array --managed-compaction-tools-check
 leg run_app_check .build/debug/Array --managed-lead-context-transition-check
 leg run_app_check .build/debug/Array --managed-lead-plan-check
+leg run_app_check .build/debug/Array --lead-plan-steady-check
 leg run_app_check .build/debug/Array --managed-lead-tool-loading-check
 leg run_app_check .build/debug/Array --managed-mode-hooks-check
 leg run_app_check .build/debug/Array --managed-mode-launch-check

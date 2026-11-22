@@ -51,8 +51,11 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         isHidden = true
     }
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
+    /// Checks only: every change the drawer actually takes.
+    var qaOnUpdate: ((LeadPlanPresentation?) -> Void)?
     func update(_ value: LeadPlanPresentation?) {
         guard value != presentation else { return }
+        defer { qaOnUpdate?(value) }
         let oldHeight = intrinsicContentSize.height
         presentation = value
         isHidden = value == nil
@@ -72,9 +75,10 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         guard let p = presentation else { return 34 * z }
         return (34 + (p.decision == nil ? 0 : 23) + (p.options.isEmpty ? 0 : 34)) * z
     }
-    private var anyNote: Bool { presentation?.steps.contains { $0.note != nil } ?? false }
     private var ownerX: CGFloat { min(314 * CGFloat(zoom.factor), bounds.width * 0.49) }
-    private var stateX: CGFloat { bounds.width - (anyNote ? 150 : 84) * CGFloat(zoom.factor) }
+    /// Always room for "Done · 14 min ago": sizing this to whether any row has
+    /// an age moved every row's owner and state cells when one helper finished.
+    private var stateX: CGFloat { bounds.width - 150 * CGFloat(zoom.factor) }
     func rowRect(_ index: Int) -> NSRect {
         let z = CGFloat(zoom.factor)
         return NSRect(x: 0, y: rowsTop + CGFloat(index * 23) * z, width: bounds.width, height: 23 * z)
@@ -184,7 +188,7 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
             }
             text(step.owner, rect: NSRect(x: ox, y: y, width: max(0, stateX - ox - 10 * z), height: line), color: secondary)
             let label = step.state.rawValue + (step.note.map { " · " + $0 } ?? "")
-            text(label, rect: NSRect(x: stateX, y: y, width: (anyNote ? 138 : 72) * z, height: line), color: ink(step.state))
+            text(label, rect: NSRect(x: stateX, y: y, width: 138 * z, height: line), color: ink(step.state))
         }
     }
 }

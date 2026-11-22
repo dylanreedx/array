@@ -18,30 +18,7 @@ enum ManagedLeadPlanChecks {
         try script.write(to: b.binDir.appendingPathComponent("claude"), atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: b.binDir.appendingPathComponent("claude").path)
         let supervisor = b.supervisor, lead = b.f.agentId
-        try b.f.delegate.reconciledManagedSessionSource.reconcile(
-            registry: b.f.delegate.registryStore!.loadOrEmpty(), reason: .continuumRestarted, now: Date())
-        try expect(supervisor.setProviderSettings(agentID: lead, harness: .claudeCode, model: ManagedModeChecks.model),
-                   "could not select lead harness")
-        ManagedSettingChecks.write(AgentManagedModeConfig.enabledKey, true, b)
-        try expect(supervisor.records[lead]?.mode == .managed && supervisor.records[lead]?.parentAgentID == nil,
-                   "Settings did not enable the top-level lead")
-        // The API fixture uses a note as the lead's placement anchor. Replace
-        // that fixture-only stand-in through the production spawn/wiring route.
-        for entry in b.f.canvas.allWorkspaceTiles() where entry.zoneId == b.f.zoneB {
-            b.f.canvas.removeTile(id: entry.id)
-        }
-        supervisor.detachView(agentID: lead)
-        let spawner = try b.f.runtime.ensureSpawner(forProjectId: b.f.projectPb)
-        let scope = CreationScope(projectId: b.f.projectPb, projectRoot: b.f.pbRoot.path,
-                                  homeRelativePath: nil, source: .zone, zoneId: b.f.zoneB)
-        guard case let .spawned(tileID) = spawner.spawnManagedAgentForExistingAgent(lead, supervisor: supervisor,
-                at: CGPoint(x: 3360, y: 740), creationScope: scope) else {
-            throw WorkspaceAgentReportChecks.Failure(description: "production lead spawn failed")
-        }
-        b.f.delegate.wireManagedAgentTile(tileID, agentID: lead)
-        guard let tile = b.f.canvas.tileView(for: tileID) as? ManagedAgentTileNSView else {
-            throw WorkspaceAgentReportChecks.Failure(description: "production spawn did not mount lead tile")
-        }
+        let tile = try mountLead(b)
         try expect(tile.qaLeadPlanView.isHidden, "unposted plan visible")
         // Live 2026-11-02, verbatim: the brief says "plan first", so a real lead
         // posts its plan BEFORE any helper exists. It must be kept, not refused.
@@ -313,6 +290,186 @@ enum ManagedLeadPlanChecks {
         try expect(!old.leadPlanCollapsed, "old record default is not expanded")
         try expect(AgentReport.wordCount(ManagedLeadHookState.brief) <= 230 && ManagedLeadHookState.brief.contains("array_status"), "brief lacks plan or exceeds 230 words")
         print("Managed lead plan passed: production MCP/store/tile, bounds, self-only, live helper states/watchdog, urgency, image disclosure, relaunch, free/helper suppression, light/dark renders")
+    }
+
+    /// `--lead-plan-steady-check`. Live 2026-11-22 on 0.7.59: the drawer above a
+    /// lead's composer "bugs and tweaks out" while helpers stream. A burst of
+    /// helper events goes through the production `deliver` path into the mounted
+    /// tile, and every change the drawer takes is recorded. While no helper's
+    /// state changes, the drawer must not move: each column holds one kind of
+    /// content, rows keep their order and section, the height holds, and the
+    /// drawer repaints at a bounded cadence, not once per event.
+    static func runSteady() async throws {
+        let b = try ManagedModeChecks.bench("lead-plan-steady")
+        defer { b.tearDown() }
+        let supervisor = b.supervisor, lead = b.f.agentId
+        let tile = try mountLead(b)
+        let view = tile.qaLeadPlanView
+        // Rows as drawn: section label, then title | owner | state per row.
+        func rows(_ p: LeadPlanPresentation?) -> [String] {
+            (p?.steps ?? []).map { $0.isSection ? "[\($0.title)]" : "\($0.title) | \($0.owner) | \($0.state.rawValue)\($0.note.map { " · " + $0 } ?? "")" }
+        }
+        var trace: [(rows: [String], height: CGFloat)] = []
+        var heightChanges = 0
+        view.qaOnUpdate = { p in
+            let height = view.intrinsicContentSize.height
+            if let last = trace.last, last.height != height { heightChanges += 1 }
+            trace.append((rows(p), height))
+        }
+        defer { view.qaOnUpdate = nil }
+        var notifications = 0
+        let counter = supervisor.addLeadPlanObserver(for: lead) { notifications += 1 }
+        defer { supervisor.removeLeadPlanObserver(counter) }
+        func dump() -> String { trace.enumerated().map { "push \($0.offset) h=\(Int($0.element.height)): " + $0.element.rows.joined(separator: " / ") }.joined(separator: "\n") }
+
+        // Four helpers of this lead, as array_delegate names them: for their task.
+        let names = ["Compile Dylan's recent work history", "Audit the sidebar rows", "Check the login flow", "Fix the drawer jitter"]
+        let start = Date()
+        var helpers: [AgentID] = []
+        for (i, name) in names.enumerated() {
+            let id = supervisor.spawn(role: nil, prompt: nil, cwd: b.f.pbRoot, harness: .claudeCode,
+                model: ManagedModeChecks.model, thinking: "high", projectId: b.f.projectPb,
+                projectRoot: b.f.pbRoot, parentAgentID: lead, displayName: name)
+            helpers.append(id)
+            let thread = AgentSupervisor.threadId(for: id)
+            supervisor.qaDeliver(.sessionStateChanged(.running), to: id, now: start.addingTimeInterval(Double(i)))
+            supervisor.qaDeliver(.turnStarted(threadId: thread, turnId: "t1"), to: id, now: start.addingTimeInterval(Double(i)))
+        }
+        // One helper has already said what it is doing; the others have not.
+        try expect(supervisor.declareStatus(AgentDeclaredStatus(now: "Reading git log for the last week", declaredAt: Date()), for: helpers[0]),
+                   "helper status refused")
+        try await AgentPresenceChecks.eventually("the four helpers did not reach the drawer") {
+            view.presentation?.steps.filter { $0.ownerAgent != nil && $0.state == .running }.count == 4
+        }
+        try await Task.sleep(for: .milliseconds(400))
+        let settled = rows(view.presentation)
+        let settledHeight = view.intrinsicContentSize.height
+        let order = view.presentation?.steps.compactMap(\.ownerAgent) ?? []
+        trace.removeAll(); heightChanges = 0; notifications = 0
+
+        // The burst: what four streaming helpers deliver in about a second —
+        // tokens, tool items and usage, round robin, each event a fresh activity
+        // stamp. Mid-burst one helper posts its first status line and another's
+        // runner restarts (session starting -> running) inside the same turn.
+        // No helper's state changes: all four stay running throughout.
+        let burstStart = Date()
+        for i in 0..<120 {
+            let id = helpers[i % 4], thread = AgentSupervisor.threadId(for: id)
+            let at = burstStart.addingTimeInterval(Double(i) * 0.01)
+            switch i % 6 {
+            case 0: supervisor.qaDeliver(.itemStarted(threadId: thread, itemId: "i\(i)", kind: .commandExecution, title: "Bash"), to: id, now: at)
+            case 3: supervisor.qaDeliver(.itemCompleted(threadId: thread, itemId: "i\(i - 3)", kind: .commandExecution, status: .completed), to: id, now: at)
+            default: supervisor.qaDeliver(.contentDelta(threadId: thread, turnId: "t1", streamKind: .assistant, delta: "token \(i) "), to: id, now: at)
+            }
+            if i == 40 { _ = supervisor.declareStatus(AgentDeclaredStatus(now: "Diffing sidebar row heights", declaredAt: Date()), for: helpers[1]) }
+            if i == 60 { supervisor.qaDeliver(.sessionStateChanged(.starting), to: helpers[2], now: at) }
+            if i == 62 { supervisor.qaDeliver(.sessionStateChanged(.running), to: helpers[2], now: at) }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try await Task.sleep(for: .milliseconds(400))
+        let burstSeconds = Date().timeIntervalSince(burstStart)
+
+        var failures: [String] = []
+        // 1. One kind per column. Title: the helper's name; owner: its model.
+        for (n, push) in trace.enumerated() {
+            for row in push.rows where !row.hasPrefix("[") {
+                let cells = row.components(separatedBy: " | ")
+                if cells.count < 3 || !names.contains(cells[0]) || cells[1].contains(" · ") || cells[1] != "Fixture" {
+                    failures.append("push \(n): a column changed kind: \(row)"); break
+                }
+            }
+        }
+        // 2. Order and section stable while no state changed; drawer returns to the same picture.
+        for (n, push) in trace.enumerated() where push.rows.filter({ $0.hasPrefix("[") }) != settled.filter({ $0.hasPrefix("[") })
+            || push.rows.map({ $0.components(separatedBy: " | ")[0] }) != settled.map({ $0.components(separatedBy: " | ")[0] }) {
+            failures.append("push \(n): rows moved or changed section"); break
+        }
+        if rows(view.presentation) != settled { failures.append("after the burst the drawer differs from before it") }
+        if view.presentation?.steps.compactMap(\.ownerAgent) != order { failures.append("row order changed") }
+        // 3. Height holds; repaints bounded by a steady cadence, not per event.
+        if heightChanges > 0 || view.intrinsicContentSize.height != settledHeight { failures.append("height changed \(heightChanges)x during the burst") }
+        let cadenceBound = Int((burstSeconds / AgentSupervisor.leadPlanActivityCadence).rounded(.up)) + 3
+        if trace.count > cadenceBound { failures.append("drawer changed \(trace.count)x for 120 events (bound \(cadenceBound))") }
+        if notifications > cadenceBound { failures.append("drawer recomputed \(notifications)x for 120 events (bound \(cadenceBound))") }
+        guard failures.isEmpty else {
+            throw WorkspaceAgentReportChecks.Failure(description: "lead-plan-steady: " + failures.joined(separator: "; ")
+                + "\nsettled: " + settled.joined(separator: " / ") + "\n" + dump())
+        }
+        print("lead-plan-steady burst: 120 events over \(String(format: "%.2f", burstSeconds))s -> \(trace.count) drawer changes, \(notifications) recomputes, \(heightChanges) height changes")
+
+        // 4. A real change still lands, live: one helper finishing two minutes
+        // ago moves to Done. The height grows once (a new section), the other
+        // rows keep their order, and the owner column does not shift sideways.
+        let ownerBefore = view.ownerRect(view.presentation!.steps.firstIndex { $0.ownerAgent == helpers[0] }!)
+        trace.removeAll(); heightChanges = 0
+        let done = helpers[3], doneThread = AgentSupervisor.threadId(for: done)
+        let ended = Date().addingTimeInterval(-120)
+        supervisor.qaDeliver(.turnCompleted(threadId: doneThread, turnId: "t1", outcome: .completed, errorMessage: nil), to: done, now: ended)
+        supervisor.qaDeliver(.sessionStateChanged(.ready), to: done, now: ended)
+        try await AgentPresenceChecks.eventually("the finished helper did not move to Done") {
+            view.presentation?.steps.first { $0.ownerAgent == done }?.state == .done
+        }
+        try await Task.sleep(for: .milliseconds(400))
+        view.layoutSubtreeIfNeeded()
+        let after = view.presentation?.steps ?? []
+        try expect(after.filter(\.isSection).map(\.title) == ["Working", "Done"], "sections after a finish: \(rows(view.presentation))\n\(dump())")
+        try expect(after.compactMap(\.ownerAgent) == order.filter { $0 != done } + [done], "a finish reordered the others: \(rows(view.presentation))")
+        try expect(heightChanges <= 1 && trace.count <= 2, "a finish took \(trace.count) changes / \(heightChanges) height changes\n\(dump())")
+        let ownerAfter = view.ownerRect(after.firstIndex { $0.ownerAgent == helpers[0] }!)
+        try expect(ownerAfter.minX == ownerBefore.minX && ownerAfter.width == ownerBefore.width,
+                   "the owner column shifted when a row gained an age: \(ownerBefore) -> \(ownerAfter)")
+        try expect(after.first { $0.ownerAgent == done }?.note == "2 min ago", "finished helper lost its age: \(rows(view.presentation))")
+
+        if let dir = ProcessInfo.processInfo.environment["CONTINUUM_PLAN_DRAWER_DIR"].map({ URL(fileURLWithPath: $0) }) {
+            try stills(tile, view: view, to: dir, name: "steady")
+        }
+        print("Lead plan steady passed: one kind per column, stable order/sections/height through a 120-event burst, bounded cadence, finish lands once")
+    }
+
+    static func stills(_ tile: ManagedAgentTileNSView, view: AgentLeadPlanView, to dir: URL, name: String) throws {
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let previous = NSApp.appearance
+        defer { NSApp.appearance = previous; tile.appearance = nil }
+        for (label, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+            let theme = NSAppearance(named: appearance)!
+            NSApp.appearance = theme; tile.appearance = theme
+            tile.window?.appearance = theme
+            tile.layoutSubtreeIfNeeded(); view.layoutSubtreeIfNeeded()
+            var result: Result<NSBitmapImageRep, Error>!
+            theme.performAsCurrentDrawingAppearance { result = Result { try UIProbe.bitmap(of: view, id: "plan-drawer-\(name)") } }
+            try result.get().representation(using: .png, properties: [:])!
+                .write(to: dir.appendingPathComponent("\(name)-\(label).png"))
+        }
+    }
+
+    /// The lead tile, managed and mounted through the production spawn/wiring route.
+    static func mountLead(_ b: WorkspaceAgentReportChecks.Bench) throws -> ManagedAgentTileNSView {
+        let supervisor = b.supervisor, lead = b.f.agentId
+        try b.f.delegate.reconciledManagedSessionSource.reconcile(
+            registry: b.f.delegate.registryStore!.loadOrEmpty(), reason: .continuumRestarted, now: Date())
+        try expect(supervisor.setProviderSettings(agentID: lead, harness: .claudeCode, model: ManagedModeChecks.model),
+                   "could not select lead harness")
+        ManagedSettingChecks.write(AgentManagedModeConfig.enabledKey, true, b)
+        try expect(supervisor.records[lead]?.mode == .managed && supervisor.records[lead]?.parentAgentID == nil,
+                   "Settings did not enable the top-level lead")
+        // The API fixture uses a note as the lead's placement anchor. Replace
+        // that fixture-only stand-in through the production spawn/wiring route.
+        for entry in b.f.canvas.allWorkspaceTiles() where entry.zoneId == b.f.zoneB {
+            b.f.canvas.removeTile(id: entry.id)
+        }
+        supervisor.detachView(agentID: lead)
+        let spawner = try b.f.runtime.ensureSpawner(forProjectId: b.f.projectPb)
+        let scope = CreationScope(projectId: b.f.projectPb, projectRoot: b.f.pbRoot.path,
+                                  homeRelativePath: nil, source: .zone, zoneId: b.f.zoneB)
+        guard case let .spawned(tileID) = spawner.spawnManagedAgentForExistingAgent(lead, supervisor: supervisor,
+                at: CGPoint(x: 3360, y: 740), creationScope: scope) else {
+            throw WorkspaceAgentReportChecks.Failure(description: "production lead spawn failed")
+        }
+        b.f.delegate.wireManagedAgentTile(tileID, agentID: lead)
+        guard let tile = b.f.canvas.tileView(for: tileID) as? ManagedAgentTileNSView else {
+            throw WorkspaceAgentReportChecks.Failure(description: "production spawn did not mount lead tile")
+        }
+        return tile
     }
 
     private static func delegateHelper(_ b: WorkspaceAgentReportChecks.Bench, label: String) async throws -> AgentID {

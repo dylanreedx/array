@@ -78,7 +78,9 @@ extension AgentSupervisor {
         let status = derivedStreamStatus(for: helper.id)
         if helper.helperWatchdogNeedsYou != nil || helper.declaredStatus?.needsYou != nil || status == .needsAttention {
             return .needsYou
-        } else if status == .working {
+        } else if status == .working || status == .configuring {
+            // A runner restarting inside a turn reads `.configuring` for a moment;
+            // the helper is still at work, so its row must not drop out.
             return .running
         } else if helper.latestTerminalEvent?.outcome == .failed || helper.latestTerminalEvent?.outcome == .runtimeError
                     || helper.lastReport?.report.checks.contains(where: { $0.result == .fail }) == true
@@ -103,6 +105,8 @@ extension AgentSupervisor {
     static let leadPlanStaleAfter: TimeInterval = 24 * 3600
     static let leadPlanRosterLimit = 6
     static let leadPlanDoneWindow: TimeInterval = 24 * 3600
+    /// Helper activity repaints the drawer at most this often.
+    static let leadPlanActivityCadence: TimeInterval = 0.25
 
     func leadPlan(for id: AgentID, now: Date = Date()) -> LeadPlanPresentation? {
         guard let lead = records[id], lead.mode == .managed, lead.parentAgentID == nil else { return nil }
@@ -112,7 +116,10 @@ extension AgentSupervisor {
         let planned = Set(plan.compactMap { UUID(uuidString: $0.owner) })
 
         // Helpers the plan does not name: observed, so never stale. Needs-you and
-        // failed first, then working, then what finished in the last day.
+        // failed first, then working (or idle between turns), then what finished
+        // in the last day. Within a group rows keep the order the helpers were
+        // created in: activity stamps move on every event, so sorting by them
+        // reshuffled the rows while helpers streamed.
         var roster: [LeadPlanPresentation.Step] = []
         func rows(_ group: String, _ state: Set<LeadPlanPresentation.State>, limit: Int, recent: Bool = false) {
             var found: [(AgentRecord, LeadPlanPresentation.State)] = []
@@ -122,25 +129,26 @@ extension AgentSupervisor {
                 if recent, now.timeIntervalSince(helper.latestTerminalEvent?.endedAt ?? helper.lastActivityAt) > Self.leadPlanDoneWindow { continue }
                 found.append((helper, live))
             }
-            found.sort { $0.0.lastActivityAt > $1.0.lastActivityAt }
+            found.sort { ($0.0.createdAt, $0.0.id.rawValue.uuidString) < ($1.0.createdAt, $1.0.id.rawValue.uuidString) }
             let room = max(0, min(limit, Self.leadPlanRosterLimit - roster.filter { !$0.isSection }.count))
             guard room > 0, !found.isEmpty else { return }
             roster.append(.init(title: group, owner: "", state: .waiting, isSection: true))
             for (helper, live) in found.prefix(room) {
                 let model = helper.harness.flatMap { AgentModelCatalog.shared.displayName(for: helper.model, harness: $0) } ?? helper.model
                 let ended = helper.latestTerminalEvent?.endedAt ?? helper.lastActivityAt
-                // Its own status line says what it is doing; without one the title is
-                // its name, which the owner cell must not repeat.
-                let said = helper.declaredStatus?.now
+                // One kind per column, fixed by the row and never by its state: the
+                // title is the helper's name (Array names helpers for their task),
+                // the owner is its model. Its status line changes every few seconds
+                // and used to swap both cells; it stays on the helper's own tile.
                 roster.append(.init(
-                    title: said ?? helper.humanDisplayName,
-                    owner: said == nil ? model : "\(helper.humanDisplayName) · \(model)", state: live,
+                    title: helper.humanDisplayName,
+                    owner: model, state: live,
                     note: live == .done || live == .failed ? Self.relativeAge(ended, now: now) : nil,
                     liveDot: true, ownerAgent: helper.id))
             }
         }
         rows("Needs you", [.needsYou, .failed], limit: 3)
-        rows("Working", [.running], limit: 4)
+        rows("Working", [.running, .waiting], limit: 4)
         rows("Done", [.done], limit: 3, recent: true)
 
         var steps = roster
@@ -198,6 +206,22 @@ extension AgentSupervisor {
         return token
     }
     func removeLeadPlanObserver(_ token: UUID) { leadPlanObservers[token] = nil }
+    /// Helper stream events arrive per token. They mark the drawer dirty and it
+    /// repaints once per `leadPlanActivityCadence`, not once per event; status,
+    /// reports and watchdog changes still repaint at once.
+    func noteLeadPlanActivity(_ id: AgentID) {
+        let wasIdle = leadPlanActivityPending.isEmpty
+        leadPlanActivityPending.insert(id)
+        if let parent = records[id]?.parentAgentID { leadPlanActivityPending.insert(parent) }
+        guard wasIdle else { return }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(Self.leadPlanActivityCadence))
+            guard let self else { return }
+            let targets = self.leadPlanActivityPending
+            self.leadPlanActivityPending = []
+            for (lead, observer) in self.leadPlanObservers.values where targets.contains(lead) { observer() }
+        }
+    }
     func notifyLeadPlanChanged(_ id: AgentID) {
         let parent = records[id]?.parentAgentID
         for (lead, observer) in leadPlanObservers.values where lead == id || lead == parent { observer() }
