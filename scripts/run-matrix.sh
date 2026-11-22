@@ -2012,6 +2012,9 @@ run_app_check .build/debug/Array --sidebar-event-cost-check
 # 2,000+ agents streaming: a long list derives off main, a camera gesture holds
 # the swap, and a focus change mid-push carries the pending rows, never drops them.
 run_app_check .build/debug/Array --sidebar-stream-cost-check
+# 0.7.59 hotfix: pushes faster than one off-main build threw every finished build
+# away, so a delete never reached the table and an unfold redrew the deleted row.
+run_app_check .build/debug/Array --sidebar-realtime-check
 # Live-usage sample 2026-11-14: every app switch re-read every project's stores
 # and rebuilt every sidebar row (24.5% of main at ~2,400 agents). A switch now
 # reads nothing and builds rows only when the clock has moved one.

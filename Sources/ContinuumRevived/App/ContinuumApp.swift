@@ -3527,6 +3527,19 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        // A structural change (fold, unfold, delete) reaches the table while agents stream.
+        if CommandLine.arguments.contains("--sidebar-realtime-check") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    print(try SidebarRealtimeChecks.run())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL sidebar realtime: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
         // 0.7.59: the Halo default, with no env override set.
         if CommandLine.arguments.contains("--sidebar-halo-default-check") {
             _ = NSApplication.shared

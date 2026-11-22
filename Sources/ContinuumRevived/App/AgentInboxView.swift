@@ -8042,6 +8042,18 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     /// intentionally a visibility seam rather than a raw clip offset: an
     /// incremental height change must preserve the content anchor the person was
     /// looking at, not merely leave the scroll view's numeric origin untouched.
+    /// The agents whose cells the table actually holds in its viewport, read off
+    /// the live row views rather than the row model: what the person can see.
+    var drawnAgentIdsForQA: [UUID] {
+        let visible = tableView.rows(in: tableView.visibleRect)
+        guard visible.length > 0 else { return [] }
+        return (visible.location..<NSMaxRange(visible)).compactMap { row -> UUID? in
+            guard let raw = tableView.view(atColumn: 0, row: row, makeIfNecessary: false)?.identifier?.rawValue,
+                  raw.hasPrefix("agent-inbox-row-") else { return nil }
+            return UUID(uuidString: String(raw.dropFirst("agent-inbox-row-".count).prefix(36)))
+        }
+    }
+
     var visibleAgentIdsForQA: [UUID] {
         let visibleRect = scrollView.contentView.convert(
             scrollView.contentView.bounds, to: tableView)
