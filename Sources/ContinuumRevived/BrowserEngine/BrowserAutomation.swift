@@ -119,6 +119,9 @@ final class BrowserAutomation {
     static let evaluateResultCap = 64 * 1_024
     /// A type waits this long after the user's last key in the tile.
     static let userTypingQuiet: TimeInterval = 1.0
+    /// A takeover the user started by using the tile ends after this long
+    /// without input, even with keyboard focus still in the tile.
+    static let userIdleHandback: TimeInterval = 15
     static let maxWait: TimeInterval = 30
 
     private weak var runtime: WKWebViewBrowserRuntime?

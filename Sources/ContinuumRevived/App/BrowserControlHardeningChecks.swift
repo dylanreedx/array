@@ -999,3 +999,215 @@ func runBrowserBackgroundSchedulingCheck() throws {
     try expect((snapshot["backgroundScheduling"] as? String)?.contains("requestAnimationFrame") == true, "snapshot must name the hidden rAF limitation")
     print("PASS: production lease accelerates timers and takeover restores scheduling; hidden rAF remains limited")
 }
+
+/// Witness for the handback rule: a user's takeover ends when the user stops
+/// using the tile, and Return to agent hands control back every time it shows.
+/// Every user act is a real event through `NSApp.sendEvent`.
+@MainActor
+func runBrowserHandbackCheck() throws {
+    let h = try BrowserHardeningHarness(fakedKey: true)
+    defer { h.tearDown() }
+    h.window.setContentSize(NSSize(width: 6000, height: 4000))
+    h.f.canvas.frame = NSRect(x: 0, y: 0, width: 6000, height: 4000)
+    let (tile, page) = try h.ownedBrowser()
+    let landing = page.deletingLastPathComponent().appendingPathComponent("handback-landing.html")
+    try Data("<html><head><title>Landing</title></head><body><h1>Signed in</h1></body></html>".utf8).write(to: landing)
+    let redirect = page.deletingLastPathComponent().appendingPathComponent("handback-redirect.html")
+    try Data("<html><head><title>Redirecting</title><script>location.replace('handback-landing.html')</script></head><body>Redirecting</body></html>".utf8).write(to: redirect)
+    _ = try h.ok("browser.snapshot", ["tileId": tile.uuidString])
+    guard var browser = h.live(tile), var view = h.f.canvas.tileView(for: tile) as? BrowserTileNSView else {
+        throw WorkspaceAPIChecks.Failure(message: "missing browser runtime or surface")
+    }
+    h.pump(0.2)
+    var failures: [String] = []
+    func step(_ name: String, _ body: () throws -> Void) {
+        do { try body(); print("PASS: \(name)") }
+        catch { failures.append("\(name): \(error)"); print("FAIL: \(name): \(error)") }
+    }
+    func mutate() throws -> [String: Any] {
+        try h.raw("browser.evaluate", ["tileId": tile.uuidString, "script": "() => 1"])
+    }
+    func refusedAsTakeover(_ response: [String: Any]) -> Bool {
+        h.errorCode(response) == "target_conflict" && "\(response)".contains("takeover")
+    }
+    func mouse(_ type: NSEvent.EventType, at point: NSPoint) {
+        let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: h.window.windowNumber,
+            context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        NSApp.sendEvent(event)
+    }
+    /// A real click: the release is queued first so a tracking loop ends.
+    func click(_ target: NSView) {
+        let point = target.convert(NSPoint(x: target.bounds.midX, y: target.bounds.midY), to: nil)
+        NSApp.postEvent(NSEvent.mouseEvent(with: .leftMouseUp, location: point, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: target.window?.windowNumber ?? h.window.windowNumber,
+            context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!, atStart: true)
+        let down = NSEvent.mouseEvent(with: .leftMouseDown, location: point, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: target.window?.windowNumber ?? h.window.windowNumber,
+            context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        NSApp.sendEvent(down)
+        if let up = NSApp.nextEvent(matching: .leftMouseUp, until: Date(), inMode: .default, dequeue: true) { NSApp.sendEvent(up) }
+    }
+    /// The user takes the tile: a real click into the page, then a real key.
+    func userTakes() throws {
+        click(browser.webView)
+        h.userKey(into: browser)
+        h.pump(0.05)
+        try expect(h.f.api.browserUserTakenOver.contains(tile), "real input in the tile must take control")
+    }
+    /// Press Return to agent the way the user does: click the chip, then the row.
+    func pressReturn(expectHandback: Bool = true) throws {
+        let chip = view.qaAgentControlButton
+        try expect(!chip.isHidden && view.qaAgentControlItems.contains("return"),
+                   "Return to agent must show while the user holds the tile: hidden=\(chip.isHidden) items=\(view.qaAgentControlItems)")
+        chip.presentsOffscreenForQA = true
+        view.layoutSubtreeIfNeeded()
+        h.pump(0.05)
+        click(chip)
+        h.pump(0.1)
+        guard let row = chip.qaPresentedList?.rowView(id: "return") else {
+            throw WorkspaceAPIChecks.Failure(message: "the chip did not present Return to agent: \(chip.qaPresentedItems.map(\.id))")
+        }
+        chip.qaPresentedPanel?.makeKey()
+        click(row)
+        h.pump(0.1)
+        if expectHandback {
+            try expect(!h.f.api.browserUserTakenOver.contains(tile), "Return to agent did not hand control back")
+        }
+    }
+    /// The user picks Take control from the chip with real clicks.
+    func chooseTakeControl() throws {
+        let chip = view.qaAgentControlButton
+        chip.presentsOffscreenForQA = true
+        view.layoutSubtreeIfNeeded()
+        h.pump(0.05)
+        click(chip)
+        h.pump(0.1)
+        guard let row = chip.qaPresentedList?.rowView(id: "take") else {
+            throw WorkspaceAPIChecks.Failure(message: "the chip did not offer Take control: \(view.qaAgentControlItems)")
+        }
+        chip.qaPresentedPanel?.makeKey()
+        click(row)
+        h.pump(0.1)
+        try expect(h.f.api.browserUserTakenOver.contains(tile), "Take control did not take the tile")
+    }
+    /// The agent's next call is a fresh snapshot, then an action.
+    func agentResumes(_ context: String) throws {
+        let snapshot = try h.raw("browser.snapshot", ["tileId": tile.uuidString])
+        try expect(snapshot["status"] as? String == "ok", "\(context): snapshot after handback failed: \(snapshot)")
+        try expect(!h.f.api.browserUserTakenOver.contains(tile)
+                   && h.f.canvas.tileRecord(for: tile)?.metadata.browserControlPaused != true,
+                   "\(context): the tile is still in takeover")
+        let after = try mutate()
+        try expect(after["status"] as? String == "ok", "\(context): the agent's action after a fresh snapshot was refused: \(after)")
+    }
+
+    step("an agent action is refused while the user is still active") {
+        try userTakes()
+        let refused = try mutate()
+        try expect(refusedAsTakeover(refused), "an active user's tile must refuse the agent: \(refused)")
+        h.userKey(into: browser)
+        h.pump(BrowserAutomation.userTypingQuiet / 2)
+        let still = try mutate()
+        try expect(refusedAsTakeover(still), "a user typing within the quiet period must still hold the tile: \(still)")
+    }
+    step("focus leaving the tile hands back once the user is quiet") {
+        try userTakes()
+        // The user goes to type to the agent: a real click on the agent's tile.
+        guard let elsewhere = h.f.canvas.tileView(for: h.f.agentTileB) else {
+            throw WorkspaceAPIChecks.Failure(message: "missing another tile to click")
+        }
+        click(elsewhere)
+        if let responder = h.window.firstResponder as? NSView, responder === view || responder.isDescendant(of: view) {
+            h.window.makeFirstResponder(h.f.canvas)
+        }
+        print("Focus after clicking elsewhere: \(h.window.firstResponder.map { String(describing: type(of: $0)) } ?? "nil")")
+        h.pump(BrowserAutomation.userTypingQuiet + 0.3)
+        let first = try mutate()
+        try expect(!refusedAsTakeover(first), "the agent stays locked out after the user left the tile: \(first)")
+        try agentResumes("focus out")
+    }
+    step("an idle user with focus still in the tile hands back after the idle period") {
+        try userTakes()
+        h.pump(BrowserAutomation.userIdleHandback / 2)
+        try expect(refusedAsTakeover(try mutate()), "half the idle period must still be the user's")
+        h.pump(BrowserAutomation.userIdleHandback / 2 + 0.3)
+        try agentResumes("idle")
+    }
+    step("Return to agent hands back on a plain takeover") {
+        try userTakes()
+        try pressReturn()
+        try agentResumes("plain Return")
+    }
+    step("Return to agent hands back straight after a user navigation and redirect") {
+        try userTakes()
+        browser.webView.load(URLRequest(url: redirect))
+        h.pump(0.05)
+        try pressReturn()
+        h.pump(3) { browser.webView.url?.lastPathComponent == "handback-landing.html" && !browser.webView.isLoading }
+        try agentResumes("Return after redirect")
+    }
+    step("Return to agent hands back while an agent action is still in flight") {
+        var pending: [String: Any]?
+        h.f.api.handleMCPRequest(["agentId": h.f.agentId.rawValue.uuidString, "requestId": UUID().uuidString,
+                                  "op": "browser.wait_for", "payload": ["tileId": tile.uuidString, "condition": "textAppears", "value": "never-appears", "timeout": 4]]) { pending = $0 }
+        h.pump(0.3)
+        try expect(pending == nil, "the in-flight agent wait answered too early: \(pending ?? [:])")
+        try userTakes()
+        try pressReturn(expectHandback: false)
+        let handedBack = !h.f.api.browserUserTakenOver.contains(tile)
+        h.pump(6) { pending != nil }
+        print("In-flight wait answered: \(pending.map { "\($0["status"] ?? "?") \(($0["error"] as? [String: Any])?["code"] ?? "")" } ?? "no answer within 6 s"); queue active=\(h.f.api.browserActionQueue.isActive(tileId: tile))")
+        try expect(handedBack, "Return to agent did nothing while an agent action was in flight")
+        try agentResumes("Return during an in-flight action")
+    }
+    step("Return to agent still shows and works after an interrupted agent action finishes") {
+        var pending: [String: Any]?
+        h.f.api.handleMCPRequest(["agentId": h.f.agentId.rawValue.uuidString, "requestId": UUID().uuidString,
+                                  "op": "browser.wait_for", "payload": ["tileId": tile.uuidString, "condition": "textAppears", "value": "never-appears", "timeout": 2]]) { pending = $0 }
+        h.pump(0.3)
+        try userTakes()
+        h.pump(6) { pending != nil }
+        h.pump(0.2)
+        try pressReturn()
+        try agentResumes("Return after an interrupted action")
+    }
+    step("Return to agent shows and works after the held tile's zone reloads") {
+        try userTakes()
+        guard let controller = h.f.runtime.controller(for: h.f.projectPb) else { throw WorkspaceAPIChecks.Failure(message: "no project controller") }
+        h.window.makeFirstResponder(nil)
+        try controller.setTier(.snapshot, allowDehydratingFocusedZone: true)
+        try controller.setTier(.live)
+        h.pump(1) { h.live(tile) != nil && h.f.canvas.tileView(for: tile) is BrowserTileNSView }
+        guard let restored = h.live(tile), let restoredView = h.f.canvas.tileView(for: tile) as? BrowserTileNSView else {
+            throw WorkspaceAPIChecks.Failure(message: "the held tile did not rehydrate")
+        }
+        browser = restored; view = restoredView
+        h.pump(3) { !browser.webView.isLoading }
+        try pressReturn()
+        try agentResumes("Return after rehydration")
+    }
+    step("an explicit Take control holds through focus out and idle until Return to agent") {
+        _ = try mutate()
+        try chooseTakeControl()
+        guard let elsewhere = h.f.canvas.tileView(for: h.f.agentTileB) else { throw WorkspaceAPIChecks.Failure(message: "missing another tile") }
+        click(elsewhere)
+        h.window.makeFirstResponder(h.f.canvas)
+        h.pump(BrowserAutomation.userTypingQuiet + 0.3)
+        let held = try mutate()
+        try expect(refusedAsTakeover(held) && "\(held)".contains("Return to agent"), "Take control must hold the tile until Return to agent: \(held)")
+        let snapshot = try h.raw("browser.snapshot", ["tileId": tile.uuidString])
+        try expect(snapshot["status"] as? String == "ok" && h.f.api.browserUserTakenOver.contains(tile),
+                   "a snapshot must not end an explicit hold: \(snapshot)")
+        try pressReturn()
+        try agentResumes("Return after Take control")
+    }
+    step("Return to agent works again on a second takeover in a row") {
+        try userTakes()
+        try pressReturn()
+        try agentResumes("second Return")
+    }
+    guard failures.isEmpty else {
+        throw WorkspaceAPIChecks.Failure(message: "\(failures.count) handback scenario(s) failed:\n- " + failures.joined(separator: "\n- "))
+    }
+}

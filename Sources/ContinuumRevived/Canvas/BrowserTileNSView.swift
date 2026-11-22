@@ -600,6 +600,7 @@ final class BrowserTileNSView: TileNSView, NSTextFieldDelegate, NSSearchFieldDel
     }
 
     var qaAgentControlItems: [String] { agentControlButton.items.map(\.id) }
+    var qaAgentControlButton: ChoiceButton { agentControlButton }
 
     func qaChooseAgentControl(_ id: String) {
         guard let item = agentControlButton.items.first(where: { $0.id == id }) else { return }
