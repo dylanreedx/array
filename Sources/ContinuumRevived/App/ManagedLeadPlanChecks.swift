@@ -507,7 +507,13 @@ enum ManagedLeadPlanChecks {
         try await Task.sleep(for: .milliseconds(500))
         check(view.presentation?.entries.map(\.id) == before.entries.map(\.id) && view.presentation?.tail.map(\.id) == before.tail.map(\.id), "order changed under streaming")
         check(supervisor.leadPlan(for: lead, now: Date())?.entries.map(\.id) == before.entries.map(\.id), "entry ids unstable")
+        guard failures.isEmpty else {
+            throw WorkspaceAgentReportChecks.Failure(description: "lead-plan-model: " + failures.joined(separator: "; "))
+        }
         // 5. A fresh failure needs the user until the lead takes a turn after it.
+        guard failures.isEmpty else {
+            throw WorkspaceAgentReportChecks.Failure(description: "lead-plan-model: " + failures.joined(separator: "; "))
+        }
         // 5. A fresh failure needs the user until the lead takes a turn after it. (The
         // production alert path makes the lead take a turn straight away, which is
         // the rule working; stamp the failure just ahead of that turn so the
