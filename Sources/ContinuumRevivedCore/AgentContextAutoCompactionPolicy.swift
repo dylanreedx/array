@@ -48,6 +48,12 @@ public enum AgentContextAutoCompactionPolicy {
     /// The window the old percentage is converted against: Claude's standard one.
     static let legacyReferenceWindow = 200_000
 
+    /// The size beside the slider: "300k tokens".
+    public static func sizeLabel(for option: String) -> String {
+        guard let tokens = Int(option) else { return option }
+        return "\(tokens / 1_000)k tokens"
+    }
+
     public static func title(for option: String) -> String {
         guard let tokens = Int(option) else { return option }
         return "At \(tokens / 1_000)k tokens"

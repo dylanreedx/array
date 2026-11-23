@@ -190,6 +190,68 @@ struct PickerRow: View {
     }
 }
 
+/// "Compact long conversations": a switch over the stored mode (off writes
+/// `never`, on writes Ask me), and under it, while on, the Ask me / Automatically
+/// choice. One row, so it is one search entry and one anchor.
+struct CompactionModeRow: View {
+    let row: SettingsRow
+    let model: SettingsModel
+
+    var body: some View {
+        let binding = model.binding(for: row.field)
+        let off = binding.string == AgentContextCompactionMode.never.rawValue
+        VStack(alignment: .leading, spacing: 10) {
+            Toggle(isOn: Binding(get: { !off },
+                                 set: { binding.set(.string($0 ? AgentContextCompactionMode.ask.rawValue : AgentContextCompactionMode.never.rawValue)) })) {
+                SettingsRowLabel(title: row.field.label, help: row.help)
+            }
+            .toggleStyle(.switch)
+            if !off {
+                HStack {
+                    Text("When it gets long")
+                    Spacer()
+                    Picker(selection: Binding(get: { binding.string }, set: { binding.set(.string($0)) })) {
+                        ForEach([AgentContextCompactionMode.ask, .automatic], id: \.rawValue) { mode in
+                            Text(row.field.displayTitle(forOption: mode.rawValue)).tag(mode.rawValue)
+                        }
+                    } label: { Text("When it gets long") }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 280)
+                }
+            }
+        }
+    }
+}
+
+/// "Compact at": a slider that snaps to the stored sizes, with the live value
+/// beside it. The stored value stays the option string.
+struct CompactionSizeRow: View {
+    let row: SettingsRow
+    let model: SettingsModel
+
+    var body: some View {
+        if case let .choice(_, label, options, _, _) = row.field, !options.isEmpty {
+            let binding = model.binding(for: row.field)
+            let index = options.firstIndex(of: binding.string) ?? 0
+            LabeledContent {
+                HStack(spacing: 10) {
+                    Slider(value: Binding(get: { Double(index) },
+                                          set: { binding.set(.string(options[min(options.count - 1, max(0, Int($0.rounded())))])) }),
+                           in: 0...Double(max(1, options.count - 1)), step: 1)
+                        .frame(minWidth: 160, maxWidth: 240)
+                    Text(AgentContextAutoCompactionPolicy.sizeLabel(for: options[index]))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .frame(width: 96, alignment: .trailing)
+                }
+            } label: {
+                SettingsRowLabel(title: label, help: row.help)
+            }
+        }
+    }
+}
+
 struct SliderRow: View {
     let row: SettingsRow
     let model: SettingsModel

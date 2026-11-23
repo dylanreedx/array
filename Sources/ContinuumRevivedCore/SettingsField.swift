@@ -158,6 +158,10 @@ public enum SettingsField: Equatable, Sendable {
     }
 
     public func isVisible(in defaults: UserDefaults) -> Bool {
+        // The compaction size only matters while compacting is on.
+        if case .choice(AgentContextAutoCompactionPolicy.compactAtKey, _, _, _, _) = self {
+            return defaults.string(forKey: AgentContextAutoCompactionPolicy.modeKey) != AgentContextCompactionMode.never.rawValue
+        }
         guard case .slider(_, _, _, _, let condition, _) = self, let condition else { return true }
         return defaults.string(forKey: condition.key) == condition.equals
     }

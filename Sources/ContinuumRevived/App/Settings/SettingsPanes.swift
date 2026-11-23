@@ -362,6 +362,10 @@ struct SettingsFieldRow: View {
             ReplyRulesToggleRow(row: row, model: model)
         case .toggle:
             ToggleRow(row: row, model: model)
+        case let .choice(key, _, _, _, _) where key == AgentContextAutoCompactionPolicy.modeKey:
+            CompactionModeRow(row: row, model: model)
+        case let .choice(key, _, _, _, _) where key == AgentContextAutoCompactionPolicy.compactAtKey:
+            CompactionSizeRow(row: row, model: model)
         case let .choice(key, _, _, _, _) where key == AgentModelConfig.modelKey:
             SettingsModelPickerRow(model: model, row: row)
         case let .choice(key, _, _, _, _) where key == AppTheme.defaultsKey:
