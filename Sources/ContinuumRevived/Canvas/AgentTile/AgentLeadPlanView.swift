@@ -234,7 +234,8 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         optionRail.applyPageZoom(zoom)
         let z = CGFloat(zoom.factor)
         let railY = drawerLayout?.railY ?? (34 + (presentation?.decision == nil ? 0 : 23)) * z
-        let railFrame = NSRect(x: 16 * z, y: railY, width: max(0, bounds.width - 32 * z), height: optionRail.railHeight)
+        let railX = drawerLayout.map { 30 * z + $0.leadColumn } ?? 16 * z
+        let railFrame = NSRect(x: railX, y: railY, width: max(0, bounds.width - 32 * z), height: optionRail.railHeight)
         if optionRail.frame != railFrame { optionRail.frame = railFrame }
     }
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -381,6 +382,8 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
     private(set) var drawerLayout: DrawerLayout?
     /// Most rows a drawer may ever show, header excluded. The budget.
     static let drawerRowBudget = 6
+    /// Wide enough for "Failed · 12 min ago".
+    static let stateColumn: CGFloat = 104
 
     private var headerHeight: CGFloat { 32 * CGFloat(zoom.factor) }
     private var rowHeight: CGFloat { 22 * CGFloat(zoom.factor) }
@@ -417,7 +420,9 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         case .unstarted(let name): return ("\(name) · not started", nil)
         case .helpers(let hs):
             guard let h = hs.first(where: { !$0.stale }) ?? hs.first else { return ("Helper", nil) }
-            return ("\(h.name) · \(h.model)" + (hs.count > 1 ? " +\(hs.count - 1)" : ""), h.id)
+            // The step title already says what the helper does; its name would
+            // repeat it. The model is the owner cell, still the reveal target.
+            return (h.model + (hs.count > 1 ? " +\(hs.count - 1)" : ""), h.id)
         }
     }
     private static func glyph(_ p: LeadPlanDrawerModel.StepPhase) -> Glyph {
@@ -525,6 +530,7 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
             // The plan IS the list, numbered by plan position. What needs you
             // sits above it; everything the plan does not name is one line.
             header.text = headline(m)
+            if m.collapsed, !m.steps.isEmpty { header.track = phases; header.text[0].0 = "\(phases.filter { $0 == .done }.count) of \(m.steps.count) done" }
             if m.collapsed, m.decision == nil, let c = current(m) {
                 let (word, ink) = stateWord(phases[c], step: m.steps[c])
                 header.text.append((" · " + (word.map { "\($0): " } ?? "Next: ") + m.steps[c].title,
@@ -533,21 +539,9 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
             guard !m.collapsed else { break }
             decisionRow()
             for h in attention.prefix(2) { rows.append(strayRow(h)) }
-            let stepRoom = max(2, budget - rows.count - 1)
-            var indices = Array(m.steps.indices)
-            var doneFold = 0
-            if indices.count > stepRoom {
-                // Finished steps fold first, then the far end of the plan.
-                while indices.count > stepRoom - 1, let first = indices.first, phases[first] == .done { indices.removeFirst(); doneFold += 1 }
-            }
-            if doneFold > 0 { rows.append(DrawerRow(glyph: .dot(.accentDone), lead: "", title: "\(doneFold) done", titleInk: .secondary)) }
-            let room = stepRoom - (doneFold > 0 ? 1 : 0)
-            let shown = indices.count > room ? Array(indices.prefix(room - 1)) : indices
-            for i in shown { rows.append(stepRow(m, i, lead: "\(i + 1)")) }
-            if shown.count < indices.count {
-                rows.append(DrawerRow(lead: "", title: "\(indices.count - shown.count) more steps", titleInk: .secondary))
-            }
-            for h in m.strays where h.phase == .working && rows.count < budget - 1 { rows.append(strayRow(h, lead: "")) }
+            // Never fold the plan itself: `array_status` caps it at six steps.
+            for i in m.steps.indices { rows.append(stepRow(m, i, lead: "\(i + 1)")) }
+            for h in m.strays where h.phase == .working && rows.count < budget { rows.append(strayRow(h, lead: "")) }
             let folded = m.strays.filter { h in !attention.contains(h) && !rows.contains { $0.ownerAgent != nil && $0.ownerAgent == h.id } }
             if let fold = foldText(folded) { rows.append(DrawerRow(lead: "", title: fold, titleInk: .secondary)) }
             leadColumn = 18
@@ -569,6 +563,8 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
                 header.trailing = [("\(n) need\(n == 1 ? "s" : "") you", .accent(.accentApproval))]
             }
             guard !m.collapsed else { break }
+            // Open, the Now row says it; the header keeps only the track and title.
+            header.trailing = []
             decisionRow()
             if !rows.isEmpty { rows[0].lead = "Now" }
             var now = phases.indices.filter { isAttention(phases[$0]) || phases[$0] == .working || phases[$0] == .idle }
@@ -622,7 +618,10 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
             case .done: candidate = doneStrays.map { strayRow($0) }
             case .older: candidate = stale.map { strayRow($0) }
             }
-            let room = budget - rows.count
+            let shownSteps = Set(candidate.compactMap { Int($0.lead ?? "") })
+            let hidden = m.steps.count - shownSteps.count
+            let room = budget - rows.count - (hidden > 0 && filter == .active ? 1 : 0)
+            defer { if hidden > 0, filter == .active, !m.collapsed { rows.append(DrawerRow(lead: "", title: "\(hidden) more step\(hidden == 1 ? "" : "s") in the plan", titleInk: .secondary)) } }
             if candidate.count > room {
                 rows += candidate.prefix(room - 1)
                 rows.append(DrawerRow(lead: "", title: "\(candidate.count - room + 1) more", titleInk: .secondary))
@@ -722,7 +721,7 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
                 case .working: AccentToken.accentWorking.color.nsColor(for: theme)
                 case .needsYou: AccentToken.accentApproval.color.nsColor(for: theme)
                 case .failed: AccentToken.accentFailed.color.nsColor(for: theme)
-                case .idle, .todo: LineToken.borderStrong.color.nsColor(for: theme)
+                case .idle, .todo: LineToken.border.color.nsColor(for: theme)
                 }
                 fill.setFill()
                 NSBezierPath(roundedRect: r, xRadius: h / 2, yRadius: h / 2).fill()
@@ -761,8 +760,10 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
             }
             var right = bounds.width - inset
             if let state = row.state {
-                right -= line(state, x: right - min(width(state), 140 * z), midY: mid, maxX: right, ink: row.stateInk, alignRight: true) + 10 * z
+                line(state, x: right - min(width(state), 140 * z), midY: mid, maxX: right, ink: row.stateInk, alignRight: true)
             }
+            // A fixed state column, so owners line up whether or not a row has a state.
+            if row.owner != nil { right -= Self.stateColumn * z + 12 * z }
             if let owner = row.owner {
                 let w = min(width(owner), bounds.width * 0.34)
                 line(owner, x: right - w, midY: mid, maxX: right, ink: .secondary, alignRight: true)
