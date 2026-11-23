@@ -48,23 +48,23 @@ enum SidebarIndicatorSettingsChecks {
             try expect(SidebarActiveIndicatorStyle.resolve(in: defaults) == .duplex, "invalid preference must fall back to Duplex")
             defaults.removeObject(forKey: SidebarActiveIndicatorStyle.defaultsKey)
             defaults.set(SidebarLayout.quietInbox.rawValue, forKey: SidebarLayout.defaultsKey)
-            let model = SettingsModel(defaults: defaults, navKeymap: .resolve(defaults: defaults, warn: { _ in }), initialPaneID: "appearance")
+            let model = SettingsModel(defaults: defaults, navKeymap: .resolve(defaults: defaults, warn: { _ in }), initialPaneID: "sidebar")
             let fixture = SettingsFixtureWindow(model: model, size: NSSize(width: 1100, height: 1100), appearance: NSAppearance(named: appearance))
             defer { fixture.tearDown() }
-            fixture.show(paneID: "appearance")
+            fixture.show(paneID: "sidebar")
             if let entry = model.entries().first(where: { $0.field?.key == SidebarActiveIndicatorStyle.defaultsKey }) {
                 model.reveal(entry)
                 fixture.settle()
             }
             func control() throws -> ChoiceButton {
                 guard let button = fixture.descendants(ChoiceButton.self).first(where: { $0.accessibilityLabel() == "Active agent" }) else {
-                    throw Failure(description: "Appearance is missing the real Active agent ChoiceButton")
+                    throw Failure(description: "Sidebar is missing the real Active agent ChoiceButton")
                 }
                 button.presentsOffscreenForQA = true
                 return button
             }
             guard let background = fixture.descendants(ChoiceButton.self).first(where: { $0.accessibilityLabel() == "Header background" }) else {
-                throw Failure(description: "Appearance is missing Header background")
+                throw Failure(description: "Sidebar is missing Header background")
             }
             background.presentsOffscreenForQA = true
             try expect(background.selectedID == "none", "Header background must default to None")

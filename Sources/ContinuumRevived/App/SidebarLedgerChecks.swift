@@ -887,10 +887,10 @@ extension SidebarLedgerChecks {
             try expect(countAX.contains("\(count.shown) shown, \(count.folded) folded"), "rendered rows and AX disagree: \(countAX)")
 
             // Settings' real ChoiceButton -> defaults -> event -> existing list.
-            let model = SettingsModel(defaults: defaults, navKeymap: .resolve(defaults: defaults, warn: { _ in }), initialPaneID: "appearance")
+            let model = SettingsModel(defaults: defaults, navKeymap: .resolve(defaults: defaults, warn: { _ in }), initialPaneID: "sidebar")
             let settings = SettingsFixtureWindow(model: model, size: NSSize(width: 1100, height: 1100), appearance: NSAppearance(named: .darkAqua))
             defer { settings.tearDown() }
-            settings.show(paneID: "appearance")
+            settings.show(paneID: "sidebar")
             if let entry = model.entries().first(where: { $0.field?.key == SidebarLayout.defaultsKey }) {
                 model.reveal(entry)
                 settings.settle()

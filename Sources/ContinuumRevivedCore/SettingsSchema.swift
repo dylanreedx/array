@@ -13,7 +13,7 @@ public enum SettingsSchema {
 
     public static func sections() -> [SettingsSection] {
         [
-            general(), appearance(), agentCharacters(), canvas(),
+            general(), appearance(), sidebar(), agentCharacters(), canvas(),
             agents(), editor(), terminal(), browser(),
             notificationsAndSounds(), keyboard(), iPhone(), usage(), advanced(),
         ]
@@ -62,30 +62,6 @@ public enum SettingsSchema {
                             help: "Ten neutral palettes. Changes apply immediately across the app.",
                             keywords: ["neutral", "palette", "grey", "gray", "black", "white"]),
             ]),
-            SettingsGroup(id: "appearance.sidebar", title: "Sidebar", rows: [
-                SettingsRow(.choice(key: SidebarHeaderBackground.defaultsKey, label: "Header background",
-                                    options: SidebarHeaderBackground.allCases.map(\.rawValue),
-                                    default: SidebarHeaderBackground.fallback.rawValue,
-                                    titles: Dictionary(uniqueKeysWithValues: SidebarHeaderBackground.allCases.map { ($0.rawValue, $0.title) })),
-                            help: "A subtle static pattern behind the sidebar controls."),
-                SettingsRow(.choice(key: SidebarActiveIndicatorScope.defaultsKey, label: "Apply active style to",
-                                    options: SidebarActiveIndicatorScope.allCases.map(\.rawValue),
-                                    default: SidebarActiveIndicatorScope.fallback.rawValue,
-                                    titles: Dictionary(uniqueKeysWithValues: SidebarActiveIndicatorScope.allCases.map { ($0.rawValue, $0.title) })),
-                            help: "Highlight every working agent and its lead, or only the agent you have open."),
-                SettingsRow(.choice(key: SidebarActiveIndicatorStyle.defaultsKey, label: "Active agent",
-                                    options: SidebarActiveIndicatorStyle.allCases.map(\.rawValue),
-                                    default: SidebarActiveIndicatorStyle.fallback.rawValue,
-                                    titles: Dictionary(uniqueKeysWithValues: SidebarActiveIndicatorStyle.allCases.map { ($0.rawValue, $0.title) })),
-                            help: "How the open agent is highlighted. Changes apply immediately; Reduce Motion keeps it still.",
-                            keywords: ["sidebar", "duplex", "gradient", "sheen", "classic", "selection", "motion"]),
-                SettingsRow(.choice(key: SidebarLayout.defaultsKey, label: "Layout",
-                                    options: SidebarLayout.allCases.map(\.rawValue),
-                                    default: SidebarLayout.defaultLayout.rawValue,
-                                    titles: Dictionary(uniqueKeysWithValues: SidebarLayout.allCases.map { ($0.rawValue, $0.title) })),
-                            help: "Ledger: one-line helpers, one count per lead, and what needs you on top. Quiet inbox: today's rows with a small Needs you box.",
-                            keywords: ["sidebar", "layout", "ledger", "quiet", "inbox", "density"]),
-            ]),
             SettingsGroup(id: "appearance.canvasBackground", title: "Canvas background", rows: [
                 SettingsRow(.custom(id: "canvasBackground", label: "Canvas background")),
             ]),
@@ -112,6 +88,44 @@ public enum SettingsSchema {
                             keywords: ["command center", "palette", "glass", "blur", "frosted", "transparency"]),
                 SettingsRow(.slider(key: CommandCenterAppearanceConfig.customOpacityKey, label: "Opacity", range: CommandCenterAppearanceConfig.customOpacityRange, default: CommandCenterAppearanceConfig.defaultCustomOpacity, visibleWhen: SettingsVisibility(key: CommandCenterAppearanceConfig.glassinessKey, equals: CommandCenterGlassiness.custom.rawValue), format: .percent),
                             keywords: ["command center", "palette", "transparency"]),
+            ]),
+        ])
+    }
+
+    /// The sidebar's own settings. Pane id is new; the rows keep their defaults
+    /// keys, so saved values carry over from Appearance untouched.
+    private static func sidebar() -> SettingsSection {
+        SettingsSection(id: "sidebar", title: "Sidebar", iconSystemName: "sidebar.left",
+                        keywords: ["sidebar", "activity dock", "inbox", "agents list", "list"], groups: [
+            SettingsGroup(id: "sidebar.layout", title: "Layout", rows: [
+                SettingsRow(.choice(key: SidebarLayout.defaultsKey, label: "Layout",
+                                    options: SidebarLayout.allCases.map(\.rawValue),
+                                    default: SidebarLayout.defaultLayout.rawValue,
+                                    titles: Dictionary(uniqueKeysWithValues: SidebarLayout.allCases.map { ($0.rawValue, $0.title) })),
+                            help: "Ledger: one-line helpers, one count per lead, and what needs you on top. Quiet inbox: today's rows with a small Needs you box.",
+                            keywords: ["sidebar", "layout", "ledger", "quiet", "inbox", "density"]),
+            ]),
+            SettingsGroup(id: "sidebar.highlight", title: "Highlight", rows: [
+                SettingsRow(.choice(key: SidebarActiveIndicatorStyle.defaultsKey, label: "Active agent",
+                                    options: SidebarActiveIndicatorStyle.allCases.map(\.rawValue),
+                                    default: SidebarActiveIndicatorStyle.fallback.rawValue,
+                                    titles: Dictionary(uniqueKeysWithValues: SidebarActiveIndicatorStyle.allCases.map { ($0.rawValue, $0.title) })),
+                            help: "How the open agent is highlighted. Changes apply immediately; Reduce Motion keeps it still.",
+                            keywords: ["sidebar", "duplex", "gradient", "sheen", "classic", "selection", "motion"]),
+                SettingsRow(.choice(key: SidebarActiveIndicatorScope.defaultsKey, label: "Apply active style to",
+                                    options: SidebarActiveIndicatorScope.allCases.map(\.rawValue),
+                                    default: SidebarActiveIndicatorScope.fallback.rawValue,
+                                    titles: Dictionary(uniqueKeysWithValues: SidebarActiveIndicatorScope.allCases.map { ($0.rawValue, $0.title) })),
+                            help: "Highlight every working agent and its lead, or only the agent you have open.",
+                            keywords: ["sidebar", "highlight", "working", "lead", "selection"]),
+            ]),
+            SettingsGroup(id: "sidebar.header", title: "Header", rows: [
+                SettingsRow(.choice(key: SidebarHeaderBackground.defaultsKey, label: "Header background",
+                                    options: SidebarHeaderBackground.allCases.map(\.rawValue),
+                                    default: SidebarHeaderBackground.fallback.rawValue,
+                                    titles: Dictionary(uniqueKeysWithValues: SidebarHeaderBackground.allCases.map { ($0.rawValue, $0.title) })),
+                            help: "A subtle static pattern behind the sidebar controls.",
+                            keywords: ["sidebar", "header", "pattern", "background"]),
             ]),
         ])
     }
