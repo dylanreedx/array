@@ -32,6 +32,8 @@ public enum AgentContextCompactionMode: String, CaseIterable, Sendable {
 public enum AgentContextAutoCompactionPolicy {
     public static let modeKey = "continuum.agentContext.compactMode"
     public static let defaultMode = AgentContextCompactionMode.ask
+    /// The last mode that was not Never, so the switch turns back on to it.
+    public static let lastOnModeKey = "continuum.agentContext.lastOnMode"
     public static let compactAtKey = "continuum.agentContext.compactAtTokens"
     public static let defaultTokens = 300_000
     public static let tokenOptions = [100_000, 150_000, 200_000, 300_000, 500_000]
@@ -47,6 +49,21 @@ public enum AgentContextAutoCompactionPolicy {
     static let migratedKey = "continuum.agentContext.compactionMigrated"
     /// The window the old percentage is converted against: Claude's standard one.
     static let legacyReferenceWindow = 200_000
+
+    /// The mode the "Compact long conversations" switch writes. Off remembers the
+    /// mode it leaves; on restores it (Ask me when nothing was remembered).
+    @discardableResult
+    public static func modeAfterSwitch(on: Bool, defaults: UserDefaults) -> AgentContextCompactionMode {
+        let current = mode(defaults: defaults)
+        if !on {
+            if current != .never { defaults.set(current.rawValue, forKey: lastOnModeKey) }
+            return .never
+        }
+        if let raw = defaults.string(forKey: lastOnModeKey), let remembered = AgentContextCompactionMode(rawValue: raw), remembered != .never {
+            return remembered
+        }
+        return defaultMode
+    }
 
     /// The size beside the slider: "300k tokens".
     public static func sizeLabel(for option: String) -> String {

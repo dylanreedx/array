@@ -250,6 +250,20 @@ enum SettingsSelfChecks {
         try expect(AgentContextAutoCompactionPolicy.effectiveMode(isHelper: false, defaults: defaults) == .automatic
                    && AgentContextAutoCompactionPolicy.limitTokens(defaults: defaults) == 150_000,
                    "the Settings rows must drive the real compaction policy")
+        // The switch remembers the mode it leaves: Automatically, off, on is Automatically again.
+        model.write(.string("automatic"), to: modeField)
+        model.write(.string(AgentContextAutoCompactionPolicy.modeAfterSwitch(on: false, defaults: defaults).rawValue), to: modeField)
+        try expect(AgentContextAutoCompactionPolicy.mode(defaults: defaults) == .never, "switching compaction off must store never")
+        model.write(.string(AgentContextAutoCompactionPolicy.modeAfterSwitch(on: true, defaults: defaults).rawValue), to: modeField)
+        try expect(AgentContextAutoCompactionPolicy.mode(defaults: defaults) == .automatic, "switching compaction back on must restore Automatically")
+        // Off then on again with Ask me restores Ask me, and a fresh install turns on to Ask me.
+        model.write(.string("ask"), to: modeField)
+        model.write(.string(AgentContextAutoCompactionPolicy.modeAfterSwitch(on: false, defaults: defaults).rawValue), to: modeField)
+        model.write(.string(AgentContextAutoCompactionPolicy.modeAfterSwitch(on: true, defaults: defaults).rawValue), to: modeField)
+        try expect(AgentContextAutoCompactionPolicy.mode(defaults: defaults) == .ask, "switching back on must restore Ask me")
+        defaults.removeObject(forKey: AgentContextAutoCompactionPolicy.lastOnModeKey)
+        model.write(.string("never"), to: modeField)
+        try expect(AgentContextAutoCompactionPolicy.modeAfterSwitch(on: true, defaults: defaults) == .ask, "with nothing remembered the switch turns on to Ask me")
         model.reset(modeField); model.reset(compactField)
         // A value saved under the old two settings carries over when Settings opens.
         let legacySuite = "array.settings-compaction-legacy.\(UUID().uuidString)"

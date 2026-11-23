@@ -191,8 +191,9 @@ struct PickerRow: View {
 }
 
 /// "Compact long conversations": a switch over the stored mode (off writes
-/// `never`, on writes Ask me), and under it, while on, the Ask me / Automatically
-/// choice. One row, so it is one search entry and one anchor.
+/// `never` and remembers the mode it left), and under it, while on, the
+/// Ask me / Automatically choice as its own row. One schema row, so one search
+/// entry and one anchor.
 struct CompactionModeRow: View {
     let row: SettingsRow
     let model: SettingsModel
@@ -200,16 +201,14 @@ struct CompactionModeRow: View {
     var body: some View {
         let binding = model.binding(for: row.field)
         let off = binding.string == AgentContextCompactionMode.never.rawValue
-        VStack(alignment: .leading, spacing: 10) {
+        Group {
             Toggle(isOn: Binding(get: { !off },
-                                 set: { binding.set(.string($0 ? AgentContextCompactionMode.ask.rawValue : AgentContextCompactionMode.never.rawValue)) })) {
+                                 set: { binding.set(.string(AgentContextAutoCompactionPolicy.modeAfterSwitch(on: $0, defaults: model.defaults).rawValue)) })) {
                 SettingsRowLabel(title: row.field.label, help: row.help)
             }
             .toggleStyle(.switch)
             if !off {
-                HStack {
-                    Text("When it gets long")
-                    Spacer()
+                LabeledContent("When it gets long") {
                     Picker(selection: Binding(get: { binding.string }, set: { binding.set(.string($0)) })) {
                         ForEach([AgentContextCompactionMode.ask, .automatic], id: \.rawValue) { mode in
                             Text(row.field.displayTitle(forOption: mode.rawValue)).tag(mode.rawValue)
