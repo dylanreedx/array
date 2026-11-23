@@ -253,7 +253,7 @@ public enum SettingsSchema {
         }
         return SettingsSection(id: "agents", title: "Agents", iconSystemName: "sparkles", sidebarHeading: tilesHeading,
                                keywords: ["ai", "assistant"], groups: [
-            SettingsGroup(id: "agents.managedMode", title: "Managed mode",
+            SettingsGroup(id: "agents.managedMode", title: nil,
                           footer: "Managed mode applies to Claude Code and Codex agents. Pi agents and the helpers a lead starts always stay free.", rows: [
                 SettingsRow(.toggle(key: AgentManagedModeConfig.enabledKey, label: "Managed mode", default: true),
                             help: "A Managed agent acts as a lead: it plans, hands separate pieces of work to helper agents on cheaper models, and checks what comes back. Off, agents work alone, and any agent may still start helpers. Changes apply at each agent’s next turn, which re-reads its conversation at full price.",

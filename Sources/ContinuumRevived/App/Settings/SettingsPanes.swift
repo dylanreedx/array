@@ -301,6 +301,8 @@ private struct SettingsPaneForm: View {
                                 Text(footer)
                                     .font(.callout)
                                     .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.leading)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
                             }
                         }
                     }
