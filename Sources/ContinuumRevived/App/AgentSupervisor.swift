@@ -4645,7 +4645,8 @@ final class AgentSupervisor {
                 // appends to it (a contract, a retry handoff, the report line).
                 _ = sendPrepared(PreparedAgentPrompt(prompt: AgentPrompt(prompt), expectedAgentID: id), to: id,
                                  taskParent: companionParentRun(for: parentAgentID),
-                                 sharedInputPermit: namingText.map { .init(agentID: id, namingText: $0) })
+                                 sharedInputPermit: namingText.map { .init(agentID: id, namingText: $0) },
+                                 namesFromPrompt: false)
             } else { send(prompt, to: id) }
         } else {
             applyDerivedNameIfNeeded(to: id, firstPrompt: nil)
@@ -4952,7 +4953,8 @@ final class AgentSupervisor {
     @discardableResult
     private func sendPrepared(_ prepared: PreparedAgentPrompt, to id: AgentID,
                               taskParent: CompanionTaskRunHandle? = nil, queuedItemID: UUID? = nil,
-                              sharedInputPermit: SharedInputPermit? = nil) -> Bool {
+                              sharedInputPermit: SharedInputPermit? = nil,
+                              namesFromPrompt: Bool = true) -> Bool {
         if sharedAgentControlGates[id]?.isEmpty == false, sharedInputPermit?.agentID != id {
             warn("Shared agent input requires current handoff admission; use the composer or shared controls.")
             return false
@@ -5035,9 +5037,14 @@ final class AgentSupervisor {
            record.displayName == AgentRecord.defaultAgentName,
            record.displayNameSource == .sentinel,
            let proposal = AgentRecord.resolveDerivedDisplayName(
-               firstPrompt: firstPromptText,
+               // A delegated helper's brief opens with boilerplate ("Array repo
+               // (Swift/AppKit) …"), never a title. Its name is the lead's explicit
+               // title (already stored), else the parent-relative fallback until a
+               // generated name lands; the brief's first line is never the name.
+               firstPrompt: namesFromPrompt ? firstPromptText : nil,
                sourceItemId: record.sourceItemId,
-               parentName: parentDisplayName(for: record),
+               // "Helper agent 2", not the lead's own (often long) name repeated.
+               parentName: namesFromPrompt ? parentDisplayName(for: record) : "Helper",
                parentRelativeOrdinal: record.parentRelativeOrdinal,
                model: record.model,
                role: record.role,
@@ -7756,6 +7763,7 @@ final class AgentSupervisor {
                 homeRelativePath: managed ? parent.homeRelativePath : nil,
                 parentAgentID: parentId,
                 isolated: resolved.isolate,
+                displayName: request.displayLabel,
                 checkoutOverride: managed ? checkout : nil,
                 managedIsolation: overlapping,
                 isolationTitle: isolationTitle,

@@ -1590,6 +1590,33 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false, inspectLaunch: 
                "the chip for a codex MCP delegation must name its callId, got \(String(describing: codexChipSource))")
     client.close()
 
+    // MARK: C2 — a helper's name: the lead's title, else a short fallback, never the brief's first line
+
+    let boilerplateBrief = "Array repo (Swift/AppKit, SwiftPM). Read CLAUDE.md first. Never call mcp__plan__* tools.\n\nTask: tidy the sidebar."
+    let titledReply = try result(
+        dispatch("agent.delegate", ["task": boilerplateBrief, "title": "Settings: Sidebar & personalization pane",
+                                    "idempotencyKey": "name-titled", "presentation": ["camera": "preserve"]],
+                 requestId: "op-name-titled"),
+        "delegation with a title")
+    guard let titledString = titledReply["childAgentId"]?.string, let titledUUID = UUID(uuidString: titledString),
+          let titled = supervisor.records[AgentID(rawValue: titledUUID)] else {
+        throw Failure(message: "titled delegation has no child record: \(titledReply)")
+    }
+    try expect(titled.humanDisplayName == "Settings: Sidebar & personalization pane",
+               "an explicit delegate title is the helper's name straight away, got '\(titled.humanDisplayName)'")
+    let untitledReply = try result(
+        dispatch("agent.delegate", ["task": boilerplateBrief, "idempotencyKey": "name-untitled",
+                                    "presentation": ["camera": "preserve"]], requestId: "op-name-untitled"),
+        "delegation without a title")
+    guard let untitledString = untitledReply["childAgentId"]?.string, let untitledUUID = UUID(uuidString: untitledString),
+          let untitled = supervisor.records[AgentID(rawValue: untitledUUID)] else {
+        throw Failure(message: "untitled delegation has no child record: \(untitledReply)")
+    }
+    try expect(!untitled.humanDisplayName.contains("Array repo") && !untitled.humanDisplayName.contains("CLAUDE.md"),
+               "with no title and no titler the name must not be the brief's first line, got '\(untitled.humanDisplayName)'")
+    try expect(untitled.humanDisplayName.count <= 40 && !untitled.humanDisplayName.isEmpty,
+               "the fallback name is short and readable, got '\(untitled.humanDisplayName)'")
+
     // MARK: Scale — one delegation with 2,000 agents on record (2026-11-12)
     //
     // Red before the fix: numbering the child decoded every record on disk, and
