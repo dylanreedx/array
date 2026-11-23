@@ -2232,6 +2232,32 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         return true
     }
     var tailTextForQA: String? { tailLabel.isHidden ? nil : tailLabel.stringValue }
+    /// The row grammar witness: everything this row draws that reads as a
+    /// status or identity signal, by name, as drawn now.
+    var rowSignalsForQA: [String] {
+        var out: [String] = []
+        if characterRectForQA != nil { out.append("character") }
+        if leadPlateShownForQA { out.append("plate") }
+        if throbber != nil { out.append("gyro") }
+        if pulseDots.frame.width > 0, !pulseDots.isHidden { out.append("dots") }
+        if !statusGlyph.isHidden, statusGlyph.superview != nil, statusGlyph.frame.width > 0, let symbol = statusGlyph.symbol {
+            out.append("status:\(symbol)")
+        }
+        if isSubagentRow, decorations.markSlot != nil { out.append("mark") }
+        if isSubagentRow, foldGlyphVisibleForQA, disclosureButton.frame.width > 0 { out.append("fold") }
+        return out
+    }
+    /// A helper row's character column (card space), set by layout.
+    private var characterColumn: NSRect?
+    /// That column in this cell's coordinates; nil when the row has none.
+    var characterColumnForQA: NSRect? {
+        guard isSubagentRow, characterRectForQA != nil, let characterColumn else { return nil }
+        return card.convert(inCard(characterColumn), to: self)
+    }
+    /// The title's drawn frame, in this cell's coordinates.
+    var titleFrameForQA: NSRect { titleLabel.convert(titleLabel.bounds, to: self) }
+    /// The title's natural width (what it needs to draw whole).
+    var titleNaturalWidthForQA: CGFloat { Self.width(of: titleLabel) }
     /// The drawn tail's room, and the width its text needs from its start
     /// through the end of `text`: what fits that room is drawn untruncated.
     func tailFitForQA(through text: String) -> (room: CGFloat, needed: CGFloat)? {
@@ -2599,12 +2625,15 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         }
         // Plan 110: a helper's character, just left of its mark while it rests;
         // the hover controls take both places.
+        characterColumn = nil
         if leftIcon, let size = characterSize {
+            characterColumn = NSRect(x: x0 + 2, y: 0, width: Self.haloHelperColumn, height: card.bounds.height)
             decorations.setCharacterSlot(
                 NSRect(x: x0 + 2 + ((Self.haloHelperColumn - size.width) / 2).rounded(),
                        y: snapped(mid - size.height / 2), width: size.width, height: size.height))
         } else if let size = characterSize {
             let gap = decorations.mark == nil ? 7 : Self.characterGap
+            characterColumn = NSRect(x: right - restingWidth - gap - size.width, y: 0, width: size.width, height: card.bounds.height)
             decorations.setCharacterSlot(showsResting
                 ? NSRect(x: right - restingWidth - gap - size.width,
                          y: snapped(mid - size.height / 2), width: size.width, height: size.height) : nil)

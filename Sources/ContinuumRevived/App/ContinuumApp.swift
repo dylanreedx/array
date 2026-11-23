@@ -3567,6 +3567,19 @@ enum ContinuumApp {
                 }
             }
         }
+        // Every sidebar row state, held to one row grammar (and its contact sheets).
+        if CommandLine.arguments.contains("--sidebar-row-grammar-check") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    print(try SidebarRowGrammarChecks.run())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL sidebar row grammar: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
         // Design round only: the lead's icon as its fold control.
         if CommandLine.arguments.contains("--sidebar-lead-icon-round") {
             _ = NSApplication.shared

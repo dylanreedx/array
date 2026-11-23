@@ -7328,6 +7328,14 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     /// Plan 110: the 96 card drawing agent `id`, if it is on screen.
+    /// Quiet inbox: each lead's drawn summary line, by lead id.
+    var leadCountLinesForQA: [(UUID, String)] {
+        familyCauseCells.compactMap { key, cell in
+            guard key.hasPrefix("count:"), cell.window != nil, let tally = cell.countTallyForQA else { return nil }
+            return (tally.leadId, cell.titleForQA)
+        }
+    }
+
     func cellForQA(id: UUID) -> AgentInbox96CellView? {
         guard let tableRow = tableRow(forAgentId: id) else { return nil }
         return tableView.view(atColumn: 0, row: tableRow, makeIfNecessary: false) as? AgentInbox96CellView
