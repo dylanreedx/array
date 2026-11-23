@@ -50,6 +50,17 @@ func runSettingsSchemaChecks() {
     let fieldKeys = allFields.compactMap(\.key)
     expect(Set(fieldKeys).count == fieldKeys.count, "settings field keys must be unique across all sections")
 
+    // Everyday behaviour lives in General. The jump and header-click rows moved
+    // there from Canvas under their original defaults keys, so saved values keep
+    // applying with no migration.
+    let generalKeys = Set(sections.first { $0.id == "general" }?.fields.compactMap(\.key) ?? [])
+    let canvasKeys = Set(sections.first { $0.id == "canvasAndZones" }?.fields.compactMap(\.key) ?? [])
+    for key in [AgentJumpConfig.composerFirstKey, TileHeaderClickConfig.focusKey] {
+        expect(generalKeys.contains(key), "General must hold the \(key) row")
+        expect(!canvasKeys.contains(key), "Canvas must not repeat the \(key) row that General holds")
+    }
+    expect(AgentJumpConfig.composerFirstKey == "array.agentJump.composerFirst", "the jump key must stay the saved key")
+
     // Existing prefs represented: the schema must bind each of these exact keys.
     let expectedKeys: Set<String> = [
         AgentManagedModeConfig.enabledKey,

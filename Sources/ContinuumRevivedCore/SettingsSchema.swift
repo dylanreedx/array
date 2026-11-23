@@ -36,10 +36,20 @@ public enum SettingsSchema {
                     help: "Notes and files close straight away; their contents are saved on disk.",
                     keywords: ["delete", "confirm", "close", "warning"]),
             ]),
+            SettingsGroup(id: "general.navigation", title: "Jumping and focusing", rows: [
+                SettingsRow(.toggle(key: AgentJumpConfig.composerFirstKey, label: "Jump to an agent's composer", default: AgentJumpConfig.defaultComposerFirst),
+                            help: "Jumping to an agent (jump labels, ⌘K) keeps a readable zoom and lands on its composer. When the tile is taller than the screen, its header stays pinned at the top.",
+                            keywords: ["jump", "reveal", "focus", "composer", "sticky header", "zoom"]),
+                SettingsRow(.toggle(key: TileHeaderClickConfig.focusKey, label: "Click a header to focus its tile", default: TileHeaderClickConfig.defaultFocus),
+                            help: "Fits as much of the tile on screen as possible and puts the cursor in it, like ⌥↩. Dragging a header still moves the tile.",
+                            keywords: ["header", "title bar", "click", "focus", "centre", "center", "fit", "zoom"]),
+            ]),
             SettingsGroup(id: "general.dock", title: "Activity Dock", rows: [
                 SettingsRow(.toggle(key: WorkspaceSidebarConfig.visibleKey, label: "Show the Activity Dock", default: WorkspaceSidebarConfig.defaultVisible),
+                            help: "The side list of every agent, what each is doing, and what needs you.",
                             keywords: ["sidebar", "inbox", "agents list"]),
                 SettingsRow(.number(key: WorkspaceSidebarConfig.widthKey, label: "Dock width", range: 180...640, default: WorkspaceSidebarConfig.defaultWidth, unit: "pt", step: 8),
+                            help: "You can also drag the dock's edge.",
                             keywords: ["sidebar"]),
             ]),
             SettingsGroup(id: "general.updates", title: "Updates", rows: [
@@ -189,6 +199,7 @@ public enum SettingsSchema {
                                         CanvasAutoLayoutActivation.immediately.rawValue: "Tidy right away",
                                         CanvasAutoLayoutActivation.onFirstEdit.rawValue: "Wait until the next change",
                                     ]),
+                            help: "What happens to the tiles already in a zone when you switch Arrange tiles automatically on for it.",
                             keywords: ["auto layout", "tidy"]),
                 SettingsRow(.choice(key: CanvasAutoLayoutConfig.growthKey, label: "New tiles grow the zone", options: CanvasGrowthDirection.allCases.map(\.rawValue), default: CanvasAutoLayoutConfig.defaultGrowth.rawValue,
                                     titles: [
@@ -199,11 +210,13 @@ public enum SettingsSchema {
                             help: "Where an auto-layout zone puts a new tile, and where a lead's helpers open.",
                             keywords: ["auto layout", "grow", "direction", "fan", "helpers"]),
                 SettingsRow(.number(key: TileGapResolver.userDefaultsKey, label: "Space between tiles", range: 0...160, default: TileGapResolver.defaultGap, unit: "pt", step: 4),
+                            help: "The gap kept between neighbouring tiles when they are arranged or snapped.",
                             keywords: ["gap", "spacing", "padding"]),
                 SettingsRow(.number(key: ZoneBoundsConfig.paddingKey, label: "Zone padding", range: 0...240, default: ZoneBoundsConfig.defaultPadding, unit: "pt", step: 4),
                             help: "Used when a new zone is laid out.",
                             keywords: ["spacing", "margin"]),
                 SettingsRow(.toggle(key: DragMagnetizeConfig.enabledKey, label: "Snap tiles while dragging", default: DragMagnetizeConfig.defaultEnabled),
+                            help: "Tiles you drag stick to the edges of nearby tiles.",
                             keywords: ["magnet", "snapping", "align"]),
             ]),
             SettingsGroup(id: "canvas.zones", title: "Zones", rows: [
@@ -211,24 +224,16 @@ public enum SettingsSchema {
                             help: "Headers, borders, and the project and Home folder of each zone.",
                             keywords: ["zone chrome", "border", "title bar"]),
                 SettingsRow(.text(key: DefaultGroupZoneName.userDefaultsKey, label: "New zone name", default: DefaultGroupZoneName.fallback),
+                            help: "The name a zone gets when you create it. You can rename any zone.",
                             keywords: ["default name", "rename"]),
                 SettingsRow(.choice(key: ZoneColorConfig.assignmentPolicyKey, label: "New zone colour", options: ZoneColorAssignmentPolicy.allCases.map(\.rawValue), default: ZoneColorConfig.defaultAssignmentPolicy.rawValue,
                                     titles: Dictionary(uniqueKeysWithValues: ZoneColorAssignmentPolicy.allCases.map { ($0.rawValue, $0.displayName) })),
                             help: "Used when a zone is created. A colour you pick is never changed.",
                             keywords: ["color", "palette"]),
             ]),
-            SettingsGroup(id: "canvas.jump", title: "Jumping to agents", rows: [
-                SettingsRow(.toggle(key: AgentJumpConfig.composerFirstKey, label: "Jump to an agent's composer", default: AgentJumpConfig.defaultComposerFirst),
-                            help: "A jump keeps a readable zoom and lands on the composer. When the tile is taller than the screen, its header stays pinned at the top.",
-                            keywords: ["jump", "reveal", "focus", "composer", "sticky header", "zoom"]),
-            ]),
-            SettingsGroup(id: "canvas.focus", title: "Focusing tiles", rows: [
-                SettingsRow(.toggle(key: TileHeaderClickConfig.focusKey, label: "Click a header to focus its tile", default: TileHeaderClickConfig.defaultFocus),
-                            help: "Fits as much of the tile on screen as possible and puts the cursor in it, like ⌥↩. Dragging a header still moves the tile.",
-                            keywords: ["header", "title bar", "click", "focus", "centre", "center", "fit", "zoom"]),
-            ]),
-            SettingsGroup(id: "canvas.toolbar", title: "Toolbar and hints", rows: [
+            SettingsGroup(id: "canvas.toolbar", title: "Toolbar and shortcut hints", rows: [
                 SettingsRow(.toggle(key: FloatingToolbarConfig.visibleKey, label: "Show the canvas toolbar", default: FloatingToolbarConfig.defaultVisible),
+                            help: "The floating bar of create buttons on the canvas. Choose which buttons it shows below.",
                             keywords: ["floating toolbar", "create"]),
             ] + toolbarItems + [
                 SettingsRow(.action(id: "resetToolbarPosition", label: "Toolbar position", buttonTitle: "Reset Position"),
@@ -375,7 +380,7 @@ public enum SettingsSchema {
     private static func editor() -> SettingsSection {
         SettingsSection(id: "editor", title: "Editor", iconSystemName: "curlybraces", sidebarHeading: tilesHeading,
                         keywords: ["code", "file"], groups: [
-            SettingsGroup(id: "editor.appearance", title: nil, footer: "Applies to every editor tile right away.", rows: [
+            SettingsGroup(id: "editor.appearance", title: "Text and editing", footer: "Applies to every editor tile right away.", rows: [
                 SettingsRow(.choice(key: EditorPreferences.appearanceKey, label: "Appearance", options: EditorAppearance.allCases.map(\.rawValue), default: EditorAppearance.system.rawValue,
                                     titles: [
                                         EditorAppearance.system.rawValue: "Match System",
@@ -415,8 +420,10 @@ public enum SettingsSchema {
                             help: "Terminals not in a zone share one tmux session per workspace.",
                             keywords: ["tmux", "unzoned"]),
                 SettingsRow(.toggle(key: SessionResumeConfig.scrollbackEnabledKey, label: "Restore scrollback", default: SessionResumeConfig.scrollbackEnabledDefault),
+                            help: "A terminal that comes back after a restart shows what was on screen before.",
                             keywords: ["history", "resume"]),
                 SettingsRow(.number(key: SessionResumeConfig.scrollbackMaxLinesKey, label: "Lines to restore", range: 0...100_000, default: Double(SessionResumeConfig.scrollbackMaxLinesDefault), unit: "lines", step: 500),
+                            help: "How much history comes back with a restored terminal. Only used when Restore scrollback is on.",
                             keywords: ["scrollback", "history"]),
             ]),
             SettingsGroup(id: "terminal.directory", title: "Starting folder", rows: [
@@ -435,7 +442,7 @@ public enum SettingsSchema {
     private static func browser() -> SettingsSection {
         SettingsSection(id: "browser", title: "Browser", iconSystemName: "globe", sidebarHeading: tilesHeading,
                         keywords: ["web", "webkit"], groups: [
-            SettingsGroup(id: "browser.general", title: nil, rows: [
+            SettingsGroup(id: "browser.general", title: "Pages and inspection", rows: [
                 SettingsRow(.url(key: DefaultBrowserURL.userDefaultsKey, label: "New browser tiles open", default: DefaultBrowserURL.fallback),
                             keywords: ["home page", "default url", "start page"]),
                 SettingsRow(.toggle(key: BrowserWebInspectorConfig.userDefaultsKey, label: "Allow Safari Web Inspector", default: BrowserWebInspectorConfig.defaultEnabled),
@@ -448,7 +455,7 @@ public enum SettingsSchema {
     private static func notificationsAndSounds() -> SettingsSection {
         SettingsSection(id: "activityAndNotifications", title: "Notifications & Sounds", iconSystemName: "bell.badge",
                         keywords: ["alerts", "audio"], groups: [
-            SettingsGroup(id: "sounds", title: "Sounds", rows: [
+            SettingsGroup(id: "sounds", title: "Agent sounds", rows: [
                 SettingsRow(.agentSounds(label: "Agent sounds")),
             ]),
         ])
@@ -514,13 +521,16 @@ public enum SettingsSchema {
     private static func advanced() -> SettingsSection {
         SettingsSection(id: "advanced", title: "Advanced", iconSystemName: "wrench.and.screwdriver",
                         keywords: ["performance", "memory"], groups: [
-            SettingsGroup(id: "advanced.limits", title: "Limits",
+            SettingsGroup(id: "advanced.limits", title: "Memory limits",
                           footer: "Lower limits use less memory; tiles beyond them reload when you return.", rows: [
                 SettingsRow(.number(key: BrowserRuntimeBudget.defaultsKey, label: "Live web pages", range: 1...128, default: Double(BrowserRuntimeBudget.defaultMaxLive), unit: "pages", step: 1),
+                            help: "How many browser tiles keep their page loaded at once.",
                             keywords: ["browser", "webview", "budget", "max"]),
                 SettingsRow(.number(key: ZoneHydrationBudgetConfig.maxLiveZonesKey, label: "Live zones", range: 1...64, default: Double(ZoneHydrationBudgetConfig.defaultMaxLiveZones), unit: "zones", step: 1),
+                            help: "How many zones keep their tiles running at once. Tiles in other zones reload when you return.",
                             keywords: ["hydration", "budget", "max"]),
-                SettingsRow(.toggle(key: ZoneRuntimeBudgetConfig.closeOnZeroKey, label: "Close a project's runtime when it has no zones on the canvas", default: ZoneRuntimeBudgetConfig.defaultCloseOnZero),
+                SettingsRow(.toggle(key: ZoneRuntimeBudgetConfig.closeOnZeroKey, label: "Close a project's terminals and pages when it has no zones", default: ZoneRuntimeBudgetConfig.defaultCloseOnZero),
+                            help: "Frees the terminals and web pages of a project with no zone on the canvas. Off keeps them warm, so coming back is faster but uses more memory.",
                             keywords: ["memory", "unused"]),
                 SettingsRow(.toggle(key: IOSPreviewReclaimConfig.enabledKey, label: "Shut down simulators no preview is showing", default: IOSPreviewReclaimConfig.defaultEnabled),
                             help: "Only simulators Array started. Each one holds 2–3 GB. After 2 minutes with its preview off screen or closed, Array shuts it down, and starts it again when the preview comes back.",
