@@ -2799,6 +2799,20 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        // The plan drawer's data model: links, stale failures, waiting (2026-11-23).
+        if CommandLine.arguments.contains("--lead-plan-model-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await ManagedLeadPlanChecks.runModel()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
         // `.plans/116` part 12 step 1: the host-kept run ledger, through the
         // composer's accept, the real MCP binary and a restart.
         if CommandLine.arguments.contains("--managed-run-ledger-check") {

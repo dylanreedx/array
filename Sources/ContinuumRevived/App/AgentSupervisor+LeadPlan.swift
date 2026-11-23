@@ -1,4 +1,3 @@
-import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
 
@@ -19,7 +18,53 @@ struct LeadPlanPresentation: Equatable {
         var stale: Bool = false
         /// Clicking the owner reveals this helper's tile.
         var ownerAgent: AgentID? = nil
+        /// A failure that no longer needs the user (old, or the lead has since
+        /// taken a turn). Still drawn as Failed; never urgent, never counted.
+        var past: Bool = false
     }
+
+    // MARK: The model (see ~/array-scratch/plan-drawer-redesign/MODEL.md)
+
+    /// Where a helper sits. Header counts and groups both read this and nothing else.
+    /// - working: a turn is running.
+    /// - waiting: idle and alive (between turns).
+    /// - needsYou: blocked/asked for the user, or FAILED recently and unacknowledged.
+    /// - finished: done, or a failure that stopped counting.
+    enum Bucket: String { case needsYou, working, waiting, finished }
+    struct Helper: Equatable, Identifiable {
+        let id: AgentID
+        let name: String
+        let model: String
+        let state: State
+        let bucket: Bucket
+        /// "3d ago" for finished helpers.
+        let note: String?
+        /// When the helper's last turn ended (its failure or finish time), else
+        /// its last activity. Raw date, so the view can phrase its own age.
+        let endedAt: Date?
+    }
+    struct Entry: Equatable, Identifiable {
+        enum OwnerKind: String { case lead, you, helpers, unstarted, unavailable }
+        /// Stable across recomputes: the normalised title plus its occurrence index.
+        let id: String
+        let title: String
+        let ownerKind: OwnerKind
+        /// "Lead", "You", the raw "helper A" name, or "Helper unavailable".
+        let ownerLabel: String
+        let state: State
+        let stale: Bool
+        let note: String?
+        /// Helpers that own this step, oldest first. Empty for lead/you steps.
+        let helpers: [Helper]
+    }
+    struct Counts: Equatable {
+        var working = 0, waiting = 0, needsYou = 0, finished = 0
+    }
+    /// Plan steps in plan order, each with its linked helpers.
+    var entries: [Entry] = []
+    /// Helpers linked to no step: working/needsYou/waiting by creation order, then recent finished.
+    var tail: [Helper] = []
+    var counts = Counts()
     let steps: [Step]
     let collapsed: Bool
     /// The lead's own `needsYou` line, when it has a decision for Dylan.
@@ -36,7 +81,7 @@ struct LeadPlanPresentation: Equatable {
     }
     var urgent: Step? {
         for state in [State.needsYou, .failed, .running] {
-            if let step = rows.first(where: { $0.state == state }) { return step }
+            if let step = rows.first(where: { $0.state == state && !$0.past }) { return step }
         }
         return nil
     }
@@ -109,96 +154,159 @@ extension AgentSupervisor {
     /// Helper activity repaints the drawer at most this often.
     static let leadPlanActivityCadence: TimeInterval = 0.25
 
+    /// A failed helper needs the user only while it is recent (under a day) AND the
+    /// lead has not completed a turn since it failed (the lead has had its chance
+    /// to act on it). Otherwise it is past: Failed, but finished, not "needs you".
+    static let leadFailureNeedsYouWindow: TimeInterval = 24 * 3600
+
+    func leadPlanBucket(of helper: AgentRecord, state: LeadPlanPresentation.State, lead: AgentRecord, now: Date) -> LeadPlanPresentation.Bucket {
+        switch state {
+        case .needsYou: return .needsYou
+        case .running: return .working
+        case .waiting: return .waiting
+        case .done: return .finished
+        case .failed:
+            let ended = helper.latestTerminalEvent?.endedAt ?? helper.lastActivityAt
+            if now.timeIntervalSince(ended) > Self.leadFailureNeedsYouWindow { return .finished }
+            if let handled = lead.latestTerminalEvent?.endedAt, handled > ended { return .finished }
+            return .needsYou
+        }
+    }
+
+    private func leadPlanHelper(_ helper: AgentRecord, lead: AgentRecord, now: Date) -> LeadPlanPresentation.Helper {
+        let state = liveLeadPlanState(of: helper)
+        let bucket = leadPlanBucket(of: helper, state: state, lead: lead, now: now)
+        let model = helper.harness.flatMap { AgentModelCatalog.shared.displayName(for: helper.model, harness: $0) } ?? helper.model
+        let ended = helper.latestTerminalEvent?.endedAt ?? helper.lastActivityAt
+        return .init(id: helper.id, name: helper.humanDisplayName, model: model, state: state, bucket: bucket,
+                     note: bucket == .finished || state == .failed ? Self.relativeAge(ended, now: now) : nil,
+                     endedAt: ended)
+    }
+
+    /// Helpers of this lead a plan owner names: by ID, else by name (names may repeat).
+    private func leadPlanLinked(_ owner: String, among helpers: [AgentRecord]) -> [AgentRecord] {
+        let key = owner.trimmingCharacters(in: .whitespaces)
+        return helpers.filter {
+            $0.id.rawValue.uuidString.caseInsensitiveCompare(key) == .orderedSame
+                || $0.humanDisplayName.caseInsensitiveCompare(key) == .orderedSame
+        }
+    }
+
     func leadPlan(for id: AgentID, now: Date = Date()) -> LeadPlanPresentation? {
         guard let lead = records[id], lead.mode == .managed, lead.parentAgentID == nil else { return nil }
         let declared = lead.declaredStatus
         let plan = declared?.plan ?? []
+        // Creation order, never activity: activity stamps move on every event.
         let helpers = records.values.filter { $0.parentAgentID == id && $0.archivedAt == nil }
-        let planned = Set(plan.compactMap { UUID(uuidString: $0.owner) })
+            .sorted { ($0.createdAt, $0.id.rawValue.uuidString) < ($1.createdAt, $1.id.rawValue.uuidString) }
+        let wrote = declared?.planDeclaredAt ?? declared?.declaredAt
+        let age = wrote.flatMap { Self.relativeAge($0, now: now) }
+        let stale = wrote.map { now.timeIntervalSince($0) > Self.leadPlanStaleAfter } ?? false
 
-        // Helpers the plan does not name: observed, so never stale. Needs-you and
-        // failed first, then working (or idle between turns), then what finished
-        // in the last day. Within a group rows keep the order the helpers were
-        // created in: activity stamps move on every event, so sorting by them
-        // reshuffled the rows while helpers streamed.
-        var roster: [LeadPlanPresentation.Step] = []
-        func rows(_ group: String, _ state: Set<LeadPlanPresentation.State>, limit: Int, recent: Bool = false) {
-            var found: [(AgentRecord, LeadPlanPresentation.State)] = []
-            for helper in helpers where !planned.contains(helper.id.rawValue) {
-                let live = liveLeadPlanState(of: helper)
-                guard state.contains(live) else { continue }
-                if recent, now.timeIntervalSince(helper.latestTerminalEvent?.endedAt ?? helper.lastActivityAt) > Self.leadPlanDoneWindow { continue }
-                found.append((helper, live))
+        // 1. Plan steps in plan order, each with the helpers that own it.
+        var linkedIDs = Set<AgentID>()
+        var seen: [String: Int] = [:]
+        var entries: [LeadPlanPresentation.Entry] = []
+        for step in plan {
+            let norm = step.title.lowercased()
+            let n = seen[norm, default: 0]; seen[norm] = n + 1
+            let entryID = "\(norm)#\(n)"
+            if step.owner == "lead" || step.owner == "you" {
+                let you = step.owner == "you"
+                entries.append(.init(id: entryID, title: step.title, ownerKind: you ? .you : .lead, ownerLabel: you ? "You" : "Lead",
+                    state: step.state == .done ? .done : (you ? .needsYou : .waiting), stale: stale,
+                    note: you && step.state != .done && stale ? "asked \(age ?? "")" : nil, helpers: []))
+                continue
             }
-            found.sort { InboxSort.needsYouOrder(($0.0.createdAt, $0.0.id.rawValue), ($1.0.createdAt, $1.0.id.rawValue)) }
-            let room = max(0, min(limit, Self.leadPlanRosterLimit - roster.filter { !$0.isSection }.count))
-            guard room > 0, !found.isEmpty else { return }
-            roster.append(.init(title: group, owner: "", state: .waiting, isSection: true))
-            for (helper, live) in found.prefix(room) {
-                let model = helper.harness.flatMap { AgentModelCatalog.shared.displayName(for: helper.model, harness: $0) } ?? helper.model
-                let ended = helper.latestTerminalEvent?.endedAt ?? helper.lastActivityAt
-                // One kind per column, fixed by the row and never by its state: the
-                // title is the helper's name (Array names helpers for their task),
-                // the owner is its model. Its status line changes every few seconds
-                // and used to swap both cells; it stays on the helper's own tile.
-                roster.append(.init(
-                    title: helper.humanDisplayName,
-                    owner: model, state: live,
-                    note: live == .done || live == .failed ? Self.relativeAge(ended, now: now) : nil,
-                    liveDot: true, ownerAgent: helper.id))
+            let linked = leadPlanLinked(step.owner, among: helpers).map { leadPlanHelper($0, lead: lead, now: now) }
+            for h in linked { linkedIDs.insert(h.id) }
+            guard !linked.isEmpty else {
+                let unstarted = Self.isUnstartedHelperOwner(step.owner)
+                entries.append(.init(id: entryID, title: step.title, ownerKind: unstarted ? .unstarted : .unavailable,
+                    ownerLabel: unstarted ? step.owner : "Helper unavailable", state: .waiting, stale: stale,
+                    note: unstarted && stale ? "never started" : nil, helpers: []))
+                continue
+            }
+            // The step reads as its most pressing helper: attention, working, waiting, then finished.
+            let lead1 = linked.first { $0.bucket == .needsYou } ?? linked.first { $0.bucket == .working }
+                ?? linked.first { $0.bucket == .waiting } ?? linked.first { $0.state == .failed } ?? linked[0]
+            entries.append(.init(id: entryID, title: step.title, ownerKind: .helpers, ownerLabel: linked.map(\.name).joined(separator: ", "),
+                state: lead1.state, stale: stale, note: nil, helpers: linked))
+        }
+
+        // 2. Helpers no step names: observed, never stale.
+        func finishedAt(_ hid: AgentID) -> Date { records[hid].map { $0.latestTerminalEvent?.endedAt ?? $0.lastActivityAt } ?? .distantPast }
+        let allHelpers = helpers.map { leadPlanHelper($0, lead: lead, now: now) }
+        var counts = LeadPlanPresentation.Counts()
+        for h in allHelpers where h.bucket != .finished || now.timeIntervalSince(finishedAt(h.id)) <= Self.leadPlanDoneWindow {
+            switch h.bucket {
+            case .needsYou: counts.needsYou += 1
+            case .working: counts.working += 1
+            case .waiting: counts.waiting += 1
+            case .finished: counts.finished += 1
             }
         }
-        rows("Needs you", [.needsYou, .failed], limit: 3)
-        rows("Working", [.running, .waiting], limit: 4)
-        rows("Done", [.done], limit: 3, recent: true)
+        let unplanned = allHelpers.filter { !linkedIDs.contains($0.id) }
+        let order: [LeadPlanPresentation.Bucket] = [.needsYou, .working, .waiting, .finished]
+        var tail: [LeadPlanPresentation.Helper] = []
+        for bucket in order {
+            tail += unplanned.filter { $0.bucket == bucket
+                && (bucket != .finished || now.timeIntervalSince(finishedAt($0.id)) <= Self.leadPlanDoneWindow) }
+        }
+
+        // 3. Legacy flat rows for the current drawer view: bounded, grouped by bucket.
+        var roster: [LeadPlanPresentation.Step] = []
+        func group(_ title: String, _ bucket: LeadPlanPresentation.Bucket, limit: Int) {
+            let found = tail.filter { $0.bucket == bucket }
+            let room = max(0, min(limit, Self.leadPlanRosterLimit - roster.filter { !$0.isSection }.count))
+            guard room > 0, !found.isEmpty else { return }
+            let title = bucket == .finished && found.contains(where: { $0.state == .failed }) ? "Finished" : title
+            roster.append(.init(title: title, owner: "", state: .waiting, isSection: true))
+            for h in found.prefix(room) {
+                // One kind per column, fixed by the row and never by its state: the
+                // title is the helper's name, the owner is its model.
+                roster.append(.init(title: h.name, owner: h.model, state: h.state, note: h.state == .done || h.state == .failed ? h.note : nil,
+                                    liveDot: true, ownerAgent: h.id, past: h.state == .failed && h.bucket == .finished))
+            }
+        }
+        group("Needs you", .needsYou, limit: 3)
+        group("Working", .working, limit: 4)
+        group("Waiting", .waiting, limit: 4)
+        group("Done", .finished, limit: 3)
 
         var steps = roster
         if !plan.isEmpty {
-            let wrote = declared?.planDeclaredAt ?? declared?.declaredAt
-            let age = wrote.flatMap { Self.relativeAge($0, now: now) }
-            let stale = wrote.map { now.timeIntervalSince($0) > Self.leadPlanStaleAfter } ?? false
             if !roster.isEmpty || stale {
                 steps.append(.init(title: age.map { "Plan · written \($0)" } ?? "Plan", owner: "", state: .waiting,
                                    isSection: true, stale: stale))
             }
-            for step in plan {
-                if step.owner == "lead" || step.owner == "you" {
-                    steps.append(.init(title: step.title, owner: step.owner == "lead" ? "Lead" : "You",
-                                       state: step.state == .done ? .done : (step.owner == "you" ? .needsYou : .waiting),
-                                       note: step.owner == "you" && step.state != .done && stale ? "asked \(age ?? "")" : nil, stale: stale))
-                    continue
+            for e in entries {
+                switch e.ownerKind {
+                case .lead, .you, .unstarted, .unavailable:
+                    steps.append(.init(title: e.title, owner: e.ownerLabel, state: e.state, note: e.note, stale: e.stale))
+                case .helpers:
+                    let first = e.helpers.first { $0.state == e.state } ?? e.helpers[0]
+                    let owner = e.helpers.count == 1 ? "\(first.name) · \(first.model)" : e.ownerLabel
+                    steps.append(.init(title: e.title, owner: owner, state: e.state, liveDot: true, stale: e.stale,
+                                       ownerAgent: first.id, past: first.state == .failed && first.bucket == .finished))
                 }
-                guard let uuid = UUID(uuidString: step.owner), let helper = records[AgentID(rawValue: uuid)],
-                      helper.parentAgentID == id else {
-                    if Self.isUnstartedHelperOwner(step.owner) {
-                        steps.append(.init(title: step.title, owner: step.owner, state: .waiting,
-                                           note: stale ? "never started" : nil, stale: stale))
-                    } else {
-                        steps.append(.init(title: step.title, owner: "Helper unavailable", state: .waiting, stale: stale))
-                    }
-                    continue
-                }
-                let model = helper.harness.flatMap { AgentModelCatalog.shared.displayName(for: helper.model, harness: $0) } ?? helper.model
-                steps.append(.init(title: step.title, owner: "\(helper.humanDisplayName) · \(model)",
-                                   state: liveLeadPlanState(of: helper), liveDot: true, stale: stale, ownerAgent: helper.id))
             }
         }
         let decision = declared?.needsYou
         guard !steps.isEmpty || decision != nil else { return nil }
-        // A drawer that is only the lead's plan keeps "Plan · n of m done"; one
-        // that shows observed helpers is headed by what they are doing.
         var title: String?
         if plan.isEmpty || !roster.isEmpty {
-            let observed = steps.filter { !$0.isSection && $0.ownerAgent != nil }
-            let working = observed.filter { $0.state == .running }.count
-            let needs = observed.filter { $0.state == .needsYou || $0.state == .failed }.count + (decision == nil ? 0 : 1)
             var parts = ["Helpers"]
-            if working > 0 { parts.append("\(working) working") }
+            if counts.working > 0 { parts.append("\(counts.working) working") }
+            if counts.waiting > 0 { parts.append("\(counts.waiting) waiting") }
+            let needs = counts.needsYou + (decision == nil ? 0 : 1)
             if needs > 0 { parts.append("\(needs) need you") }
             title = parts.joined(separator: " · ")
         }
-        return LeadPlanPresentation(steps: steps, collapsed: lead.leadPlanCollapsed, decision: decision,
-                                    options: decision == nil ? [] : (declared?.options ?? []), title: title)
+        var out = LeadPlanPresentation(steps: steps, collapsed: lead.leadPlanCollapsed, decision: decision,
+                                       options: decision == nil ? [] : (declared?.options ?? []), title: title)
+        out.entries = entries; out.tail = tail; out.counts = counts
+        return out
     }
 
     func addLeadPlanObserver(for id: AgentID, _ observer: @escaping () -> Void) -> UUID {

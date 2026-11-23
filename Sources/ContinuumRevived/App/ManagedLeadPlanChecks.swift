@@ -426,6 +426,107 @@ enum ManagedLeadPlanChecks {
         print("Lead plan steady passed: one kind per column, stable order/sections/height through a 120-event burst, bounded cadence, finish lands once")
     }
 
+    /// `--lead-plan-model-check`. Live 2026-11-23 on 0.7.60: the drawer read
+    /// "Helpers · 1 working · 3 need you" over three helpers that failed six days
+    /// ago, counted two idle helpers as working, and numbered helpers and plan
+    /// steps as two lists though the steps were owned by those helpers. This
+    /// builds his drawer through the production supervisor path and the mounted
+    /// tile, and asserts the model: steps link to their helpers, old failures
+    /// do not need the user, waiting is not working, and the order is stable.
+    static func runModel() async throws {
+        let b = try ManagedModeChecks.bench("lead-plan-model")
+        defer { b.tearDown() }
+        let supervisor = b.supervisor, lead = b.f.agentId
+        let tile = try mountLead(b)
+        let view = tile.qaLeadPlanView
+        let sixDays = Date().addingTimeInterval(-6 * 86400)
+        var serial = 0
+        func helper(_ name: String) -> AgentID {
+            serial += 1
+            let id = supervisor.spawn(role: nil, prompt: nil, cwd: b.f.pbRoot, harness: .claudeCode,
+                model: ManagedModeChecks.model, thinking: "high", projectId: b.f.projectPb,
+                projectRoot: b.f.pbRoot, parentAgentID: lead, displayName: name)
+            supervisor.qaDeliver(.sessionStateChanged(.running), to: id, now: Date().addingTimeInterval(Double(serial) - 600))
+            return id
+        }
+        func startTurn(_ id: AgentID, at: Date) {
+            supervisor.qaDeliver(.turnStarted(threadId: AgentSupervisor.threadId(for: id), turnId: "t1"), to: id, now: at)
+        }
+        func finishTurn(_ id: AgentID, _ outcome: TurnOutcome, at: Date) {
+            supervisor.qaDeliver(.turnCompleted(threadId: AgentSupervisor.threadId(for: id), turnId: "t1", outcome: outcome, errorMessage: outcome == .failed ? "boom" : nil), to: id, now: at)
+            supervisor.qaDeliver(.sessionStateChanged(.ready), to: id, now: at)
+        }
+        // His drawer: three helpers failed six days ago, two idle, one done, one running.
+        let failed = ["Sidebar audit", "Login flow", "History export"].map(helper)
+        for id in failed { startTurn(id, at: sixDays); finishTurn(id, .failed, at: sixDays.addingTimeInterval(60)) }
+        let idle = ["Copy review", "Icon pass"].map(helper)
+        for id in idle { supervisor.qaDeliver(.sessionStateChanged(.ready), to: id, now: Date().addingTimeInterval(-500)) }
+        let done = helper("Release notes")
+        startTurn(done, at: Date().addingTimeInterval(-300)); finishTurn(done, .completed, at: Date().addingTimeInterval(-120))
+        let running = helper("Drawer rework")
+        startTurn(running, at: Date().addingTimeInterval(-30))
+        let names = ["Sidebar audit": failed[0], "Login flow": failed[1], "History export": failed[2],
+                     "Copy review": idle[0], "Icon pass": idle[1], "Release notes": done, "Drawer rework": running]
+        for (name, id) in names { try expect(supervisor.records[id]?.humanDisplayName == name, "helper \(name) did not take its name") }
+        // Plan: owners by name and by id; the rest are the lead's.
+        let plan = [AgentPlanStep(title: "Rework the drawer", owner: "Drawer rework"),
+                    AgentPlanStep(title: "Copy pass", owner: idle[0].rawValue.uuidString),
+                    AgentPlanStep(title: "Retry the history export", owner: failed[2].rawValue.uuidString),
+                    AgentPlanStep(title: "Review and merge", owner: "lead"),
+                    AgentPlanStep(title: "Ship", owner: "lead")]
+        try expect(supervisor.declareStatus(AgentDeclaredStatus(now: "Delegated", plan: plan, declaredAt: Date(), planDeclaredAt: Date().addingTimeInterval(-120)), for: lead), "plan refused")
+        try await AgentPresenceChecks.eventually("the plan did not reach the drawer") { view.presentation?.entries.count == 5 }
+        guard let p = view.presentation else { throw WorkspaceAgentReportChecks.Failure(description: "lead-plan-model: no drawer") }
+        var failures: [String] = []
+        func check(_ ok: Bool, _ message: String) { if !ok { failures.append(message) } }
+        func name(_ id: AgentID) -> String { supervisor.records[id]?.humanDisplayName ?? "?" }
+        // 1. One ordered list: plan order, each step carrying its helpers; the rest in a tail.
+        check(p.entries.map(\.title) == plan.map(\.title), "entries not in plan order: \(p.entries.map(\.title))")
+        check(p.entries.first?.helpers.map(\.id) == [running], "step 1 not linked to its helper by name: \(p.entries.first?.helpers.map { name($0.id) } ?? [])")
+        check(p.entries.dropFirst().first?.helpers.map(\.id) == [idle[0]], "step 2 not linked to its helper by id")
+        check(p.entries.dropFirst(2).first?.helpers.map(\.id) == [failed[2]], "step 3 not linked to its helper by id")
+        check(p.entries.suffix(2).allSatisfy { $0.helpers.isEmpty && $0.ownerLabel == "Lead" }, "lead steps carry helpers")
+        check(Set(p.tail.map(\.id)).isDisjoint(with: Set(p.entries.flatMap(\.helpers).map(\.id))), "a linked helper is also in the tail")
+        check(p.tail.map(\.id) == [idle[1], done], "tail wrong (want unlinked helpers: waiting, then recent done): \(p.tail.map { name($0.id) + ":" + $0.bucket.rawValue })")
+        // 2. Six-day-old failures do not need the user, anywhere.
+        check(p.counts.needsYou == 0, "old failures count as needing the user: \(p.counts)")
+        check(p.entries[2].helpers.first?.bucket == .finished && p.entries[2].helpers.first?.state == .failed, "an old failure on a step is not finished/failed")
+        check(!p.steps.contains { $0.isSection && $0.title == "Needs you" }, "an old failure got a Needs you group")
+        check(p.urgent?.state != .failed, "an old failure is urgent")
+        // 3. Waiting is not working: counted, headed and grouped apart.
+        check(p.counts.working == 1 && p.counts.waiting == 2 && p.counts.finished == 1, "counts wrong: \(p.counts)")
+        check(p.title == "Helpers · 1 working · 2 waiting", "header wrong: \(p.title ?? "nil")")
+        check(p.entries[1].helpers.first?.bucket == .waiting && p.entries[1].state == .waiting, "an idle helper's step is not waiting")
+        var section = ""
+        for row in p.steps { if row.isSection { section = row.title } else if row.ownerAgent != nil && row.state == .waiting && section == "Working" { failures.append("a waiting helper sits under Working") } }
+        // 4. Order is stable across recomputes and a burst of helper events.
+        let before = p
+        for i in 0..<30 {
+            supervisor.qaDeliver(.contentDelta(threadId: AgentSupervisor.threadId(for: running), turnId: "t1", streamKind: .assistant, delta: "t\(i) "), to: running, now: Date())
+        }
+        try await Task.sleep(for: .milliseconds(500))
+        check(view.presentation?.entries.map(\.id) == before.entries.map(\.id) && view.presentation?.tail.map(\.id) == before.tail.map(\.id), "order changed under streaming")
+        check(supervisor.leadPlan(for: lead, now: Date())?.entries.map(\.id) == before.entries.map(\.id), "entry ids unstable")
+        // 5. A fresh failure needs the user until the lead takes a turn after it.
+        // 5. A fresh failure needs the user until the lead takes a turn after it. (The
+        // production alert path makes the lead take a turn straight away, which is
+        // the rule working; stamp the failure just ahead of that turn so the
+        // unacknowledged state can be held still and observed.)
+        let fresh = helper("Fresh failure")
+        let failedAt = Date().addingTimeInterval(120)
+        startTurn(fresh, at: failedAt.addingTimeInterval(-30)); finishTurn(fresh, .failed, at: failedAt)
+        try await AgentPresenceChecks.eventually("a fresh failure did not need the user") { view.presentation?.counts.needsYou == 1 }
+        check(view.presentation?.title == "Helpers · 1 working · 2 waiting · 1 need you", "header after fresh failure: \(view.presentation?.title ?? "nil")")
+        check(view.presentation?.tail.first?.id == fresh && view.presentation?.tail.first?.bucket == .needsYou, "a fresh failure is not first in the tail as needsYou")
+        startTurn(lead, at: failedAt.addingTimeInterval(10)); finishTurn(lead, .completed, at: failedAt.addingTimeInterval(20))
+        try await AgentPresenceChecks.eventually("the lead's turn did not acknowledge the failure") { view.presentation?.counts.needsYou == 0 }
+        check(view.presentation?.title == "Helpers · 1 working · 2 waiting", "header after the lead's turn: \(view.presentation?.title ?? "nil")")
+        guard failures.isEmpty else {
+            throw WorkspaceAgentReportChecks.Failure(description: "lead-plan-model: " + failures.joined(separator: "; "))
+        }
+        print("Lead plan model passed: steps link to helpers, stale failures do not need you, waiting is not working, order is stable")
+    }
+
     static func stills(_ tile: ManagedAgentTileNSView, view: AgentLeadPlanView, to dir: URL, name: String) throws {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let previous = NSApp.appearance

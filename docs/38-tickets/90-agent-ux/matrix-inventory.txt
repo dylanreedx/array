@@ -232,6 +232,7 @@ check --layout-commit-scope-check
 check --layout-commit-truth-check
 check --lead-character-check
 check --lead-checkout-ledger-check
+check --lead-plan-model-check
 check --lead-plan-steady-check
 check --leader-activation-check
 check --leader-composer-hold-check
@@ -374,11 +375,14 @@ check --sidebar-helper-hover-check
 check --sidebar-hidden-footer-check
 check --sidebar-hide-any-row-check
 check --sidebar-history-scope-check
+check --sidebar-hover-card-overlay-check
 check --sidebar-hover-text-check
 check --sidebar-indicator-settings-check
 check --sidebar-layouts-check
+check --sidebar-lead-tally-live-check
 check --sidebar-ledger-check
 check --sidebar-liveness-check
+check --sidebar-more-click-check
 check --sidebar-ownership-check
 check --sidebar-pills-check
 check --sidebar-pinned-lead-check
@@ -803,6 +807,7 @@ leg run_app_check .build/debug/Array --layout-commit-scope-check
 leg run_app_check .build/debug/Array --layout-commit-truth-check
 leg run_app_check .build/debug/Array --lead-character-check
 leg run_app_check .build/debug/Array --lead-checkout-ledger-check
+leg run_app_check .build/debug/Array --lead-plan-model-check
 leg run_app_check .build/debug/Array --lead-plan-steady-check
 leg run_app_check .build/debug/Array --leader-activation-check
 leg run_app_check .build/debug/Array --leader-composer-hold-check
@@ -932,11 +937,14 @@ leg run_app_check .build/debug/Array --sidebar-halo-default-check
 leg run_app_check .build/debug/Array --sidebar-helper-hover-check
 leg run_app_check .build/debug/Array --sidebar-hidden-footer-check
 leg run_app_check .build/debug/Array --sidebar-hide-any-row-check
+leg run_app_check .build/debug/Array --sidebar-hover-card-overlay-check
 leg run_app_check .build/debug/Array --sidebar-hover-text-check
 leg run_app_check .build/debug/Array --sidebar-indicator-settings-check
 leg run_app_check .build/debug/Array --sidebar-layouts-check
+leg run_app_check .build/debug/Array --sidebar-lead-tally-live-check
 leg run_app_check .build/debug/Array --sidebar-ledger-check
 leg run_app_check .build/debug/Array --sidebar-liveness-check
+leg run_app_check .build/debug/Array --sidebar-more-click-check
 leg run_app_check .build/debug/Array --sidebar-ownership-check
 leg run_app_check .build/debug/Array --sidebar-pills-check
 leg run_app_check .build/debug/Array --sidebar-pinned-lead-check
