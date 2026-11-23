@@ -299,6 +299,8 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         replyOptionRail.onSelect = { [weak self] option in
             self?.acceptReplyOption(option)
         }
+        replyOptionRail.onCompactNotice = { [weak self] in self?.onCompactContext?() }
+        replyOptionRail.onDismissNotice = { [weak self] in self?.onDismissCompactOffer?() }
         queuedMessageRail.onRemove = { [weak self] messageID in
             self?.onCancelQueuedMessage?(messageID)
         }
@@ -1804,6 +1806,19 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
     /// `AgentReplyOptionDetector`. The owner recomputes this per document
     /// version; the composer decides whether to SHOW them, because only it knows
     /// whether the user has already started writing.
+    /// Set by the tile: pressing "Compact now" / "Dismiss" on the offer.
+    var onCompactContext: (() -> Void)?
+    var onDismissCompactOffer: (() -> Void)?
+    private var compactOfferShown = false
+
+    /// Mode Ask me, past the size: a quick offer above the editor. It shows
+    /// beside any typed draft too (it never writes into it) and never takes focus.
+    func setContextCompactionOffer(_ offered: Bool) {
+        guard offered != compactOfferShown else { return }
+        compactOfferShown = offered
+        updateReplyOptionRail()
+    }
+
     func setReplyOptions(_ options: [AgentReplyOption]) {
         guard replyOptions != options else { return }
         replyOptions = options
@@ -1817,8 +1832,9 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         let visible = draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             ? replyOptions : []
         replyOptionRail.setOptions(visible)
+        replyOptionRail.setNotice(compactOfferShown)
         replyOptionRailHeightConstraint.constant =
-            visible.isEmpty ? 0 : ComposerReplyOptionRailView.railHeight(zoom: pageZoom)
+            visible.isEmpty && !compactOfferShown ? 0 : ComposerReplyOptionRailView.railHeight(zoom: pageZoom)
         invalidateIntrinsicContentSize()
         needsLayout = true
     }
@@ -1996,6 +2012,9 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
 
     // Deterministic AppKit probes; not a tile integration seam.
     var qaReplyOptionChipTitles: [String] { replyOptionRail.qaChipTitles }
+    var qaCompactOfferShown: Bool { replyOptionRail.qaNoticeShown }
+    @discardableResult
+    func qaPressCompactOffer(_ title: String) -> Bool { replyOptionRail.qaPressNotice(title) }
     var qaReplyOptionChipsAcceptFocus: Bool { replyOptionRail.qaChipsAcceptFocus }
     var qaReplyOptionChipAccessibilityLabels: [String] { replyOptionRail.qaChipAccessibilityLabels }
     var qaDraftText: String { draft.text }

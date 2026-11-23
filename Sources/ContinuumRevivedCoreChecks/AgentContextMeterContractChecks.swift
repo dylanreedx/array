@@ -20,35 +20,47 @@ func runAgentContextMeterContractChecks() {
     let defaults = UserDefaults(suiteName: suite)!
     defer { defaults.removePersistentDomain(forName: suite) }
     typealias Policy = AgentContextAutoCompactionPolicy
-    expect(Policy.compactAtTokens(defaults: defaults) == 300_000,
-           "all providers default to the same 300k-token auto-compaction limit")
+    expect(Policy.limitTokens(defaults: defaults) == 300_000 && Policy.mode(defaults: defaults) == .ask,
+           "defaults: Ask me, long at 300k tokens")
     defaults.set("150000", forKey: Policy.compactAtKey)
-    expect(Policy.compactAtTokens(defaults: defaults) == 150_000
+    expect(Policy.limitTokens(defaults: defaults) == 150_000
            && Policy.shouldCompact(used: 150_000, max: 1_000_000, limit: 150_000)
            && !Policy.shouldCompact(used: 149_999, max: 1_000_000, limit: 150_000),
-           "the one compaction setting must drive the real compaction decision")
+           "the size setting must drive the real compaction decision")
     expect(Policy.shouldCompact(used: 181_000, max: 200_000, limit: 500_000),
-           "a small window still compacts at 90% full before a larger limit")
-    defaults.set(Policy.offOption, forKey: Policy.compactAtKey)
-    expect(Policy.compactAtTokens(defaults: defaults) == nil,
-           "auto-compaction must honor the user's Never choice")
-    func migrated(_ configure: (UserDefaults) -> Void) -> Int?? {
+           "a small window is long at 90% full before a larger size")
+    expect(Policy.effectiveMode(isHelper: false, defaults: defaults) == .ask
+           && Policy.effectiveMode(isHelper: true, defaults: defaults) == .automatic,
+           "Ask me asks for agents the user drives; a delegated helper compacts automatically")
+    defaults.set("never", forKey: Policy.modeKey)
+    expect(Policy.effectiveMode(isHelper: true, defaults: defaults) == .never
+           && Policy.effectiveMode(isHelper: false, defaults: defaults) == .never,
+           "Never holds for helpers too")
+    defaults.set("automatic", forKey: Policy.modeKey)
+    expect(Policy.effectiveMode(isHelper: false, defaults: defaults) == .automatic
+           && Policy.effectiveMode(isHelper: true, defaults: defaults) == .automatic, "Automatically applies to every agent")
+    func migrated(_ configure: (UserDefaults) -> Void) -> (mode: AgentContextCompactionMode, limit: Int) {
         let name = "array.context-policy-migrate.\(UUID().uuidString)"
         let legacy = UserDefaults(suiteName: name)!
         defer { legacy.removePersistentDomain(forName: name) }
         configure(legacy)
-        let resolved = Policy.compactAtTokens(defaults: legacy)
-        return .some(resolved)
+        return (Policy.mode(defaults: legacy), Policy.limitTokens(defaults: legacy))
     }
-    expect(migrated { $0.set(false, forKey: Policy.enabledKey) } == .some(nil),
-           "an old Off must migrate to Never")
-    expect(migrated { $0.set(60, forKey: Policy.percentKey) } == .some(100_000)
-           && migrated { $0.set(80, forKey: Policy.percentKey) } == .some(150_000)
-           && migrated { $0.set(90, forKey: Policy.percentKey) } == .some(300_000)
-           && migrated { $0.set(95, forKey: Policy.percentKey) } == .some(300_000),
+    expect(migrated { $0.set(false, forKey: Policy.enabledKey) }.mode == .never, "an old Off must migrate to Never")
+    expect(migrated { $0.set("off", forKey: Policy.compactAtKey) }.mode == .never, "an interim size of off must migrate to Never")
+    expect(migrated { $0.set(60, forKey: Policy.percentKey) }.limit == 100_000
+           && migrated { $0.set(80, forKey: Policy.percentKey) }.limit == 150_000
+           && migrated { $0.set(90, forKey: Policy.percentKey) }.limit == 300_000
+           && migrated { $0.set(95, forKey: Policy.percentKey) }.limit == 300_000,
            "an old percent must migrate to the nearest size, keeping the old default at 300k")
-    expect(migrated { $0.set(false, forKey: Policy.enabledKey); $0.set("200000", forKey: Policy.compactAtKey) } == .some(200_000),
-           "a value already in the new setting must win over old keys")
+    expect(migrated { $0.set(true, forKey: Policy.enabledKey) }.mode == .ask, "an old On keeps the default, Ask me")
+    let resetName = "array.context-policy-reset.\(UUID().uuidString)"
+    let resetDefaults = UserDefaults(suiteName: resetName)!
+    defer { resetDefaults.removePersistentDomain(forName: resetName) }
+    resetDefaults.set(false, forKey: Policy.enabledKey)
+    expect(Policy.mode(defaults: resetDefaults) == .never, "old Off migrates")
+    resetDefaults.removeObject(forKey: Policy.modeKey)
+    expect(Policy.mode(defaults: resetDefaults) == .ask, "Reset to Default must not bring the old Off back")
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("array-context-contract-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: root) }
     let model = "provider/model-exact"

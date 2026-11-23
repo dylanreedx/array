@@ -4219,6 +4219,20 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--compaction-stall-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runAgentCompactionStallChecks()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--agent-compaction-ui-check") {
             _ = NSApplication.shared
             Task { @MainActor in

@@ -223,7 +223,8 @@ func runAgentContextLiveCompactionChecks() async throws {
         throw Failure(description: "live compaction: cannot create isolated settings suite")
     }
     defer { testDefaults.removePersistentDomain(forName: testDefaultsName) }
-    guard AgentContextAutoCompactionPolicy.compactAtTokens(defaults: testDefaults) == AgentContextAutoCompactionPolicy.defaultTokens else {
+    testDefaults.set(AgentContextCompactionMode.automatic.rawValue, forKey: AgentContextAutoCompactionPolicy.modeKey)
+    guard AgentContextAutoCompactionPolicy.limitTokens(defaults: testDefaults) == AgentContextAutoCompactionPolicy.defaultTokens else {
         throw Failure(description: "live compaction: settings policy did not resolve the default trigger")
     }
 
@@ -311,7 +312,8 @@ func runAgentContextLiveCompactionChecks() async throws {
             submissionRecoveryStore: drafts,
             transcriptStore: transcriptStore)
         supervisor.qaContextAutoCompactionLimit = {
-            AgentContextAutoCompactionPolicy.compactAtTokens(defaults: testDefaults)
+            AgentContextAutoCompactionPolicy.effectiveMode(isHelper: false, defaults: testDefaults) == .automatic
+                ? AgentContextAutoCompactionPolicy.limitTokens(defaults: testDefaults) : nil
         }
 
         let scratchProject = scratch.appendingPathComponent("empty-checkout", isDirectory: true)

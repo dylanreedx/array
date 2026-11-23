@@ -34,8 +34,17 @@ final class ComposerReplyOptionRailView: NSView, TokenThemed, AgentPageZoomScala
     private var scrollConstraints: [NSLayoutConstraint] = []
     private let stack = NSStackView(frame: .zero)
     private var options: [AgentReplyOption] = []
+    /// A compaction offer: "Context is long · Compact now · Dismiss". It is a
+    /// composer notice in the same rail, not a reply, and never writes text.
+    private var noticeShown = false
+    static let noticeCompactTitle = "Compact now"
+    static let noticeDismissTitle = "Dismiss"
+    static let noticeMessage = "Context is long"
+    private let noticeLabel = NSTextField(labelWithString: ComposerReplyOptionRailView.noticeMessage)
 
     var onSelect: ((String) -> Void)?
+    var onCompactNotice: (() -> Void)?
+    var onDismissNotice: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -47,17 +56,45 @@ final class ComposerReplyOptionRailView: NSView, TokenThemed, AgentPageZoomScala
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: NSView.noIntrinsicMetric, height: options.isEmpty ? 0 : railHeight)
+        NSSize(width: NSView.noIntrinsicMetric, height: options.isEmpty && !noticeShown ? 0 : railHeight)
     }
 
     func setOptions(_ newOptions: [AgentReplyOption]) {
         guard newOptions != options else { return }
         options = newOptions
+        rebuild()
+    }
+
+    func setNotice(_ shown: Bool) {
+        guard shown != noticeShown else { return }
+        noticeShown = shown
+        rebuild()
+    }
+
+    private func rebuild() {
+        let newOptions = options
         for view in stack.arrangedSubviews {
             stack.removeArrangedSubview(view)
             view.removeFromSuperview()
         }
         let theme = effectiveTokenTheme
+        if noticeShown {
+            noticeLabel.font = NSFont.token(.caption, zoom: pageZoom)
+            noticeLabel.textColor = TextToken.textSecondary.color.nsColor(for: theme)
+            stack.addArrangedSubview(noticeLabel)
+            for title in [Self.noticeCompactTitle, Self.noticeDismissTitle] {
+                let chip = ComposerReplyOptionChipButton(option: AgentReplyOption(label: title), zoom: pageZoom)
+                chip.target = self
+                chip.action = #selector(chipPressed(_:))
+                chip.applyTokens(theme: theme)
+                chip.toolTip = title == Self.noticeCompactTitle
+                    ? "Summarise this conversation to make room. Array asks before it ever compacts on its own."
+                    : "Hide this until the context grows again"
+                chip.setAccessibilityLabel(title == Self.noticeCompactTitle ? "Compact context now" : "Dismiss the compact suggestion")
+                chip.identifier = NSUserInterfaceItemIdentifier("agent.composer.compactOffer")
+                stack.addArrangedSubview(chip)
+            }
+        }
         for option in newOptions {
             // A chip minted after a zoom apply is born scaled: the rail's own
             // rung is handed to the initializer.
@@ -67,7 +104,7 @@ final class ComposerReplyOptionRailView: NSView, TokenThemed, AgentPageZoomScala
             chip.applyTokens(theme: theme)
             stack.addArrangedSubview(chip)
         }
-        isHidden = newOptions.isEmpty
+        isHidden = newOptions.isEmpty && !noticeShown
         invalidateIntrinsicContentSize()
         needsLayout = true
     }
@@ -159,6 +196,11 @@ final class ComposerReplyOptionRailView: NSView, TokenThemed, AgentPageZoomScala
     }
 
     @objc private func chipPressed(_ sender: NSButton) {
+        if noticeShown, let chip = sender as? ComposerReplyOptionChipButton,
+           chip.identifier?.rawValue == "agent.composer.compactOffer" {
+            if chip.optionValue == Self.noticeCompactTitle { onCompactNotice?() } else { onDismissNotice?() }
+            return
+        }
         guard let chip = sender as? ComposerReplyOptionChipButton,
               options.contains(where: { $0.label == chip.optionValue }) else { return }
         onSelect?(chip.optionValue)
@@ -167,6 +209,15 @@ final class ComposerReplyOptionRailView: NSView, TokenThemed, AgentPageZoomScala
     // MARK: - QA seams
 
     var qaOptions: [String] { options.map(\.label) }
+    var qaNoticeShown: Bool { noticeShown }
+    @discardableResult
+    func qaPressNotice(_ title: String) -> Bool {
+        guard noticeShown, let chip = stack.arrangedSubviews
+            .compactMap({ $0 as? ComposerReplyOptionChipButton })
+            .first(where: { $0.optionValue == title && $0.identifier?.rawValue == "agent.composer.compactOffer" }) else { return false }
+        chip.performClick(nil)
+        return true
+    }
     var qaChipTitles: [String] {
         stack.arrangedSubviews.compactMap { ($0 as? ComposerReplyOptionChipButton)?.title }
     }

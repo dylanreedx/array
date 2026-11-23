@@ -1736,27 +1736,141 @@ final class AgentSupervisor {
         }
     }
 
+    /// Check seams. The limit closure is the original one: nil means Never, a
+    /// number means Automatically at that size.
     var qaContextAutoCompactionLimit: (() -> Int?)?
+    var qaContextCompactionMode: (() -> AgentContextCompactionMode)?
     var qaDidFinishAutomaticContextCompaction: (() -> Void)?
-    private func contextAutoCompactionLimit() -> Int? {
-        if let qaContextAutoCompactionLimit { return qaContextAutoCompactionLimit() }
-        return AgentContextAutoCompactionPolicy.compactAtTokens()
+    /// A compaction that has not finished by then is stopped and reported, so an
+    /// agent can never sit in "compacting" for good. Provider compactions of a
+    /// large context legitimately take minutes; this is the ceiling, not the norm.
+    var qaCompactionTimeout: TimeInterval?
+    nonisolated static let compactionTimeout: TimeInterval = 300
+
+    /// The mode that applies to this agent and the size at which its context is long.
+    private func contextCompactionPolicy(for id: AgentID) -> (mode: AgentContextCompactionMode, limit: Int) {
+        if let qaContextAutoCompactionLimit {
+            if let limit = qaContextAutoCompactionLimit() { return (.automatic, limit) }
+            return (.never, AgentContextAutoCompactionPolicy.defaultTokens)
+        }
+        if let qaContextCompactionMode { return (qaContextCompactionMode(), AgentContextAutoCompactionPolicy.defaultTokens) }
+        let isHelper = records[id]?.parentAgentID != nil
+        return (AgentContextAutoCompactionPolicy.effectiveMode(isHelper: isHelper),
+                AgentContextAutoCompactionPolicy.limitTokens())
+    }
+
+    /// Agents whose context is long and whose person was offered a Compact
+    /// button (mode Ask me), and the epoch each one dismissed it in.
+    private var compactionOffers: Set<AgentID> = []
+    private var dismissedCompactionOfferEpochs: [AgentID: UInt64] = [:]
+    /// Compactions Array started on its own (not a person's request): the ids of
+    /// those queued or about to start, and the agents running one now. A failure
+    /// of one of these never holds the queue; a person's send supersedes it.
+    private var automaticCompactionOperationIDs: Set<UUID> = []
+    private var automaticCompactionAgents: Set<AgentID> = []
+
+    func contextCompactionOffered(for id: AgentID) -> Bool { compactionOffers.contains(id) }
+
+    func dismissContextCompactionOffer(for id: AgentID) {
+        guard compactionOffers.remove(id) != nil else { return }
+        if let epoch = records[id]?.contextEpoch { dismissedCompactionOfferEpochs[id] = epoch }
+        notifyTurnCapabilitiesChanged(id)
+    }
+
+    private func withdrawCompactionOffer(_ id: AgentID) {
+        guard compactionOffers.remove(id) != nil else { return }
+        notifyTurnCapabilitiesChanged(id)
+    }
+
+    /// True while a person has typed something or queued a message: a
+    /// compaction that started now would hold their message behind it.
+    private func userIsComposing(_ id: AgentID, store: AgentComposerDraftStore) async -> Bool {
+        if await store.queuedWorkItems(for: id).contains(where: {
+            if case .prompt(let message) = $0 { return !message.helperNote && !message.helperCompletion }
+            return false
+        }) { return true }
+        return await store.load(for: id)?.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    }
+
+    /// A person's message wins over a compaction Array started itself: a queued
+    /// one is dropped and a running one is stopped, so the message is never
+    /// parked behind provider work. The Compact button offers it again later.
+    @discardableResult
+    private func supersedeAutomaticCompaction(for id: AgentID) async -> Bool {
+        var superseded = false
+        if let store = submissionRecoveryStore {
+            for item in await store.queuedWorkItems(for: id) {
+                guard case .compaction(let compact) = item,
+                      automaticCompactionOperationIDs.contains(compact.operationID) else { continue }
+                _ = await store.takeQueuedWorkItem(id: item.id, for: id)
+                automaticCompactionOperationIDs.remove(compact.operationID)
+                automaticContextCompactionEpochs[id] = nil
+                queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
+                notifyTurnCapabilitiesChanged(id)
+                superseded = true
+            }
+        }
+        if automaticCompactionAgents.contains(id), activeCompactionOperations.contains(id) {
+            automaticContextCompactionEpochs[id] = nil
+            if cancelCompactionOperation(id) { superseded = true }
+        }
+        return superseded
+    }
+
+    @discardableResult
+    private func cancelCompactionOperation(_ id: AgentID) -> Bool {
+        guard activeCompactionOperations.contains(id), let runner = runners[id],
+              let runnerGeneration = runnerGenerationTokens[id] else { return false }
+        runner.stop()
+        let lifecycle = AgentCompactionLifecycleEvent(
+            operationID: records[id]?.inFlightCompaction?.operationID,
+            phase: .cancelled,
+            trigger: .manual,
+            provider: records[id]?.harness?.rawValue ?? "agent")
+        deliver(.compactionChanged(
+            threadId: Self.threadId(for: id), event: lifecycle),
+            from: runner, generation: runnerGeneration, to: id)
+        finishCompaction(lifecycle, runner: runner, generation: runnerGeneration, for: id)
+        return true
     }
 
     private func requestAutomaticContextCompaction(after reading: AgentContextWindowSnapshot, for id: AgentID) {
-        guard let limit = contextAutoCompactionLimit(),
-              let used = reading.usedTokens, let max = reading.maxTokens, max > 0,
-              AgentContextAutoCompactionPolicy.shouldCompact(used: used, max: max, limit: limit), reading.compacting != true,
-              let record = records[id], automaticContextCompactionEpochs[id] != record.contextEpoch,
+        guard let used = reading.usedTokens, let max = reading.maxTokens, max > 0,
+              let record = records[id] else { return }
+        let policy = contextCompactionPolicy(for: id)
+        guard policy.mode != .never,
+              AgentContextAutoCompactionPolicy.shouldCompact(used: used, max: max, limit: policy.limit),
+              reading.compacting != true else {
+            // Short again (after a compaction) or switched off: the offer goes.
+            if reading.compacting != true { withdrawCompactionOffer(id) }
+            return
+        }
+        if policy.mode == .ask {
+            guard dismissedCompactionOfferEpochs[id] != record.contextEpoch,
+                  !activeCompactionOperations.contains(id), !compactingAgents.contains(id),
+                  compactionOffers.insert(id).inserted else { return }
+            notifyTurnCapabilitiesChanged(id)
+            return
+        }
+        guard automaticContextCompactionEpochs[id] != record.contextEpoch,
               !activeCompactionOperations.contains(id), !compactingAgents.contains(id),
-              submissionRecoveryStore != nil else { return }
+              let store = submissionRecoveryStore else { return }
         automaticContextCompactionEpochs[id] = record.contextEpoch
         Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.qaDidFinishAutomaticContextCompaction?() }
             guard self.records[id]?.contextEpoch == record.contextEpoch,
-                  self.contextAutoCompactionLimit() != nil else { return }
-            _ = await self.accept(.compact(AgentCompactionRequest()), for: id)
+                  self.contextCompactionPolicy(for: id).mode == .automatic else { return }
+            // Never start while a message is typed or queued: it would wait
+            // behind the compaction. The next reading asks again.
+            if await self.userIsComposing(id, store: store) {
+                self.automaticContextCompactionEpochs[id] = nil
+                return
+            }
+            let request = AgentCompactionRequest()
+            self.automaticCompactionOperationIDs.insert(request.operationID)
+            let accepted = await self.accept(.compact(request), for: id)
+            if accepted != .accepted { self.automaticCompactionOperationIDs.remove(request.operationID) }
         }
     }
 
@@ -1801,6 +1915,8 @@ final class AgentSupervisor {
         runnerGenerationTokens[id] = runnerGeneration
         runners[id] = runner
         activeCompactionOperations.insert(id)
+        if automaticCompactionOperationIDs.remove(request.operationID) != nil { automaticCompactionAgents.insert(id) }
+        compactionOffers.remove(id)
         notifyTurnCapabilitiesChanged(id)
 
         if let reading = contextWindowSnapshot(for: id), let used = reading.usedTokens, used > 0,
@@ -1828,6 +1944,26 @@ final class AgentSupervisor {
             }
         }
         let terminal = CompactionTerminalLatch()
+        let timeout = qaCompactionTimeout ?? Self.compactionTimeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in
+            guard let self, terminal.event == nil,
+                  self.runnerGenerationTokens[id] == runnerGeneration, self.runners[id] === runner,
+                  self.activeCompactionOperations.contains(id) else { return }
+            // The provider never answered. Stop it, say so, and free the agent:
+            // the runner call that was waiting unwinds on the stop.
+            runner.stop()
+            let lifecycle = AgentCompactionLifecycleEvent(
+                operationID: request.operationID,
+                phase: .failed,
+                trigger: .manual,
+                provider: providerName,
+                errorMessage: "Compaction did not finish within \(Int(timeout)) seconds, so Array stopped it. The agent is ready again.",
+                observedAt: Date())
+            terminal.set(lifecycle)
+            self.deliver(.compactionChanged(threadId: threadId, event: lifecycle),
+                         from: runner, generation: runnerGeneration, to: id)
+            self.finishCompaction(lifecycle, runner: runner, generation: runnerGeneration, for: id)
+        }
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
                 try compacting.compact(request) { event in
@@ -1931,6 +2067,7 @@ final class AgentSupervisor {
         runners[id] = nil
         activeCompactionOperations.remove(id)
         compactingAgents.remove(id)
+        let wasAutomatic = automaticCompactionAgents.remove(id) != nil
         let retire = retireSessionAfterTurn.remove(id) != nil
         if !retire && runner.keepsSessionAliveBetweenTurns && runner.canAcceptAnotherTurn {
             idleSessionRunners[id] = runner
@@ -1980,7 +2117,10 @@ final class AgentSupervisor {
                 kind: .compaction,
                 status: phase == .cancelled ? .declined : .failed), to: id)
         }
-        if phase == .succeeded {
+        if phase == .succeeded || wasAutomatic {
+            // An automatic compaction that failed, timed out or was superseded
+            // says so in the transcript and frees the agent: nobody asked for
+            // it, so nobody's message waits for a Resume.
             if !pausedQueues.contains(id) { drainQueue(for: id) }
         } else {
             pauseQueue(id, .afterCompaction)
@@ -3770,8 +3910,10 @@ final class AgentSupervisor {
                     persistBeforeAdoption(record)
                 }
             }
+            var compactionInterruptedByQuit = false
             if let journal = record.inFlightCompaction,
                journal.phase == .requested || journal.phase == .running {
+                compactionInterruptedByQuit = true
                 record.inFlightCompaction = AgentCompactionJournal(
                     operationID: journal.operationID,
                     boundaryID: journal.boundaryID,
@@ -3789,9 +3931,11 @@ final class AgentSupervisor {
                 continue
             }
             setRecord(record, for: record.id)
-            if record.inFlightCompaction?.phase == .indeterminate
-                || record.inFlightCompaction?.phase == .failed
-                || record.inFlightCompaction?.phase == .cancelled {
+            // Only a compaction the quit interrupted is uncertain. A failed or
+            // cancelled one was already reported when it ended; its journal stays
+            // for the record but must not hold the queue again on every launch
+            // (eight agents were re-paused at each launch since September).
+            if compactionInterruptedByQuit {
                 pauseQueue(record.id, .afterCompaction)
             }
             // A root that came back stops being stale. Without this an agent marked
@@ -5940,22 +6084,7 @@ final class AgentSupervisor {
         // never lose the race back to `deliver`.
         stopRequestedAgents.insert(id)
         turnFacts[id]?.presence.noteStopRequested()
-        if activeCompactionOperations.contains(id),
-           let runner = runners[id],
-           let runnerGeneration = runnerGenerationTokens[id] {
-            runner.stop()
-            let lifecycle = AgentCompactionLifecycleEvent(
-                operationID: records[id]?.inFlightCompaction?.operationID,
-                phase: .cancelled,
-                trigger: .manual,
-                provider: records[id]?.harness?.rawValue ?? "agent")
-            deliver(.compactionChanged(
-                threadId: Self.threadId(for: id), event: lifecycle),
-                from: runner, generation: runnerGeneration, to: id)
-            finishCompaction(
-                lifecycle, runner: runner, generation: runnerGeneration, for: id)
-            return
-        }
+        if cancelCompactionOperation(id) { return }
         runners[id]?.stop()
         runners[id] = nil
         if let run = runnerGenerationTokens[id] { settleHelperReceipts(lead: id, run: run, stopped: true) }
@@ -11942,6 +12071,16 @@ final class AgentSupervisor {
         // The Terminal face or another app owns the session: nothing of
         // Array's may write it.
         guard !isSessionHeld(agentID) else { return .refused(.turnNotReady) }
+        var intent = intent
+        switch intent {
+        case .send, .sendPrompt, .queue:
+            // The compaction was Array's idea, not the person's: a message
+            // stops it. A queued message then has nothing to wait behind, so
+            // it goes out as an ordinary send.
+            if await supersedeAutomaticCompaction(for: agentID), case .queue(let draft) = intent,
+               turnSnapshot(for: agentID)?.capabilities.canSend == true { intent = .sendPrompt(draft) }
+        default: break
+        }
         guard let snapshot = turnSnapshot(for: agentID) else { return .refused(.unknownAgent) }
         switch intent {
         case .send(let draft):

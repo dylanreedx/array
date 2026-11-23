@@ -188,14 +188,27 @@ public enum BuiltInSettingRegistry {
         consumerID: "canvas.floatingToolbar.visible"
     )
 
+    public static let agentContextCompactMode = SettingDefinition(
+        id: SettingID(rawValue: AgentContextAutoCompactionPolicy.modeKey),
+        category: .agents,
+        title: "When an agent's context gets long",
+        description: "Ask before compacting, compact automatically between turns, or never.",
+        defaultValue: AgentContextAutoCompactionPolicy.defaultMode.rawValue,
+        control: .labeledEnum(options: Dictionary(uniqueKeysWithValues: AgentContextCompactionMode.allCases.map { ($0.rawValue, $0.title) })),
+        validation: SettingValidation { AgentContextCompactionMode(rawValue: $0) == nil ? "Choose Ask me, Automatically or Never." : nil },
+        applicationPolicy: .live,
+        keywords: ["agent", "context", "compact", "ask", "automatic"],
+        consumerID: "agent.context.compactMode"
+    )
+
     public static let agentContextCompactAt = SettingDefinition(
         id: SettingID(rawValue: AgentContextAutoCompactionPolicy.compactAtKey),
         category: .agents,
-        title: "Compact context at",
+        title: "Context is long at",
         description: "Compact an agent's conversation when it reaches this many tokens, or when its context window is 90% full if that comes first.",
         defaultValue: AgentContextAutoCompactionPolicy.defaultOption,
         control: .labeledEnum(options: Dictionary(uniqueKeysWithValues: AgentContextAutoCompactionPolicy.options.map { ($0, AgentContextAutoCompactionPolicy.title(for: $0)) })),
-        validation: SettingValidation { AgentContextAutoCompactionPolicy.options.contains($0) ? nil : "Choose Never or a listed size." },
+        validation: SettingValidation { AgentContextAutoCompactionPolicy.options.contains($0) ? nil : "Choose a listed size." },
         applicationPolicy: .live,
         keywords: ["agent", "context", "compact", "tokens", "threshold"],
         consumerID: "agent.context.compactAt"
@@ -286,6 +299,7 @@ public enum BuiltInSettingRegistry {
             shortcutRail.erased,
             floatingToolbarVisible.erased,
             cornerStyle.erased,
+            agentContextCompactMode.erased,
             agentContextCompactAt.erased,
         ] + floatingToolbarItemVisibility.map { $0.erased } + [
             zoneColorPolicy.erased,

@@ -925,6 +925,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             let adapter = ManagedAgentTileActionAdapter(supervisor: supervisor)
             v2ActionAdapter = adapter
             composer.bindActionSink(adapter, agentID: agentID, snapshot: snapshot)
+            composer.onCompactContext = { [weak adapter] in
+                guard let adapter else { return }
+                Task { @MainActor in _ = await adapter.accept(.compact(AgentCompactionRequest()), for: agentID) }
+            }
+            composer.onDismissCompactOffer = { [weak supervisor] in supervisor?.dismissContextCompactionOffer(for: agentID) }
             composer.onCompletionAction = { [weak adapter] payload in
                 guard case let .command(invocation) = payload else { return false }
                 guard invocation.surface != .cli else { return false }
@@ -3831,6 +3836,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             if let supervisor = agentSource {
                 v2Composer?.bindCompletionContext(supervisor.completionContext(for: agentID))
                 v2Composer?.updateQueueRail(supervisor.queueRailState(for: agentID))
+                v2Composer?.setContextCompactionOffer(supervisor.contextCompactionOffered(for: agentID))
             }
             // TR-06: the reply chips are a function of the turn state as well as
             // the document, and queueing moves ONLY the state — it appends no
@@ -5471,6 +5477,11 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     func qaSetComposerDraftForChecks(_ text: String) {
         v2Composer?.apply(.init(text: text, selection: NSRange(location: text.utf16.count, length: 0), revision: 0))
     }
+    var qaCompactOfferShown: Bool { v2Composer?.qaCompactOfferShown ?? false }
+    @discardableResult
+    func qaPressCompactOffer(_ title: String) -> Bool { v2Composer?.qaPressCompactOffer(title) ?? false }
+    /// Runs the same refresh production runs on a turn-capability change.
+    func qaRefreshTurnSnapshotForChecks() { refreshV2TurnSnapshot() }
     @discardableResult
     func qaPressReplyOptionChip(titled title: String) -> Bool {
         v2Composer?.qaPressReplyOptionChip(titled: title) ?? false
