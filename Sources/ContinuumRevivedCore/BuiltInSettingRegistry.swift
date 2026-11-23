@@ -188,29 +188,17 @@ public enum BuiltInSettingRegistry {
         consumerID: "canvas.floatingToolbar.visible"
     )
 
-    public static let agentContextAutoCompact = SettingDefinition(
-        id: SettingID(rawValue: AgentContextAutoCompactionPolicy.enabledKey),
+    public static let agentContextCompactAt = SettingDefinition(
+        id: SettingID(rawValue: AgentContextAutoCompactionPolicy.compactAtKey),
         category: .agents,
-        title: "Automatically compact context",
-        description: "Automatically compact supported agent contexts as they approach the selected threshold.",
-        defaultValue: true,
-        control: .toggle,
+        title: "Compact context at",
+        description: "Compact an agent's conversation when it reaches this many tokens, or when its context window is 90% full if that comes first.",
+        defaultValue: AgentContextAutoCompactionPolicy.defaultOption,
+        control: .labeledEnum(options: Dictionary(uniqueKeysWithValues: AgentContextAutoCompactionPolicy.options.map { ($0, AgentContextAutoCompactionPolicy.title(for: $0)) })),
+        validation: SettingValidation { AgentContextAutoCompactionPolicy.options.contains($0) ? nil : "Choose Never or a listed size." },
         applicationPolicy: .live,
-        keywords: ["agent", "context", "compact", "tokens"],
-        consumerID: "agent.context.autoCompact"
-    )
-
-    public static let agentContextAutoCompactPercent = SettingDefinition(
-        id: SettingID(rawValue: AgentContextAutoCompactionPolicy.percentKey),
-        category: .agents,
-        title: "Compact at (%)",
-        description: "Context usage percentage that triggers automatic compaction.",
-        defaultValue: 90.0,
-        control: .boundedNumber(range: 50...99, unit: "%", step: 1),
-        validation: SettingValidation { (50...99).contains($0) ? nil : "Choose a threshold from 50% to 99%." },
-        applicationPolicy: .live,
-        keywords: ["agent", "context", "compact", "threshold", "percent"],
-        consumerID: "agent.context.autoCompactPercent"
+        keywords: ["agent", "context", "compact", "tokens", "threshold"],
+        consumerID: "agent.context.compactAt"
     )
 
     public static let floatingToolbarItemVisibility: [SettingDefinition<Bool>] =
@@ -298,8 +286,7 @@ public enum BuiltInSettingRegistry {
             shortcutRail.erased,
             floatingToolbarVisible.erased,
             cornerStyle.erased,
-            agentContextAutoCompact.erased,
-            agentContextAutoCompactPercent.erased,
+            agentContextCompactAt.erased,
         ] + floatingToolbarItemVisibility.map { $0.erased } + [
             zoneColorPolicy.erased,
             zonePadding.erased,

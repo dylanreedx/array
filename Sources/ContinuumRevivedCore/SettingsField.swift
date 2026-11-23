@@ -217,17 +217,36 @@ public enum SettingsValueFormat: Equatable, Sendable {
 /// One rendered row: a field plus the words around it. `help` is the secondary
 /// line under the label; `keywords` are extra search words; `zeroTitle` is what a
 /// number row shows instead of 0 when 0 means "use the default".
+public struct SettingsRequirement: Equatable, Sendable {
+    public let key: String
+    public let defaultOn: Bool
+    public let hint: String
+    public init(key: String, defaultOn: Bool = true, hint: String) {
+        self.key = key
+        self.defaultOn = defaultOn
+        self.hint = hint
+    }
+    public func isMet(in defaults: UserDefaults) -> Bool {
+        defaults.object(forKey: key) as? Bool ?? defaultOn
+    }
+}
+
 public struct SettingsRow: Equatable, Sendable {
     public let field: SettingsField
     public let help: String?
     public let keywords: [String]
     public let zeroTitle: String?
+    /// A switch (a Bool defaults key, on by default) this row only matters
+    /// under: with it off the row shows disabled, with a hint in the footer.
+    public let requires: SettingsRequirement?
 
-    public init(_ field: SettingsField, help: String? = nil, keywords: [String] = [], zeroTitle: String? = nil) {
+    public init(_ field: SettingsField, help: String? = nil, keywords: [String] = [], zeroTitle: String? = nil,
+                requires: SettingsRequirement? = nil) {
         self.field = field
         self.help = help
         self.keywords = keywords
         self.zeroTitle = zeroTitle
+        self.requires = requires
     }
 }
 

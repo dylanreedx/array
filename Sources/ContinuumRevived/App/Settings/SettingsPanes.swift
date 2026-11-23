@@ -294,7 +294,10 @@ private struct SettingsPaneForm: View {
                         } header: {
                             if let title = group.title { Text(title) }
                         } footer: {
-                            if let footer = group.footer {
+                            let _ = model.revision
+                            let hint = group.rows.compactMap(\.requires).first { !$0.isMet(in: model.defaults) }?.hint
+                            let footer = [hint, group.footer].compactMap { $0 }.joined(separator: " ")
+                            if !footer.isEmpty {
                                 Text(footer)
                                     .font(.callout)
                                     .foregroundStyle(.secondary)
@@ -338,7 +341,10 @@ struct SettingsFieldRow: View {
             case .shortcuts:
                 EmptyView()
             default:
+                let unmet = !(row.requires?.isMet(in: model.defaults) ?? true)
                 rowContent(field)
+                    .disabled(unmet)
+                    .opacity(unmet ? 0.5 : 1)
                     .settingsAnchor(SettingsRegistry.anchor(for: field) ?? field.label, model: model)
                     .settingsResettable(field, model: model)
             }

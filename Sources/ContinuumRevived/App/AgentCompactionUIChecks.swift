@@ -219,7 +219,7 @@ func runAgentCompactionUIChecks() async throws {
         let supervisor = AgentSupervisor(store: AgentStore(applicationSupportDirectory: provenanceRoot),
             makeRunner: { _ in CompactionScriptRunner() })
         defer { supervisor.stopAll() }
-        supervisor.qaContextAutoCompactionThreshold = { nil }
+        supervisor.qaContextAutoCompactionLimit = { nil }
         let id = supervisor.spawn(role: nil, prompt: nil, cwd: root,
             harness: .claudeCode, model: model, thinking: "low")
         supervisor.qaDeliver(.contextWindowUpdated(threadId: "provenance", snapshot: AgentContextWindowSnapshot(
@@ -263,7 +263,7 @@ func runAgentCompactionUIChecks() async throws {
         let epochSupervisor = AgentSupervisor(
             store: AgentStore(applicationSupportDirectory: epochRoot), makeRunner: { _ in epochRunner },
             submissionRecoveryStore: AgentComposerDraftStore(applicationSupportDirectory: epochRoot, debounceInterval: 0))
-        epochSupervisor.qaContextAutoCompactionThreshold = { 0.90 }
+        epochSupervisor.qaContextAutoCompactionLimit = { AgentContextAutoCompactionPolicy.defaultTokens }
         var automaticConsiderationFinished = false
         epochSupervisor.qaDidFinishAutomaticContextCompaction = { automaticConsiderationFinished = true }
         let epochConfig = AgentModelConfig.resolvedFromDefaults(harness: harness)
@@ -298,7 +298,7 @@ func runAgentCompactionUIChecks() async throws {
             let capSupervisor = AgentSupervisor(
                 store: AgentStore(applicationSupportDirectory: capRoot), makeRunner: { _ in capRunner },
                 submissionRecoveryStore: AgentComposerDraftStore(applicationSupportDirectory: capRoot, debounceInterval: 0))
-            capSupervisor.qaContextAutoCompactionThreshold = { 0.90 }
+            capSupervisor.qaContextAutoCompactionLimit = { AgentContextAutoCompactionPolicy.defaultTokens }
             let capConfig = AgentModelConfig.resolvedFromDefaults(harness: harness)
             let capID = capSupervisor.spawn(role: nil, prompt: nil, cwd: root,
                 harness: harness, model: capConfig.model, thinking: capConfig.thinking)

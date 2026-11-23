@@ -216,17 +216,15 @@ func runAgentContextLiveCompactionChecks() async throws {
         return (harness: harness, model: model, thinking: resolution.thinking)
     }
     // The same settings parser as Settings ▸ Agents, pinned to the product's
-    // documented 90% default for this opt-in witness. UI thresholds remain the
+    // documented default for this opt-in witness. UI thresholds remain the
     // production 75%/90% presentation; the window itself is never fabricated.
     let testDefaultsName = "array-live-compaction-policy-\(UUID().uuidString)"
     guard let testDefaults = UserDefaults(suiteName: testDefaultsName) else {
         throw Failure(description: "live compaction: cannot create isolated settings suite")
     }
     defer { testDefaults.removePersistentDomain(forName: testDefaultsName) }
-    testDefaults.set(true, forKey: AgentContextAutoCompactionPolicy.enabledKey)
-    testDefaults.set(90, forKey: AgentContextAutoCompactionPolicy.percentKey)
-    guard AgentContextAutoCompactionPolicy.threshold(defaults: testDefaults) == 0.90 else {
-        throw Failure(description: "live compaction: settings policy did not resolve the default 90% trigger")
+    guard AgentContextAutoCompactionPolicy.compactAtTokens(defaults: testDefaults) == AgentContextAutoCompactionPolicy.defaultTokens else {
+        throw Failure(description: "live compaction: settings policy did not resolve the default trigger")
     }
 
     let maximumPromptCharacters = 1_200_000
@@ -312,8 +310,8 @@ func runAgentContextLiveCompactionChecks() async throws {
             claudeSessionTitle: { _, _ in nil },
             submissionRecoveryStore: drafts,
             transcriptStore: transcriptStore)
-        supervisor.qaContextAutoCompactionThreshold = {
-            AgentContextAutoCompactionPolicy.threshold(defaults: testDefaults)
+        supervisor.qaContextAutoCompactionLimit = {
+            AgentContextAutoCompactionPolicy.compactAtTokens(defaults: testDefaults)
         }
 
         let scratchProject = scratch.appendingPathComponent("empty-checkout", isDirectory: true)

@@ -19,14 +19,36 @@ func runAgentContextMeterContractChecks() {
     let suite = "array.context-policy-check.\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suite)!
     defer { defaults.removePersistentDomain(forName: suite) }
-    expect(AgentContextAutoCompactionPolicy.threshold(defaults: defaults) == 0.90,
-           "all providers default to the same 90 percent auto-compaction threshold")
-    defaults.set(80, forKey: AgentContextAutoCompactionPolicy.percentKey)
-    expect(AgentContextAutoCompactionPolicy.threshold(defaults: defaults) == 0.80,
-           "user percentage must control all providers")
-    defaults.set(false, forKey: AgentContextAutoCompactionPolicy.enabledKey)
-    expect(AgentContextAutoCompactionPolicy.threshold(defaults: defaults) == nil,
-           "auto-compaction must honor the user's disabled setting")
+    typealias Policy = AgentContextAutoCompactionPolicy
+    expect(Policy.compactAtTokens(defaults: defaults) == 300_000,
+           "all providers default to the same 300k-token auto-compaction limit")
+    defaults.set("150000", forKey: Policy.compactAtKey)
+    expect(Policy.compactAtTokens(defaults: defaults) == 150_000
+           && Policy.shouldCompact(used: 150_000, max: 1_000_000, limit: 150_000)
+           && !Policy.shouldCompact(used: 149_999, max: 1_000_000, limit: 150_000),
+           "the one compaction setting must drive the real compaction decision")
+    expect(Policy.shouldCompact(used: 181_000, max: 200_000, limit: 500_000),
+           "a small window still compacts at 90% full before a larger limit")
+    defaults.set(Policy.offOption, forKey: Policy.compactAtKey)
+    expect(Policy.compactAtTokens(defaults: defaults) == nil,
+           "auto-compaction must honor the user's Never choice")
+    func migrated(_ configure: (UserDefaults) -> Void) -> Int?? {
+        let name = "array.context-policy-migrate.\(UUID().uuidString)"
+        let legacy = UserDefaults(suiteName: name)!
+        defer { legacy.removePersistentDomain(forName: name) }
+        configure(legacy)
+        let resolved = Policy.compactAtTokens(defaults: legacy)
+        return .some(resolved)
+    }
+    expect(migrated { $0.set(false, forKey: Policy.enabledKey) } == .some(nil),
+           "an old Off must migrate to Never")
+    expect(migrated { $0.set(60, forKey: Policy.percentKey) } == .some(100_000)
+           && migrated { $0.set(80, forKey: Policy.percentKey) } == .some(150_000)
+           && migrated { $0.set(90, forKey: Policy.percentKey) } == .some(300_000)
+           && migrated { $0.set(95, forKey: Policy.percentKey) } == .some(300_000),
+           "an old percent must migrate to the nearest size, keeping the old default at 300k")
+    expect(migrated { $0.set(false, forKey: Policy.enabledKey); $0.set("200000", forKey: Policy.compactAtKey) } == .some(200_000),
+           "a value already in the new setting must win over old keys")
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("array-context-contract-\(UUID().uuidString)")
     defer { try? FileManager.default.removeItem(at: root) }
     let model = "provider/model-exact"

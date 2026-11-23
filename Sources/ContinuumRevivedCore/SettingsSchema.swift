@@ -245,12 +245,34 @@ public enum SettingsSchema {
     }
 
     private static func agents() -> SettingsSection {
+        let managedRequirement = SettingsRequirement(key: AgentManagedModeConfig.enabledKey,
+                                                     hint: "Turn on Managed mode above to change these.")
         let statusRow = AgentStatusElement.presentationOrder.filter { $0 != .contextMeter }.map { element in
             SettingsRow(.toggle(key: element.settingKey, label: element.title, default: element.defaultVisible),
                         keywords: element.isAccountScoped ? ["status", "quota", "usage", "account", "limits"] : ["status"])
         }
         return SettingsSection(id: "agents", title: "Agents", iconSystemName: "sparkles", sidebarHeading: tilesHeading,
                                keywords: ["ai", "assistant"], groups: [
+            SettingsGroup(id: "agents.managedMode", title: "Managed mode",
+                          footer: "Managed mode applies to Claude Code and Codex agents. Pi agents and the helpers a lead starts always stay free.", rows: [
+                SettingsRow(.toggle(key: AgentManagedModeConfig.enabledKey, label: "Managed mode", default: true),
+                            help: "A Managed agent acts as a lead: it plans, hands separate pieces of work to helper agents on cheaper models, and checks what comes back. Off, agents work alone, and any agent may still start helpers. Changes apply at each agent’s next turn, which re-reads its conversation at full price.",
+                            keywords: ["managed", "free", "lead", "delegate", "helpers", "orchestrate", "opinionated"]),
+                SettingsRow(.toggle(key: AgentManagedModeConfig.showIndicatorKey, label: "Show Managed indicator", default: true),
+                            help: "Shows Managed beside the branch in agent tiles.",
+                            keywords: ["managed", "badge", "indicator", "header"], requires: managedRequirement),
+                SettingsRow(.toggle(key: AgentShortReportConfig.enabledKey, label: "Ask helpers for short reports",
+                                    default: AgentShortReportConfig.enabledDefault),
+                            help: "A helper whose final message runs over \(AgentShortReportConfig.pushBackWordLimit) words is asked once to cut it to about \(AgentShortReportConfig.targetWords) and save the rest to a file. The lead gets the short report instead of the full reply. Works with Claude agents for now.",
+                            keywords: ["report", "summary", "subagents", "helpers", "delegate", "context", "short"], requires: managedRequirement),
+                SettingsRow(.toggle(key: HelperTileTidyConfig.enabledKey, label: "Tidy finished helper tiles",
+                                    default: HelperTileTidyConfig.enabledDefault),
+                            help: "When a helper has finished and its result has reached the lead, Array closes the helper's tile after a short wait, the same as closing it yourself. The agent stays in the sidebar, and opening it there brings the tile back. A helper that failed, needs you, or that you have looked at, moved or typed into keeps its tile.",
+                            keywords: ["tidy", "close", "tiles", "subagents", "helpers", "delegate", "clean up", "finished"], requires: managedRequirement),
+                SettingsRow(.toggle(key: AgentManagedModeConfig.stallAlertsKey, label: "Tell the lead only when a helper is stuck", default: false),
+                            help: "Off: the lead hears after 10 minutes without progress, even during a long build. On: the lead hears once a helper has gone 3 minutes without progress with nothing running, and once if it has waited 30 minutes on a build or tool call. Busy helpers and silent model turns keep the 10 minutes.",
+                            keywords: ["stalled", "stuck", "watchdog", "helper", "alert", "no progress"], requires: managedRequirement),
+            ]),
             // .plans/101: one login per CLI for the whole app, chosen here.
             SettingsGroup(id: "agents.accounts", title: "Accounts",
                           footer: "Every agent of a CLI uses the account in use. A switch lets running turns finish, then their next turn signs in as the new account. Each account signs in with the CLI's own login; Array never sees a password or token.", rows: [
@@ -284,6 +306,31 @@ public enum SettingsSchema {
                             help: "Looks for newer versions at most once an hour. Updates only run when you click Update.",
                             keywords: ["update", "upgrade", "version", "cli", "npm", "homebrew"]),
             ]),
+            SettingsGroup(id: "agents.context", title: "Context",
+                          footer: "Applies to every agent, Managed or not.", rows: [
+                SettingsRow(.choice(key: AgentContextAutoCompactionPolicy.compactAtKey, label: "Compact context at",
+                                    options: AgentContextAutoCompactionPolicy.options, default: AgentContextAutoCompactionPolicy.defaultOption,
+                                    titles: Dictionary(uniqueKeysWithValues: AgentContextAutoCompactionPolicy.options.map { ($0, AgentContextAutoCompactionPolicy.title(for: $0)) })),
+                            help: "Summarises an agent's conversation when it reaches this size, or when its context window is 90% full if that comes first. Long conversations cost more every turn. Never leaves compaction to you.",
+                            keywords: ["compact", "compaction", "tokens", "summarize", "threshold", "percent", "automatically", "context"]),
+                SettingsRow(.toggle(key: AgentStatusElement.contextMeter.settingKey, label: "Show the context meter", default: AgentStatusElement.contextMeter.defaultVisible),
+                            keywords: ["context meter", "status", "tokens"]),
+            ]),
+            SettingsGroup(id: "agents.lifecycle", title: "Sessions and cleanup", rows: [
+                SettingsRow(.choice(key: AgentAutoSettleConfig.afterDaysKey, label: "Settle finished agents", options: AgentAutoSettleConfig.options, default: AgentAutoSettleConfig.defaultOption,
+                                    titles: Dictionary(uniqueKeysWithValues: AgentAutoSettleConfig.options.map { option in
+                                        guard let days = Int(option) else { return (option, "Never") }
+                                        return (option, days == 1 ? "After 1 day" : "After \(days) days")
+                                    })),
+                            help: "Moves an idle agent out of the Activity Dock list.",
+                            keywords: ["auto settle", "archive", "idle"]),
+                SettingsRow(.number(key: AgentSpawnLimitConfig.maximumActiveChildrenKey, label: "Sub-agents at once", range: Double(AgentSpawnLimitConfig.supportedRange.lowerBound)...Double(AgentSpawnLimitConfig.supportedRange.upperBound), default: Double(AgentSpawnLimitConfig.defaultMaximumActiveChildren), unit: "agents", step: 1),
+                            help: "How many child agents one agent may run at the same time.",
+                            keywords: ["children", "spawn", "limit", "max"], zeroTitle: "No limit"),
+                SettingsRow(.number(key: AgentIdleSessionConfig.minutesKey, label: "Stop idle sessions after", range: AgentIdleSessionConfig.supportedRange, default: AgentIdleSessionConfig.defaultMinutes, unit: "min", step: 1),
+                            help: "An agent's CLI keeps running for this long after its turn ends, then stops to free memory. Your next message resumes the same conversation. Sessions running a shell job or helpers are kept.",
+                            keywords: ["idle", "memory", "hibernate", "session", "timeout", "reap"]),
+            ]),
             SettingsGroup(id: "agents.replyRules", title: "Reply rules", rows: [
                 SettingsRow(.toggle(key: ReplyStandard.enabledKey, label: "Give every agent Array's reply rules", default: false),
                             help: "Each time Array starts a Claude Code, Codex or Pi agent, it adds Array's \(ReplyStandard.wordCount)-word rules for replies, before your personal rules. It applies to agents from their next launch; running agents keep what they started with.",
@@ -306,20 +353,6 @@ public enum SettingsSchema {
                             help: "Agents have no colour until you pick one from the tile's menu.",
                             keywords: ["color", "colour", "identity", "tint", "border", "stripe"]),
             ]),
-            SettingsGroup(id: "agents.context", title: "Context", rows: [
-                SettingsRow(.toggle(key: AgentContextAutoCompactionPolicy.enabledKey, label: "Compact context automatically", default: true),
-                            keywords: ["tokens", "summarize"]),
-                SettingsRow(.number(key: AgentContextAutoCompactionPolicy.percentKey, label: "Compact when context is", range: 50...99, default: 90, unit: "% full", step: 1),
-                            keywords: ["threshold", "tokens"]),
-                SettingsRow(.toggle(key: AgentStatusElement.contextMeter.settingKey, label: "Show the context meter", default: AgentStatusElement.contextMeter.defaultVisible),
-                            keywords: ["context meter", "status", "tokens"]),
-            ]),
-            SettingsGroup(id: "agents.dictation", title: "Dictation",
-                          footer: "Speech is transcribed on this Mac. No audio is kept or sent anywhere.", rows: [
-                SettingsRow(.toggle(key: DictationConfig.enabledKey, label: "Dictate into the composer", default: DictationConfig.defaultEnabled),
-                            help: "Shows a microphone button beside Send. Press ⇧⌘D to start or finish, Esc to discard.",
-                            keywords: ["dictation", "voice", "speech", "microphone", "mic", "talk"]),
-            ]),
             SettingsGroup(id: "agents.transcript", title: "Transcript", rows: [
                 SettingsRow(.toggle(key: AgentTerminalFaceConfig.showToggleKey, label: "Show Terminal toggle",
                                     default: AgentTerminalFaceConfig.defaultShowToggle),
@@ -333,16 +366,11 @@ public enum SettingsSchema {
             SettingsGroup(id: "agents.status", title: "Status row",
                           footer: "Applies to every agent tile. Account usage is per provider account, shared by every agent signed into it.",
                           rows: statusRow),
-            SettingsGroup(id: "agents.managedMode", title: "Managed mode", rows: [
-                SettingsRow(.toggle(key: AgentManagedModeConfig.enabledKey, label: "Managed mode", default: true),
-                            help: "Changes apply at each agent’s next turn. That turn re-reads its conversation at full price.",
-                            keywords: ["managed", "free", "lead", "delegate", "helpers"]),
-                SettingsRow(.toggle(key: AgentManagedModeConfig.showIndicatorKey, label: "Show Managed indicator", default: true),
-                            help: "Shows Managed beside the branch in agent tiles.",
-                            keywords: ["managed", "badge", "indicator", "header"]),
-                SettingsRow(.toggle(key: AgentManagedModeConfig.stallAlertsKey, label: "Tell the lead only when a helper is stuck", default: false),
-                            help: "Off: the lead hears after 10 minutes without progress, even during a long build. On: the lead hears once a helper has gone 3 minutes without progress with nothing running, and once if it has waited 30 minutes on a build or tool call. Busy helpers and silent model turns keep the 10 minutes.",
-                            keywords: ["stalled", "stuck", "watchdog", "helper", "alert", "no progress"]),
+            SettingsGroup(id: "agents.dictation", title: "Dictation",
+                          footer: "Speech is transcribed on this Mac. No audio is kept or sent anywhere.", rows: [
+                SettingsRow(.toggle(key: DictationConfig.enabledKey, label: "Dictate into the composer", default: DictationConfig.defaultEnabled),
+                            help: "Shows a microphone button beside Send. Press ⇧⌘D to start or finish, Esc to discard.",
+                            keywords: ["dictation", "voice", "speech", "microphone", "mic", "talk"]),
             ]),
             SettingsGroup(id: "agents.tokenTelemetry", title: "Usage recording",
                           footer: "Kept on this Mac only. Never uploaded or synced.", rows: [
@@ -350,29 +378,6 @@ public enum SettingsSchema {
                                     default: AgentTokenTelemetryConfig.defaultEnabled),
                             help: "Counts task tokens by agent, model and type, and host-observed command timing when available. Turning it off stops new token and timing records and deletes nothing.",
                             keywords: ["usage", "tokens", "telemetry", "cost", "cache", "privacy"]),
-            ]),
-            SettingsGroup(id: "agents.lifecycle", title: "Finished agents", rows: [
-                SettingsRow(.choice(key: AgentAutoSettleConfig.afterDaysKey, label: "Settle finished agents", options: AgentAutoSettleConfig.options, default: AgentAutoSettleConfig.defaultOption,
-                                    titles: Dictionary(uniqueKeysWithValues: AgentAutoSettleConfig.options.map { option in
-                                        guard let days = Int(option) else { return (option, "Never") }
-                                        return (option, days == 1 ? "After 1 day" : "After \(days) days")
-                                    })),
-                            help: "Moves an idle agent out of the Activity Dock list.",
-                            keywords: ["auto settle", "archive", "idle"]),
-                SettingsRow(.number(key: AgentSpawnLimitConfig.maximumActiveChildrenKey, label: "Sub-agents at once", range: Double(AgentSpawnLimitConfig.supportedRange.lowerBound)...Double(AgentSpawnLimitConfig.supportedRange.upperBound), default: Double(AgentSpawnLimitConfig.defaultMaximumActiveChildren), unit: "agents", step: 1),
-                            help: "How many child agents one agent may run at the same time.",
-                            keywords: ["children", "spawn", "limit", "max"], zeroTitle: "No limit"),
-                SettingsRow(.number(key: AgentIdleSessionConfig.minutesKey, label: "Stop idle sessions after", range: AgentIdleSessionConfig.supportedRange, default: AgentIdleSessionConfig.defaultMinutes, unit: "min", step: 1),
-                            help: "An agent's CLI keeps running for this long after its turn ends, then stops to free memory. Your next message resumes the same conversation. Sessions running a shell job or helpers are kept.",
-                            keywords: ["idle", "memory", "hibernate", "session", "timeout", "reap"]),
-                SettingsRow(.toggle(key: AgentShortReportConfig.enabledKey, label: "Ask helpers for short reports",
-                                    default: AgentShortReportConfig.enabledDefault),
-                            help: "A helper agent whose final message runs over \(AgentShortReportConfig.pushBackWordLimit) words is asked once to cut it to about \(AgentShortReportConfig.targetWords) and save the rest to a file. The agent that delegated the work gets the helper's short report instead of its full reply. The push-back works with Claude agents for now.",
-                            keywords: ["report", "summary", "subagents", "helpers", "delegate", "context", "short"]),
-                SettingsRow(.toggle(key: HelperTileTidyConfig.enabledKey, label: "Tidy finished helper tiles",
-                                    default: HelperTileTidyConfig.enabledDefault),
-                            help: "When a helper another agent started has finished and its result has reached that agent, Array closes the helper's tile after a short wait, the same as closing it yourself. The agent stays in the sidebar, and opening it there brings the tile back. A helper that failed, needs you, or that you have looked at, moved or typed into keeps its tile.",
-                            keywords: ["tidy", "close", "tiles", "subagents", "helpers", "delegate", "clean up", "finished"]),
             ]),
         ])
     }

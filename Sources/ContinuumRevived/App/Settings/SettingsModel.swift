@@ -120,6 +120,7 @@ final class SettingsModel {
     ) {
         self.sections = sections
         self.defaults = defaults
+        AgentContextAutoCompactionPolicy.migrateLegacy(defaults: defaults)
         self.navKeymap = navKeymap
         self.soundLibrary = soundLibrary
         let visible = sections.map(\.id)

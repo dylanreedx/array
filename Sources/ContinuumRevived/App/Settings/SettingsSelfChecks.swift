@@ -232,6 +232,37 @@ enum SettingsSelfChecks {
             model.reset(field)
             try expect(model.value(of: field) == .bool(true), "Managed settings reset must restore on")
         }
+        // Managed mode leads the Agents pane and its steering rows are gated by it.
+        let agentsPane = sections.first { $0.id == "agents" }!
+        try expect(agentsPane.groups.first?.id == "agents.managedMode", "Managed mode must be the first group in Agents")
+        let gated = agentsPane.groups.flatMap(\.rows).filter { $0.requires != nil }
+        try expect(gated.count >= 4 && gated.allSatisfy { $0.requires?.key == AgentManagedModeConfig.enabledKey },
+                   "Managed steering rows must be gated by the Managed switch")
+        // One compaction setting: the old on/off and percent rows are gone from every pane,
+        // and the one row drives the real compaction policy.
+        let compactionKeys = sections.flatMap(\.fields).compactMap(\.key).filter { $0.hasPrefix("continuum.agentContext.") }
+        try expect(compactionKeys == [AgentContextAutoCompactionPolicy.compactAtKey],
+                   "exactly one compaction setting must exist in Settings, found \(compactionKeys)")
+        let compactField = sections.flatMap(\.fields).first { $0.key == AgentContextAutoCompactionPolicy.compactAtKey }!
+        try expect(AgentContextAutoCompactionPolicy.compactAtTokens(defaults: defaults) == 300_000, "compaction must default to 300k")
+        model.write(.string("150000"), to: compactField)
+        try expect(AgentContextAutoCompactionPolicy.compactAtTokens(defaults: defaults) == 150_000
+                   && AgentContextAutoCompactionPolicy.shouldCompact(used: 150_000, max: 1_000_000, limit: 150_000),
+                   "the Settings row must drive the real compaction policy")
+        model.write(.string(AgentContextAutoCompactionPolicy.offOption), to: compactField)
+        try expect(AgentContextAutoCompactionPolicy.compactAtTokens(defaults: defaults) == nil, "Never must switch automatic compaction off")
+        model.reset(compactField)
+        // A value saved under the old two settings carries over when Settings opens.
+        let legacySuite = "array.settings-compaction-legacy.\(UUID().uuidString)"
+        let legacyDefaults = UserDefaults(suiteName: legacySuite)!
+        defer { legacyDefaults.removePersistentDomain(forName: legacySuite) }
+        legacyDefaults.set(80, forKey: AgentContextAutoCompactionPolicy.percentKey)
+        let legacyModel = SettingsModel(sections: sections, defaults: legacyDefaults, navKeymap: .resolve(defaults: legacyDefaults, warn: { _ in }))
+        try expect(legacyModel.value(of: compactField) == .string("150000"), "an old 80% setting must show as 150k tokens")
+        legacyDefaults.removeObject(forKey: AgentContextAutoCompactionPolicy.compactAtKey)
+        legacyDefaults.set(false, forKey: AgentContextAutoCompactionPolicy.enabledKey)
+        let offModel = SettingsModel(sections: sections, defaults: legacyDefaults, navKeymap: .resolve(defaults: legacyDefaults, warn: { _ in }))
+        try expect(offModel.value(of: compactField) == .string(AgentContextAutoCompactionPolicy.offOption), "an old Off must show as Never")
         AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .claudeCode, readiness: .ready, models: ["anthropic/claude-y", "anthropic/claude-z"]))
         AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .codex, readiness: .loggedOut, models: ["openai-codex/gpt-x"]))
         AgentModelCatalog.shared.resetForQA(snapshot: .init(harness: .pi, readiness: .missing, models: ["google/gemini-z"]))

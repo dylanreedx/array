@@ -1736,17 +1736,17 @@ final class AgentSupervisor {
         }
     }
 
-    var qaContextAutoCompactionThreshold: (() -> Double?)?
+    var qaContextAutoCompactionLimit: (() -> Int?)?
     var qaDidFinishAutomaticContextCompaction: (() -> Void)?
-    private func contextAutoCompactionThreshold() -> Double? {
-        if let qaContextAutoCompactionThreshold { return qaContextAutoCompactionThreshold() }
-        return AgentContextAutoCompactionPolicy.threshold()
+    private func contextAutoCompactionLimit() -> Int? {
+        if let qaContextAutoCompactionLimit { return qaContextAutoCompactionLimit() }
+        return AgentContextAutoCompactionPolicy.compactAtTokens()
     }
 
     private func requestAutomaticContextCompaction(after reading: AgentContextWindowSnapshot, for id: AgentID) {
-        guard let threshold = contextAutoCompactionThreshold(),
+        guard let limit = contextAutoCompactionLimit(),
               let used = reading.usedTokens, let max = reading.maxTokens, max > 0,
-              AgentContextAutoCompactionPolicy.shouldCompact(used: used, max: max, threshold: threshold), reading.compacting != true,
+              AgentContextAutoCompactionPolicy.shouldCompact(used: used, max: max, limit: limit), reading.compacting != true,
               let record = records[id], automaticContextCompactionEpochs[id] != record.contextEpoch,
               !activeCompactionOperations.contains(id), !compactingAgents.contains(id),
               submissionRecoveryStore != nil else { return }
@@ -1755,7 +1755,7 @@ final class AgentSupervisor {
             guard let self else { return }
             defer { self.qaDidFinishAutomaticContextCompaction?() }
             guard self.records[id]?.contextEpoch == record.contextEpoch,
-                  self.contextAutoCompactionThreshold() != nil else { return }
+                  self.contextAutoCompactionLimit() != nil else { return }
             _ = await self.accept(.compact(AgentCompactionRequest()), for: id)
         }
     }
