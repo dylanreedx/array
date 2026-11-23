@@ -459,8 +459,6 @@ struct InboxOwnershipChrome {
     /// Where a subagent row's content starts in the card: just right of the
     /// stem, the same for every lead whatever its count and dot.
     static var subagentLeading: CGFloat { laneX + 10 }
-    /// A helper's content, one step in from its parent subagent's.
-    static let helperIndent: CGFloat = 12
 
     func install(in view: NSView) {
         view.addSubview(groupLight, positioned: .above, relativeTo: sheet)
@@ -473,7 +471,8 @@ struct InboxOwnershipChrome {
     /// Lay the three out in a cell of `bounds`. `laneTop` is where the lead's
     /// stem begins (its row only); `rowMid` is the subagent line's centre.
     func layout(_ slice: InboxOwnershipSlice, bounds: NSRect, gutter: CGFloat, gap: CGFloat,
-                spacing: CGFloat, laneTop: CGFloat, rowMid: CGFloat, indicatorStyle: String) {
+                spacing: CGFloat, laneTop: CGFloat, rowMid: CGFloat, indicatorStyle: String,
+                helperLane: (x: CGFloat, reach: CGFloat, clearance: CGFloat)? = nil) {
         let bleed = spacing / 2
         let top = slice.continuesAbove ? -bleed : 0
         let bottom = bounds.height + (slice.continuesBelow ? bleed : 0)
@@ -500,12 +499,15 @@ struct InboxOwnershipChrome {
         let dark = stem.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         stem.colour = TextToken.textSecondary.color.nsColor(in: stem).withAlphaComponent(dark ? 0.14 : 0.16)
         let leadX = gutter + Self.laneX
-        let helperX = gutter + Self.subagentLeading + 5
+        // The helper lane drops from under the parent helper's leading signal
+        // and its foot turns into the nested row's leading column.
+        let helperX = helperLane.map { gutter + $0.x } ?? gutter + Self.subagentLeading + 5
         stem.lanes = [
             // The foot turns toward the row and stops just short of its dots.
             .init(kind: slice.leadLane, x: leadX, top: laneTop - top, turn: rowMid - top,
                   reach: gutter + Self.subagentLeading - 3 - leadX),
-            .init(kind: slice.helperLane, x: helperX, top: rowMid + 6 - top, turn: rowMid - top, reach: 0),
+            .init(kind: slice.helperLane, x: helperX, top: rowMid + (helperLane?.clearance ?? 6) - top,
+                  turn: rowMid - top, reach: helperLane?.reach ?? 0),
         ]
     }
 }

@@ -263,6 +263,18 @@ public struct SidebarLeadTally: Equatable, Sendable {
         return parts.joined(separator: " · ")
     }
 
+    /// The quiet inbox's summary line under a lead: what is live or wants you
+    /// first ("3 working · 1 needs you · 14 failed · 4 interrupted"), never the
+    /// lifetime total, which grows with every helper a long lead ever ran and
+    /// says nothing about now. Only when nothing is live or unresolved does it
+    /// name the total, as the one fact left ("All 182 helpers done").
+    public var liveLine: String {
+        let parts = [SidebarTallyState.working, .needsYou, .paused, .failed, .stopped]
+            .filter { count($0) > 0 }.map { $0.phrase(count($0)) }
+        guard parts.isEmpty else { return parts.joined(separator: " · ") }
+        return total == 1 ? "1 helper, done" : "All \(total) helpers done"
+    }
+
     /// Every state, for the tooltip and VoiceOver: the full partition.
     public var fullLine: String {
         var parts = [total == 1 ? "1 helper" : "\(total) helpers"]

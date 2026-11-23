@@ -252,7 +252,7 @@ enum SidebarRowGrammarChecks {
             throw Failure(description: "\(report.violations.count) grammar violations:\n  "
                           + report.violations.prefix(40).joined(separator: "\n  "))
         }
-        return "sidebar row grammar: G1-G6 hold over \(Kind.allCases.count) kinds x icons on/off x light/dark + interaction \(written.joined(separator: " "))"
+        return "sidebar row grammar: G1-G7 hold over \(Kind.allCases.count) kinds x icons on/off x light/dark + interaction \(written.joined(separator: " "))"
     }
 
     // MARK: Audit

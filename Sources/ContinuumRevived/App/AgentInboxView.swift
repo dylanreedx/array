@@ -9484,7 +9484,7 @@ final class AgentInboxRemainderView: NSTableCellView {
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byTruncatingTail
         let text = NSMutableAttributedString()
-        for (index, part) in tally.countLine.components(separatedBy: " · ").enumerated() {
+        for (index, part) in tally.liveLine.components(separatedBy: " · ").enumerated() {
             if index > 0 {
                 text.append(NSAttributedString(string: " · ", attributes: [.foregroundColor: secondary.withAlphaComponent(0.6)]))
             }

@@ -213,7 +213,7 @@ extension SidebarOwnershipChecks {
         leadCell.layoutSubtreeIfNeeded()
         let needs = SidebarTallyState.needsYou.phrase(askers.count)
         let drawnHelpers = inbox.rowIdsForQA.filter { Set(askers + done).contains($0) }.count
-        guard inbox.countLineTextForQA(id: lead)?.contains("14 helpers · \(needs)") == true,
+        guard inbox.countLineTextForQA(id: lead)?.hasPrefix(needs) == true,
               leadCell.accessibilityHelp()?.contains(needs) == true else {
             throw fail("the lead's count line reads \(inbox.countLineTextForQA(id: lead) ?? "nil"), AX \(leadCell.accessibilityHelp() ?? "nil")")
         }

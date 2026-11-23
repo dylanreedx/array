@@ -1276,6 +1276,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
     /// glyph and the count, fixed by the count's digits. ONE function for the
     /// parent's own frame and for the clearance its children keep, so the two
     /// cannot disagree.
+    /// Icons off: the room every lead keeps for its fold control.
+    static var leadFoldColumn: CGFloat { InboxSwarmFoldControl.width(childCount: 99) }
+
     static func disclosureTrailing(for disclosure: RowDisclosure, childCount: Int) -> CGFloat {
         guard disclosure != .none else { return 0 }
         if leadPlateOn { return InboxSwarmFoldControl.glyphCentreX + InboxLeadIconPlate.side / 2 }
@@ -1402,6 +1405,11 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         let plan = controller.plan(for: snapshot, now: now)
         let plateOn = Self.leadPlateOn && !isSubagentRow
         if plateOn {
+            // The plate's own working ring says working; the clock word says
+            // the outcome. No gyro or status glyph beside it.
+            applyThrobber(isWorking: false)
+            statusGlyph.symbol = nil
+            statusGlyph.isHidden = true
             sprite.clear()
             if !showsLeadPlate { showsLeadPlate = true; needsLayout = true }
             disclosureButton.alphaValue = 0
@@ -1438,12 +1446,11 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         applyHaloHelperMotion()
     }
 
-    /// Halo: a resting helper (no helpers of its own) shows its plain character
-    /// where its dots would be, a little bigger; working rows keep dots + right icon.
-    private var haloHelperIcon: Bool {
-        guard Self.leadPlateOn, isSubagentRow else { return false }
-        return (shown?.disclosure ?? RowDisclosure.none) == RowDisclosure.none
-    }
+    /// Halo: every helper row shows its character in its depth's leading
+    /// column, working or resting, folding helpers of its own or not. A helper
+    /// that folds subagents makes the character its fold control (as the lead's
+    /// plate is), so the row never draws a fold glyph beside a character.
+    private var haloHelperIcon: Bool { Self.leadPlateOn && isSubagentRow }
     private static let haloHelperIconHeight: CGFloat = 14
     /// Fixed leading column for a helper's icon, so every helper title starts at one x.
     private static let haloHelperColumn: CGFloat = 24
@@ -1649,7 +1656,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                 // Both layouts call known usage a pause. Ledger helpers keep
                 // their compact icon/age column; Quiet keeps its status word.
                 text = cause == .taskError && (renderedTally?.count(.failed) ?? 0) > 0
-                    ? (Self.ledgerClock(row, now: now) ?? "") : (sub ? cause.label(harness: row.harness) : cause.shortLabel)
+                    ? (Self.ledgerClock(row, now: now) ?? "")
+                    : (sub && cause != .usageLimit ? cause.label(harness: row.harness) : cause.shortLabel)
             } else {
                 text = (ledger != nil && sub ? Self.ledgerClock(row, now: now)
                         : Self.ownershipClock(row, isSubagent: sub, now: now)) ?? ""
@@ -2049,6 +2057,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         statusGlyph.symbol = symbol == "exclamationmark.triangle.fill" && !sub ? symbol : nil
         if ledger != nil, sub { statusGlyph.symbol = Self.ledgerSymbol(row) }
         if !sub, SidebarRecovery.cause(for: row) == .usageLimit { statusGlyph.symbol = "pause.circle" }
+        // A lead's Halo plate is its one status signal (see `applyCharacter`).
+        if !sub, Self.leadPlateOn { statusGlyph.symbol = nil }
         // VoiceOver hears the same reconciled numbers the chip draws.
         setAccessibilityHelp((sidebarTally ?? ledger?.tally).map(\.accessibilityLabel))
         // A subagent works under three dots, never the gyro.
@@ -2106,7 +2116,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                 facts.append(run("Needs you: \(ask)", AccentToken.accentApproval.color.nsColor(in: self)))
             }
             let chip = NSMutableAttributedString()
-            for (index, part) in tally.countLine.components(separatedBy: " · ").enumerated() {
+            // Quiet inbox: the same live-first summary as the open lead's line.
+            let line = ledger == nil ? tally.liveLine : tally.countLine
+            for (index, part) in line.components(separatedBy: " · ").enumerated() {
                 if index > 0 { chip.append(run(" · ", secondary.withAlphaComponent(0.6))) }
                 chip.append(run(part, part.hasSuffix(" failed") ? failedInk : secondary))
             }
@@ -2319,7 +2331,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         ownershipChrome.layout(
             ownership, bounds: bounds, gutter: gutter, gap: gap, spacing: spacing,
             laneTop: gap / 2 + l1 + SwarmPose.stemBottom,
-            rowMid: InboxOwnershipChrome.subagentHeight / 2, indicatorStyle: activeIndicatorStyle)
+            rowMid: InboxOwnershipChrome.subagentHeight / 2, indicatorStyle: activeIndicatorStyle,
+            helperLane: Self.helperLaneGeometry(iconsOn: Self.leadPlateOn))
         decorations.workspaceSlot = nil
         if !sub, workspaceMarkColour != nil,
            workspaceTreatmentForQA == .outline || workspaceTreatmentForQA == .wash {
@@ -2375,7 +2388,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             disclosureButton.frame = inCard(NSRect(x: InboxOwnershipChrome.foldX, y: inset,
                                                    width: width, height: card.bounds.height - inset * 2))
             disclosureButton.glyphCentreY = l1 - inset
-            x = InboxOwnershipChrome.foldX + width + 6
+            // Icons off: the title starts after a two-digit fold control on
+            // every lead, folding or not, so lead titles share one x.
+            x = InboxOwnershipChrome.foldX + (showsLeadPlate ? width : max(width, Self.leadFoldColumn)) + 6
             if showsLeadPlate {
                 // The icon is the control: centred on the connector lane, mid-card.
                 let side = InboxLeadIconPlate.side
@@ -2392,6 +2407,8 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
                                             y: snapped((card.bounds.height - side) / 2),
                                             width: side, height: side))
             x = InboxOwnershipChrome.foldX + trailing + 6 + 2
+        } else {
+            x = InboxOwnershipChrome.foldX + Self.leadFoldColumn + 6
         }
         if let name = shown.row.identityColor {
             let side = AgentInboxView.identityDotSide
@@ -2399,7 +2416,9 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             decorations.identityDotColour = AgentInboxView.identityDotColour(named: name)
             x += side + CGFloat(Space.m)
         } else {
+            // No colour: the dot's room stays, so every lead title starts at one x.
             decorations.identityDot = nil
+            x += AgentInboxView.identityDotSide + CGFloat(Space.m)
         }
         let textX = x
         var r = right
@@ -2544,35 +2563,94 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         }
     }
 
+    // MARK: Helper row grammar
+    //
+    // One grammar for every helper and nested-subagent row:
+    //
+    //   [indent = (depth - 1) x step] [leading column] [title ...] [trailing column]
+    //
+    // - The leading column holds the row's ONE status signal: its character
+    //   (agent icons on), or its dots / fold glyph (icons off). A helper that
+    //   folds subagents of its own keeps its character there and the character
+    //   is the fold control; no second glyph, no character at the right.
+    // - `step` is the distance from the leading column to the title, so a
+    //   nested row's column starts exactly under its parent's title.
+    // - The trailing column has one fixed width for the clock, the state word or
+    //   the report pill, so every title truncates at the same x.
+    // - No provider mark: on a one-line helper it read as an activity glyph.
+    //   The model stays on the title's tooltip and in the hover card.
+
+    /// Where a depth-1 helper's leading column starts in its card: the
+    /// character's room with icons on, the dots' (closer to the stem) off.
+    static func helperColumnX(iconsOn: Bool) -> CGFloat { iconsOn ? 8 : 4 }
+    /// The leading column's width: the character's, or the dots' room.
+    static func helperColumnWidth(iconsOn: Bool) -> CGFloat { iconsOn ? haloHelperColumn : 14 }
+    /// Leading column to title.
+    static func helperStep(iconsOn: Bool) -> CGFloat { helperColumnWidth(iconsOn: iconsOn) + 6 }
+    /// The leading column of a helper at `depth` (card x).
+    static func helperColumnMinX(depth: Int, iconsOn: Bool) -> CGFloat {
+        helperColumnX(iconsOn: iconsOn) + CGFloat(max(0, depth - 1)) * helperStep(iconsOn: iconsOn)
+    }
+    /// The trailing column: the widest word or pill a helper row can draw.
+    static var helperTrailingWidth: CGFloat {
+        if let cached = cachedTrailingWidth { return cached }
+        let clockFont = NSFont.monospacedSystemFont(ofSize: Typography.style(for: .caption).size, weight: .regular)
+        let words = ["Interrupted", "Cancelled", "waiting", "59m ago", "23h 59m"].map {
+            ceil(($0 as NSString).size(withAttributes: [.font: clockFont]).width) + CGFloat(Metrics.cellTextInset)
+        }
+        let pill = ceil(("9 unconfirmed" as NSString).size(withAttributes: [.font: pillFont]).width) + 12
+        let width = max(pill, words.max() ?? 0)
+        cachedTrailingWidth = width
+        return width
+    }
+    private static var cachedTrailingWidth: CGFloat?
+    /// The nested connector, in cell x from the gutter: from the centre of a
+    /// depth-1 column to just short of a depth-2 column.
+    static func helperLaneGeometry(iconsOn: Bool) -> (x: CGFloat, reach: CGFloat, clearance: CGFloat) {
+        let card = InboxOwnershipChrome.subagentLeading - 6
+        let width = helperColumnWidth(iconsOn: iconsOn)
+        let centre = helperColumnX(iconsOn: iconsOn) + width / 2
+        return (card + centre, helperStep(iconsOn: iconsOn) - width / 2 - 3, iconsOn ? 8 : 6)
+    }
+    static let helperTitleGap: CGFloat = 8
+
     private func layoutSubagentLine() {
         guard let row = shown?.row else { return }
         let mid = card.bounds.height / 2
-        let x0 = 6 + InboxOwnershipChrome.helperIndent * CGFloat(min(max(0, row.depth - 1), 1))
+        let iconsOn = Self.leadPlateOn
+        let columnX = Self.helperColumnMinX(depth: row.depth, iconsOn: iconsOn)
+        let columnWidth = Self.helperColumnWidth(iconsOn: iconsOn)
         let right = card.bounds.width - 6
-        // A subagent with helpers of its own keeps the fold glyph — no count, its
-        // helpers are right below — where its dots would be; its helpers' short
-        // stem leaves from under it.
-        if let disclosure = shown?.disclosure, disclosure != .none {
+        let leftIcon = haloHelperIcon && characterSize != nil
+        let folds = (shown?.disclosure ?? .none) != .none
+        // A helper that folds subagents: the fold control covers its leading
+        // column. With a character there it is invisible (the character is the
+        // control); with icons off its glyph IS the row's signal.
+        if folds {
             disclosureButton.isHidden = false
+            let glyphCentre = columnX + columnWidth / 2
             disclosureButton.frame = inCard(NSRect(
-                x: x0 + 5 - InboxSwarmFoldControl.glyphCentreX, y: 0,
-                width: InboxSwarmFoldControl.glyphCentreX + SwarmPose.side / 2, height: card.bounds.height))
+                x: glyphCentre - InboxSwarmFoldControl.glyphCentreX, y: 0,
+                width: InboxSwarmFoldControl.glyphCentreX + max(SwarmPose.side, columnWidth) / 2,
+                height: card.bounds.height))
             disclosureButton.glyphCentreY = mid
+            disclosureButton.alphaValue = leftIcon ? 0 : 1
         } else {
             disclosureButton.frame = .zero
             disclosureButton.isHidden = true
         }
         decorations.identityDot = nil
         decorations.branchSlot = nil
+        decorations.markSlot = nil
         projectIcon.frame = .zero
         placementLabel.frame = .zero
         branchLabel.frame = .zero
         settleNudge.frame = .zero
         statusGlyph.isHidden = true
         let dots = InboxPulseDotsView.size
-        let leftIcon = haloHelperIcon && characterSize != nil
-        pulseDots.frame = leftIcon ? .zero
-            : inCard(NSRect(x: x0 - 1, y: snapped(mid - dots.height / 2), width: dots.width, height: dots.height))
+        pulseDots.frame = leftIcon || folds ? .zero
+            : inCard(NSRect(x: columnX + (columnWidth - dots.width) / 2, y: snapped(mid - dots.height / 2),
+                            width: dots.width, height: dots.height))
         var actionsLeft = right
         if !hoverPopOut.isHidden || !hoverStop.isHidden {
             var cx = right
@@ -2586,82 +2664,63 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
             actionsLeft = cx + 4
         }
         let showsResting = hoverPopOut.isHidden && hoverStop.isHidden
-        var restingWidth: CGFloat = 0
+        // The trailing column: fixed, whatever it holds.
+        let trailing = Self.helperTrailingWidth
         if let pill = reportPillText {
-            let font = Self.pillFont
-            let width = ceil((pill as NSString).size(withAttributes: [.font: font]).width) + 12
+            let width = min(trailing, ceil((pill as NSString).size(withAttributes: [.font: Self.pillFont]).width) + 12)
             decorations.reportPill = showsResting
                 ? (NSRect(x: right - width, y: snapped(mid - 7.5), width: width, height: 15), pill) : nil
-            restingWidth = width
             stateLabel.frame = .zero
         } else if !stateLabel.isHidden {
-            let width = Self.width(of: stateLabel)
+            let width = min(trailing, Self.width(of: stateLabel))
             place(stateLabel, x: right - width, centre: mid, width: width)
-            restingWidth = width
         }
         stateLabel.alphaValue = showsResting ? CGFloat(shown?.emphasis.accentOpacity ?? 1) : 0
-        // Ledger: a fixed status column, the icon left of the age.
-        // The resting widths are measured whether or not the actions cover them,
-        // so the title truncates identically while hovered.
-        if ledger != nil, reportPillText == nil, statusGlyph.symbol != nil {
+        var used = trailing
+        // Ledger, icons off: a fixed status icon left of the trailing column.
+        // With a character the character is the status.
+        if ledger != nil, !leftIcon, reportPillText == nil, statusGlyph.symbol != nil {
             let side: CGFloat = 12
-            let column: CGFloat = 52
-            let clockLeft = right - max(restingWidth, column)
             if showsResting {
                 statusGlyph.isHidden = false
                 if statusGlyph.superview == nil { card.addSubview(statusGlyph) }
-                statusGlyph.frame = inCard(NSRect(x: clockLeft - 6 - side, y: snapped(mid - side / 2), width: side, height: side))
+                statusGlyph.frame = inCard(NSRect(x: right - trailing - 6 - side, y: snapped(mid - side / 2),
+                                                  width: side, height: side))
             }
-            restingWidth = max(restingWidth, column) + 6 + side
+            used += 6 + side
         }
-        let markSide: CGFloat = 11
-        if decorations.mark != nil {
-            decorations.markSlot = showsResting
-                ? NSRect(x: right - restingWidth - 7 - markSide, y: snapped(mid - markSide / 2),
-                         width: markSide, height: markSide) : nil
-            restingWidth += markSide + 7
-        } else {
-            decorations.markSlot = nil
-        }
-        // Plan 110: a helper's character, just left of its mark while it rests;
-        // the hover controls take both places.
         characterColumn = nil
         if leftIcon, let size = characterSize {
-            characterColumn = NSRect(x: x0 + 2, y: 0, width: Self.haloHelperColumn, height: card.bounds.height)
+            characterColumn = NSRect(x: columnX, y: 0, width: columnWidth, height: card.bounds.height)
             decorations.setCharacterSlot(
-                NSRect(x: x0 + 2 + ((Self.haloHelperColumn - size.width) / 2).rounded(),
+                NSRect(x: columnX + ((columnWidth - size.width) / 2).rounded(),
                        y: snapped(mid - size.height / 2), width: size.width, height: size.height))
-        } else if let size = characterSize {
-            let gap = decorations.mark == nil ? 7 : Self.characterGap
-            characterColumn = NSRect(x: right - restingWidth - gap - size.width, y: 0, width: size.width, height: card.bounds.height)
-            decorations.setCharacterSlot(showsResting
-                ? NSRect(x: right - restingWidth - gap - size.width,
-                         y: snapped(mid - size.height / 2), width: size.width, height: size.height) : nil)
-            restingWidth += size.width + gap
         } else {
             decorations.setCharacterSlot(nil)
         }
-        let used = restingWidth
         defer { fadeTextUnderActions(leftEdge: actionsLeft) }
-        let titleX = x0 + 14 + (Self.leadPlateOn ? Self.haloHelperColumn - 8 : 0)
-        let titleMax = max(0, right - used - 12 - titleX)
+        let inset = CGFloat(Metrics.cellTextInset)
+        // The label's own inset sits before its glyphs: start the frame that much
+        // early so the INK begins one step from the column.
+        let titleX = columnX + Self.helperStep(iconsOn: iconsOn) - inset
+        let titleMax = max(0, right - used - Self.helperTitleGap - titleX)
         let titleNatural = Self.width(of: titleLabel)
         place(titleLabel, x: titleX, centre: mid, width: min(titleNatural, titleMax))
+        titleLabel.toolTip = row.model
         // The status after the title only shows when it fits whole.
         if !tailLabel.attributedStringValue.string.isEmpty {
-            let need = ceil(tailLabel.attributedStringValue.size().width) + CGFloat(Metrics.cellTextInset)
+            let need = ceil(tailLabel.attributedStringValue.size().width) + inset
             let fits = titleNatural + need <= titleMax
             tailLabel.isHidden = !fits
-            if fits { place(tailLabel, x: titleX + titleNatural - CGFloat(Metrics.cellTextInset), centre: mid, width: need) }
+            if fits { place(tailLabel, x: titleX + titleNatural - inset, centre: mid, width: need) }
         }
-        // Hover's pill hugs what the row SAYS — its working dots or fold glyph,
-        // its title and any status after it — with one even margin, never the
-        // clock or the controls. A full-width capsule is the system's source-list
-        // selection; a pill around the words cannot be read as one.
-        let inset = CGFloat(Metrics.cellTextInset)
+        // Hover's pill hugs what the row SAYS — its leading signal, its title
+        // and any status after it — with one even margin, never the clock or the
+        // controls. A full-width capsule is the system's source-list selection;
+        // a pill around the words cannot be read as one.
         let margin: CGFloat = 8
-        let leadsWithMark = !pulseDots.isHidden || !disclosureButton.isHidden
-        let start = leadsWithMark ? x0 - margin : titleLabel.frame.minX + inset - margin
+        let leadsWithMark = !pulseDots.isHidden || !disclosureButton.isHidden || leftIcon
+        let start = leadsWithMark ? columnX - margin / 2 : titleLabel.frame.minX + inset - margin
         let words = (tailLabel.isHidden ? titleLabel.frame.maxX : tailLabel.frame.maxX) - inset
         let markHeight = InboxOwnershipChrome.subagentHeight
         card.hoverMarkRect = NSRect(

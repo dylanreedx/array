@@ -345,12 +345,14 @@ enum SidebarQuietInboxChecks {
             guard let cell = inbox.cellForQA(id: id.rawValue) else {
                 throw Failure(description: "usage helper is not a normal rendered row")
             }
-            try expect(cell.qaStateLabel == "Paused · usage",
-                       "known usage row must say Paused · usage, got '\(cell.qaStateLabel)'")
-            try expect(cell.accessibilityLabel()?.contains("Paused · usage") == true,
-                       "known usage row's AX must also say Paused · usage")
+            // A helper's trailing column holds one short word; the family's
+            // cause line ("N paused · usage") says why.
+            try expect(cell.qaStateLabel == "Paused",
+                       "known usage helper row must say Paused, got '\(cell.qaStateLabel)'")
+            try expect(cell.accessibilityLabel()?.contains("Paused") == true,
+                       "known usage row's AX must also say Paused")
         }
-        try expect(inbox.countLineTextForQA(id: lead.rawValue)?.contains("4 helpers · 2 paused · 1 failed") == true,
+        try expect(inbox.countLineTextForQA(id: lead.rawValue)?.hasPrefix("2 paused · 1 failed") == true,
                    "Quiet's rendered lead must reconcile paused and failed in one count line")
         Q.photograph(sidebar, "quiet-1-head")
 
@@ -372,8 +374,10 @@ enum SidebarQuietInboxChecks {
             var lines: [UUID: String] = [:]
             for (id, tally) in inbox.sidebarTallies {
                 guard let text = inbox.countLineTextForQA(id: id) else { continue }
-                try expect(text.contains(tally.countLine),
-                           "\(inbox.sidebarLayout.title): a lead's drawn line carries its tally — '\(text)' vs '\(tally.countLine)'")
+                // Quiet draws the live-first summary; the Ledger its count chip.
+                let expected = inbox.sidebarLayout == .quietInbox ? tally.liveLine : tally.countLine
+                try expect(text.contains(expected),
+                           "\(inbox.sidebarLayout.title): a lead's drawn line carries its tally — '\(text)' vs '\(expected)'")
                 // The Ledger's line 2 leads with its separator; the words are the same.
                 lines[id] = text.trimmingCharacters(in: CharacterSet(charactersIn: " ·"))
             }
@@ -383,7 +387,9 @@ enum SidebarQuietInboxChecks {
         settings(.ledger)
         let ledgerCounts = try drawnCountLines()
         settings(.quietInbox)
-        try expect(!quietCounts.isEmpty && quietCounts == ledgerCounts,
+        // Each line was checked against the one shared tally above (Quiet its
+        // live-first summary, Ledger its chip); both draw one for every lead.
+        try expect(!quietCounts.isEmpty && Set(quietCounts.keys) == Set(ledgerCounts.keys),
                    "Quiet and Ledger draw the same partition per lead — Quiet \(quietCounts.values.sorted()), Ledger \(ledgerCounts.values.sorted())")
         for line in causeLines() {
             guard let incident = line.causeIncidentForQA, let leadID = incident.familyIDs.first,

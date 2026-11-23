@@ -411,7 +411,7 @@ enum SidebarLedgerChecks {
             throw fail("switching to Quiet inbox did not re-render (layout \(inbox.sidebarLayout))")
         }
         if inbox.itemsForQA.contains(where: { $0.agentRow?.id == uuid(lead) }),
-           inbox.countLineTextForQA(id: uuid(lead))?.contains("18 helpers · 12 paused · 1 failed") != true {
+           inbox.countLineTextForQA(id: uuid(lead))?.hasPrefix("12 paused · 1 failed") != true {
             throw fail("the Quiet inbox lost the shared count line")
         }
         defaults.set(SidebarLayout.ledger.rawValue, forKey: SidebarLayout.defaultsKey)

@@ -218,7 +218,8 @@ enum SidebarOwnershipChecks {
             let open = try cell(verify)
             if inbox.sidebarLayout == .quietInbox {
                 guard open.branchLaneTextForQA.contains("array/integration"), open.visibleTextForQA.contains("Array"),
-                      inbox.countLineTextForQA(id: uuid(verify))?.contains("5 helpers · 2 working") == true,
+                      // The summary leads with what is live, never the lifetime total.
+                      inbox.countLineTextForQA(id: uuid(verify))?.hasPrefix("2 working") == true,
                       open.accessibilityLabel()?.contains("branch array/integration") == true else {
                     throw Failure(description: "\(label): Quiet's open lead must draw project and branch on line 2 and its count below: \(open.visibleTextForQA) / \(inbox.countLineTextForQA(id: uuid(verify)) ?? "nil")")
                 }
@@ -422,8 +423,11 @@ enum SidebarOwnershipChecks {
             throw Failure(description: "\(label): a subagent's words start \(first - lane)pt right of the stem, wanted 26pt or less")
         }
         let step = helper.qaTitleFrameForQA.minX - second
-        guard abs(step - InboxOwnershipChrome.helperIndent) <= 0.5, step <= 12.5 else {
-            throw Failure(description: "\(label): a helper steps in \(step)pt, wanted \(InboxOwnershipChrome.helperIndent)pt")
+        // The row grammar: a nested row steps in by its parent's column-to-title
+        // distance, so its leading column sits under its parent's title.
+        let wanted = AgentInbox96CellView.helperStep(iconsOn: AgentInbox96CellView.leadPlateOn)
+        guard abs(step - wanted) <= 0.5 else {
+            throw Failure(description: "\(label): a helper steps in \(step)pt, wanted \(wanted)pt")
         }
         // The foot reaches toward the row and stops short of its dots.
         let last = try cell(verify + 5)
