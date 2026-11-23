@@ -154,8 +154,13 @@ func runSettingsSchemaChecks() {
     }
     expect(soundsSection.title == "Notifications & Sounds", "Notifications & Sounds pane title")
     expect(soundsSection.fields.contains { if case .agentSounds = $0 { return true } else { return false } }, "Notifications & Sounds renders the sounds editor")
-    expect(generalSection.fields.contains { $0.key == WorkspaceSidebarConfig.visibleKey }, "General exposes Activity Dock visibility")
-    expect(generalSection.fields.contains { $0.key == WorkspaceSidebarConfig.widthKey }, "General exposes Activity Dock width")
+    guard let sidebarPane = sections.first(where: { $0.id == "sidebar" }) else {
+        expect(false, "settings schema must include Sidebar")
+        fatalError("unreachable")
+    }
+    expect(sidebarPane.fields.contains { $0.key == WorkspaceSidebarConfig.visibleKey }, "Sidebar exposes Activity Dock visibility")
+    expect(sidebarPane.fields.contains { $0.key == WorkspaceSidebarConfig.widthKey }, "Sidebar exposes Activity Dock width")
+    expect(!generalSection.fields.contains { $0.key == WorkspaceSidebarConfig.visibleKey }, "Activity Dock visibility left General")
 
     let sidebarSuiteName = "WorkspaceSidebarConfigChecks-\(UUID().uuidString)"
     let sidebarDefaults = UserDefaults(suiteName: sidebarSuiteName)!

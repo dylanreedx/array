@@ -30,7 +30,7 @@ public enum AgentContextAutoCompactionPolicy {
 
     public static func title(for option: String) -> String {
         guard let tokens = Int(option) else { return "Never" }
-        return "\(tokens / 1_000)k tokens"
+        return "At \(tokens / 1_000)k tokens"
     }
 
     /// Carries a saved pre-0.7.61 choice into the one setting, once. No new
