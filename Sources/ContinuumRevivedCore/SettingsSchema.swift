@@ -44,14 +44,6 @@ public enum SettingsSchema {
                             help: "Fits as much of the tile on screen as possible and puts the cursor in it, like ⌥↩. Dragging a header still moves the tile.",
                             keywords: ["header", "title bar", "click", "focus", "centre", "center", "fit", "zoom"]),
             ]),
-            SettingsGroup(id: "general.dock", title: "Activity Dock", rows: [
-                SettingsRow(.toggle(key: WorkspaceSidebarConfig.visibleKey, label: "Show the Activity Dock", default: WorkspaceSidebarConfig.defaultVisible),
-                            help: "The side list of every agent, what each is doing, and what needs you.",
-                            keywords: ["sidebar", "inbox", "agents list"]),
-                SettingsRow(.number(key: WorkspaceSidebarConfig.widthKey, label: "Dock width", range: 180...640, default: WorkspaceSidebarConfig.defaultWidth, unit: "pt", step: 8),
-                            help: "You can also drag the dock's edge.",
-                            keywords: ["sidebar"]),
-            ]),
             SettingsGroup(id: "general.updates", title: "Updates", rows: [
                 SettingsRow(.choice(key: "array.updateChannel", label: "Update channel", options: ["Stable", "Tip"], default: "Stable"),
                             help: "Tip includes prerelease updates. Applies to the released app only.", keywords: ["sparkle", "beta"]),
@@ -83,7 +75,7 @@ public enum SettingsSchema {
                             help: "Tiles, zones, menus, the command menu, Settings and every card follow it right away.",
                             keywords: ["corners", "radius", "rounded", "sharp", "square", "bubbly", "roundness"]),
             ]),
-            SettingsGroup(id: "appearance.focus", title: "Focus", rows: [
+            SettingsGroup(id: "appearance.focus", title: "Focused tile outline", rows: [
                 SettingsRow(.toggle(key: FocusBorderConfig.enabledKey, label: "Outline the focused tile", default: FocusBorderConfig.defaultEnabled),
                             keywords: ["focus border", "ring", "highlight"]),
                 SettingsRow(.choice(key: FocusBorderConfig.colorKey, label: "Outline colour", options: FocusBorderConfig.colorOptions, default: FocusBorderConfig.defaultColor),
@@ -107,6 +99,14 @@ public enum SettingsSchema {
     private static func sidebar() -> SettingsSection {
         SettingsSection(id: "sidebar", title: "Sidebar", iconSystemName: "sidebar.left",
                         keywords: ["sidebar", "activity dock", "inbox", "agents list", "list"], groups: [
+            SettingsGroup(id: "sidebar.dock", title: "Activity Dock", rows: [
+                SettingsRow(.toggle(key: WorkspaceSidebarConfig.visibleKey, label: "Show the Activity Dock", default: WorkspaceSidebarConfig.defaultVisible),
+                            help: "The side list of every agent, what each is doing, and what needs you.",
+                            keywords: ["sidebar", "inbox", "agents list"]),
+                SettingsRow(.number(key: WorkspaceSidebarConfig.widthKey, label: "Dock width", range: 180...640, default: WorkspaceSidebarConfig.defaultWidth, unit: "pt", step: 8),
+                            help: "You can also drag the dock's edge.",
+                            keywords: ["sidebar"]),
+            ]),
             SettingsGroup(id: "sidebar.layout", title: "Layout", rows: [
                 SettingsRow(.choice(key: SidebarLayout.defaultsKey, label: "Layout",
                                     options: SidebarLayout.allCases.map(\.rawValue),

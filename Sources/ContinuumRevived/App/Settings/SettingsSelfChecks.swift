@@ -173,12 +173,12 @@ enum SettingsSelfChecks {
                    "the iPhone pane must mount the pairing view inside the modal")
 
         // 3. A switch round-trips through the real control: click the NSSwitch the
-        // General pane draws, and the bound key and its exact event follow.
-        fixture.select("general")
+        // Sidebar pane draws, and the bound key and its exact event follow.
+        fixture.select("sidebar")
         let dockField = SettingsField.toggle(key: WorkspaceSidebarConfig.visibleKey, label: "", default: WorkspaceSidebarConfig.defaultVisible)
         let switches = fixture.descendants(NSSwitch.self)
-        // General draws the jump and header-click switches, then the Activity Dock's.
-        try expect(switches.count == 3, "General must draw three switches (jump, header click, Activity Dock), drew \(switches.count)")
+        // Sidebar draws only the Activity Dock switch.
+        try expect(switches.count == 1, "Sidebar must draw one switch (Activity Dock), drew \(switches.count)")
         final class Counts: @unchecked Sendable { var exact = 0; var unrelated = 0 }
         let counts = Counts()
         let exact = NotificationCenter.default.addObserver(
@@ -192,14 +192,14 @@ enum SettingsSelfChecks {
             NotificationCenter.default.removeObserver(unrelated)
         }
         let before = dockField.currentValue(in: defaults)
-        try expect((switches[2].state == .on) == (before == .bool(true)), "the switch must render the stored value")
-        switches[2].performClick(nil)
+        try expect((switches[0].state == .on) == (before == .bool(true)), "the switch must render the stored value")
+        switches[0].performClick(nil)
         fixture.settle()
         try expect(dockField.currentValue(in: defaults) == .bool(before != .bool(true)),
                    "clicking the Activity Dock switch must write \(WorkspaceSidebarConfig.visibleKey)")
         try expect(counts.exact == 1 && counts.unrelated == 0,
                    "a write must post its own setting event once: exact=\(counts.exact) unrelated=\(counts.unrelated)")
-        try expect(fixture.descendants(NSSwitch.self).dropFirst(2).first?.state == (before == .bool(true) ? .off : .on),
+        try expect(fixture.descendants(NSSwitch.self).first?.state == (before == .bool(true) ? .off : .on),
                    "the switch must re-render the new value")
         model.reset(dockField)
         try expect(defaults.object(forKey: WorkspaceSidebarConfig.visibleKey) == nil, "Reset to Default must remove the override")
