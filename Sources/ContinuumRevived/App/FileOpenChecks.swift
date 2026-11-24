@@ -2803,6 +2803,62 @@ enum FileOpenChecks {
             print("file preview strip: fallback-presented Writes fold into one card with the text around it")
         }
         try fallbackTurn()
+        // 7. The path a relaunch really takes: the supervisor owns the restored session,
+        //    and a tile ATTACHES to the agent. The body must build (text, composer) and
+        //    draw one folded card, exactly as the neighbouring tile does.
+        func attachedRestore() throws {
+            let sessionRoot = checkout.appendingPathComponent("outputs/attached", isDirectory: true)
+            try fileManager.createDirectory(at: sessionRoot, withIntermediateDirectories: true)
+            var lines: [String] = []
+            func line(_ object: [String: Any]) {
+                if let data = try? JSONSerialization.data(withJSONObject: object), let text = String(data: data, encoding: .utf8) { lines.append(text) }
+            }
+            line(["type": "user", "timestamp": "2026-11-24T05:41:02.121Z", "message": ["role": "user", "content": "Create three files."]])
+            line(["type": "assistant", "timestamp": "2026-11-24T05:41:04.414Z", "message": ["role": "assistant", "content": [["type": "text", "text": "Attached restore opening text."]]]])
+            for (index, name) in ["notes.md", "landing.html", "badge.svg"].enumerated() {
+                let path = sessionRoot.appendingPathComponent(name)
+                try Data("x".utf8).write(to: path)
+                let id = "toolu_attached_\(index)"
+                line(["type": "assistant", "timestamp": "2026-11-24T05:43:5\(index).000Z", "message": ["role": "assistant", "content": [
+                    ["type": "tool_use", "id": id, "name": "Write", "input": ["file_path": path.path, "content": "x"]]]]])
+                line(["type": "user", "timestamp": "2026-11-24T05:43:5\(index).500Z", "message": ["role": "user", "content": [
+                    ["type": "tool_result", "tool_use_id": id, "content": "File created successfully at: \(path.path)"]]]])
+            }
+            line(["type": "assistant", "timestamp": "2026-11-24T05:44:10.000Z", "message": ["role": "assistant", "content": [["type": "text", "text": "Attached restore closing text."]]]])
+            let support = tempRoot.appendingPathComponent("attached-support", isDirectory: true)
+            let supervisor = AgentSupervisor(
+                store: AgentStore(applicationSupportDirectory: support),
+                makeRunner: { _ in ScriptedAgentRunner(script: []) },
+                transcriptStore: AgentTranscriptStore(root: support.appendingPathComponent("transcripts", isDirectory: true)))
+            let tile = ManagedAgentTileNSView(tile: Tile(
+                id: UUID(), kind: .managedAgent, title: "attached", frame: TileFrame(x: 0, y: 0, width: 760, height: 760),
+                zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata(launchProfileId: "managed")))
+            tile.frame = NSRect(x: 0, y: 0, width: 760, height: 760)
+            let window = NSWindow(contentRect: tile.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = tile
+            window.orderFrontOffscreenForChecks()
+            defer { tile.detach(); window.orderOut(nil) }
+            let id = supervisor.spawn(role: nil, prompt: nil, cwd: checkout, model: "anthropic/claude-haiku-4-5-20251001", thinking: "low")
+            supervisor.seedRehydratedTranscript(
+                ClaudeSessionTranscriptReader.parse(lines: lines, threadId: tile.qaThreadIdForChecks), for: id)
+            tile.attach(agentID: id, supervisor: supervisor)
+            let deadline = Date().addingTimeInterval(30)
+            while Date() < deadline {
+                tile.layoutSubtreeIfNeeded()
+                tile.qaCanvasTranscript?.flushPendingVisualUpdate()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+                if (tile.qaCanvasTranscript?.qaFileThumbs.count ?? 0) >= 3 { break }
+            }
+            guard let canvas = tile.qaCanvasTranscript else { throw Failure(message: "the attached tile has no drawn transcript") }
+            let text = canvas.qaLaidOutText
+            try expect(text.contains("Attached restore opening text.") && text.contains("Attached restore closing text."),
+                       "an attached restored tile must draw its text; drew '\(text.prefix(200))' (document entries \(tile.qaDocumentForChecks.entries.count))")
+            let created = canvas.qaChangesCards.filter { $0.files.allSatisfy { $0.action == .write || $0.action == .add } }
+            try expect(created.count == 1 && created[0].files.count == 3,
+                       "an attached restored tile must fold its Writes into one card of three files, got \(canvas.qaChangesCards.map { $0.files.count })")
+            print("file preview strip: a tile attached to a supervisor-restored session draws its text around one folded card")
+        }
+        try attachedRestore()
         try exercise(drawn: true)
         try exercise(drawn: false)
         print("file preview strip: thumbnails cached by mtime; opens in Array on both transcript renderers")
