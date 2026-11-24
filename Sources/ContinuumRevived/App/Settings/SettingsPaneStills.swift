@@ -10,6 +10,7 @@ enum SettingsPaneStills {
         guard let path = ProcessInfo.processInfo.environment["CONTINUUM_SETTINGS_RENDER_DIR"], !path.isEmpty else { return }
         let directory = URL(fileURLWithPath: path, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try renderMacAlerts(to: directory)
         for (look, name) in [("light", NSAppearance.Name.aqua), ("dark", NSAppearance.Name.darkAqua)] {
             for managed in [true, false] {
                 let suite = "array.settings-stills.\(UUID().uuidString)"
@@ -66,6 +67,33 @@ enum SettingsPaneStills {
                         try png.write(to: directory.appendingPathComponent("terminal-off-\(look).png"))
                     }
                 }
+            }
+        }
+    }
+}
+
+extension SettingsPaneStills {
+    /// Notifications & Sounds with the Mac alerts row: denied and not set up.
+    static func renderMacAlerts(to directory: URL) throws {
+        defer { MacNotificationPermission.qaStatus = nil }
+        for (look, name) in [("light", NSAppearance.Name.aqua), ("dark", NSAppearance.Name.darkAqua)] {
+            for status in [MacNotificationAuthorization.denied, .notDetermined] {
+                MacNotificationPermission.qaStatus = { status }
+                let suite = "array.settings-stills.\(UUID().uuidString)"
+                guard let defaults = QAIsolatedDefaults(isolatedSuiteName: suite) else { continue }
+                defer { defaults.removePersistentDomain(forName: suite) }
+                let model = SettingsModel(sections: SettingsSchema.sections(), defaults: defaults,
+                                          navKeymap: .resolve(defaults: defaults, warn: { _ in }))
+                let fixture = SettingsFixtureWindow(model: model, size: NSSize(width: 1_000, height: 720),
+                                                    appearance: NSAppearance(named: name))
+                defer { fixture.tearDown() }
+                fixture.show(paneID: "activityAndNotifications")
+                fixture.settle(0.4)
+                guard let rep = fixture.snapshot(), let png = rep.representation(using: .png, properties: [:]) else {
+                    throw SettingsStillsError.noImage("activityAndNotifications")
+                }
+                let state = status == .denied ? "denied" : "not-set-up"
+                try png.write(to: directory.appendingPathComponent("mac-alerts-\(state)-\(look).png"))
             }
         }
     }

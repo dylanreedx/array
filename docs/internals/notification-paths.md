@@ -693,7 +693,12 @@ These do not pass through Fly or the phone classifier.
 Authorization for MAC-01 and MAC-02 is requested on the first banner Array
 tries to deliver, never at launch. A denial is quiet: the banner is skipped
 with a stderr line, and the Dock badge and in-app awareness (MAC-03..08),
-which need no permission, carry on. The full permission inventory is in
+which need no permission, carry on. While banners are denied or not yet
+decided, Settings › Notifications & Sounds shows a "Mac alerts" row with a
+deep link to System Settings › Notifications › Array (denied) or a button that
+asks macOS (not decided). The row re-reads on every app activation and goes
+when banners are allowed, with no relaunch; witness `--settings-panel-check`
+step 6c. The full permission inventory is in
 [macOS permissions](permissions.md).
 
 | ID | Trigger | Policy → surface | Suppression / resolution |

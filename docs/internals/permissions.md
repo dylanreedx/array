@@ -94,11 +94,23 @@ content is not Metal.
 - **Before the prompt:** nothing from Array; the system prompt names Array.
 - **On deny:** banners are skipped with a line on stderr. The Dock badge and
   in-app attention signals (MAC-03..08) still work, because they need no
-  permission. There is no in-app hint that banners are off. Recovery is System
-  Settings › Notifications › Array.
-- **Relaunch:** live.
+  permission. Settings › Notifications & Sounds then shows a "Mac alerts" row:
+  Notifications · Off, with "Open Notification Settings", a deep link to
+  System Settings › Notifications › Array
+  (`x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=<bundle id>`).
+- **Not decided yet:** the same row says "Not set up" with "Allow
+  Notifications…", which asks macOS there and then. It does not deep-link,
+  because macOS lists Array under Notifications only after Array has asked
+  once, so the pane would have no Array in it. This asks only on the user's
+  click, never at launch.
+- **Relaunch:** live. Settings re-reads the status every time Array becomes
+  active, so coming back from System Settings hides the row with no relaunch
+  (`SettingsModel.refreshNotificationAuthorization`).
 - **QA:** `qaSink` replaces delivery in checks, and bare binaries never reach
-  `UNUserNotificationCenter`.
+  `UNUserNotificationCenter`. `MacNotificationPermission.qaStatus`, `qaOpenURL`
+  and `qaRequest` stand in for the center in Settings checks. Witness:
+  `--settings-panel-check` step 6c (denied shows the row, allowed hides it,
+  re-activation updates it, the deep link and the ask).
 
 ### Files and folders (Documents, Desktop, Downloads)
 
@@ -189,11 +201,9 @@ bundle carries only `com.apple.security.device.audio-input`.
 
 ## Gaps left open
 
-1. Notifications denied: no in-app hint. Low impact: the Dock badge and the
-   in-app attention still show.
-2. Screen Recording relaunch is left to macOS's own "Quit & Reopen". Array
+1. Screen Recording relaunch is left to macOS's own "Quit & Reopen". Array
    could detect it only by capturing, which it does not do.
-3. The usage strings a terminal host might want (camera, Apple Events) are
+2. The usage strings a terminal host might want (camera, Apple Events) are
    absent; see Automation above for why they were not added blind.
 
 ## Rules for new code

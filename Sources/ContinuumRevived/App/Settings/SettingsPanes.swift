@@ -273,6 +273,9 @@ private struct SettingsPaneForm: View {
     var body: some View {
         ScrollViewReader { proxy in
             Form {
+                if pane.id == "activityAndNotifications" {
+                    SettingsNotificationPermissionSection(model: model)
+                }
                 ForEach(pane.groups.filter { group in
                     let _ = model.revision
                     return group.rows.contains { $0.field.isVisible(in: model.defaults) }

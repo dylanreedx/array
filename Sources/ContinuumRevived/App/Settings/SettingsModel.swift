@@ -110,6 +110,7 @@ final class SettingsModel {
     @ObservationIgnored private var catalogObserver: NSObjectProtocol?
     @ObservationIgnored private var libraryObserver: NSObjectProtocol?
     @ObservationIgnored private var accountObserver: NSObjectProtocol?
+    @ObservationIgnored private var activationObserver: NSObjectProtocol?
 
     init(
         sections: [SettingsSection] = SettingsSchema.sections(),
@@ -143,12 +144,21 @@ final class SettingsModel {
         ) { [weak self] _ in
             MainActor.assumeIsolated { self?.revision += 1 }
         }
+        // Coming back from System Settings re-reads the notification switch, so
+        // the row goes away on its own once banners are allowed.
+        activationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshNotificationAuthorization() }
+        }
+        refreshNotificationAuthorization()
     }
 
     isolated deinit {
         if let catalogObserver { NotificationCenter.default.removeObserver(catalogObserver) }
         if let libraryObserver { NotificationCenter.default.removeObserver(libraryObserver) }
         if let accountObserver { NotificationCenter.default.removeObserver(accountObserver) }
+        if let activationObserver { NotificationCenter.default.removeObserver(activationObserver) }
     }
 
     // MARK: Panes
@@ -486,6 +496,19 @@ final class SettingsModel {
     /// switches are drawn only once there is one.
     var pairedPhoneCount = 0 {
         didSet { if pairedPhoneCount != oldValue { revision += 1 } }
+    }
+
+    /// Whether macOS lets Array post banners, as last read.
+    private(set) var macNotifications: MacNotificationAuthorization = .unavailable
+
+    func refreshNotificationAuthorization() {
+        MacNotificationPermission.read { [weak self] status in self?.macNotifications = status }
+    }
+
+    func openNotificationSettings() { MacNotificationPermission.openSettings() }
+
+    func requestNotifications() {
+        MacNotificationPermission.request { [weak self] in self?.refreshNotificationAuthorization() }
     }
 
     /// Groups the panes do not draw right now.

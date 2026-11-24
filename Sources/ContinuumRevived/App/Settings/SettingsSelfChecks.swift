@@ -554,6 +554,49 @@ enum SettingsSelfChecks {
                    "search must not list sound rows that are hidden")
         model.soundsEnabled = true
         fixture.settle()
+
+        // 6c. Mac alerts: a calm row while banners are off or never decided,
+        // gone once allowed. It re-reads when Array becomes active again (back
+        // from System Settings), with no relaunch.
+        var bannerStatus: MacNotificationAuthorization = .denied
+        var openedSettings: [URL] = []
+        var requestedAuthorization = 0
+        MacNotificationPermission.qaStatus = { bannerStatus }
+        MacNotificationPermission.qaOpenURL = { openedSettings.append($0) }
+        MacNotificationPermission.qaRequest = { requestedAuthorization += 1 }
+        defer {
+            MacNotificationPermission.qaStatus = nil
+            MacNotificationPermission.qaOpenURL = nil
+            MacNotificationPermission.qaRequest = nil
+        }
+        func becomeActive() {
+            NotificationCenter.default.post(name: NSApplication.didBecomeActiveNotification, object: NSApp)
+            fixture.settle()
+        }
+        let bannerRow = SettingsNotificationPermissionSection.textID
+        becomeActive()
+        try expect(model.renderedTexts[bannerRow] == "denied", "with banners denied, Notifications & Sounds must show the Mac alerts row")
+        model.openNotificationSettings()
+        try expect(openedSettings.count == 1
+                   && openedSettings[0].absoluteString.hasPrefix("x-apple.systempreferences:com.apple.Notifications-Settings.extension?id="),
+                   "Open Notification Settings must deep-link to Notifications › Array, got \(openedSettings)")
+        try expect(requestedAuthorization == 0, "a denied row must not ask again: macOS never re-prompts")
+        bannerStatus = .allowed
+        becomeActive()
+        try expect(model.renderedTexts[bannerRow] == nil, "once banners are allowed the row must go on its own")
+        bannerStatus = .notDetermined
+        becomeActive()
+        try expect(model.renderedTexts[bannerRow] == "notDetermined", "before macOS has asked, the row must offer to allow banners")
+        model.requestNotifications()
+        try expect(requestedAuthorization == 1 && openedSettings.count == 1, "not set up must ask macOS, not open an empty pane")
+        bannerStatus = .denied
+        fixture.select("general")
+        fixture.settle()
+        try expect(model.renderedTexts[bannerRow] == nil, "the Mac alerts row belongs only to Notifications & Sounds")
+        MacNotificationPermission.qaStatus = nil
+        becomeActive()
+        try expect(model.macNotifications == .unavailable, "a bare binary must never read the real notification center")
+
         fixture.select("companion")
         fixture.settle()
         let phoneAnchors = sections.first { $0.id == "companion" }!.fields.compactMap(\.key).map { "field.\($0)" }
