@@ -211,6 +211,11 @@ public enum SidebarRecovery {
             case .providerBusy, .signInExpired, .couldNotStart, .taskError: return .failed
             }
         }
+        // A helper whose report failed a check, or that asked for you, needs you
+        // however its turn ended: the lead's helper drawer says the same.
+        if row.parentId != nil, row.selfReport?.reportedFailure == true || row.selfReport?.needsYou != nil {
+            return .needsYou
+        }
         switch row.terminalEvent?.outcome {
         case .interrupted?, .cancelled?: return .stopped
         default: return .done
@@ -269,8 +274,15 @@ public struct SidebarLeadTally: Equatable, Sendable {
     /// says nothing about now. Only when nothing is live or unresolved does it
     /// name the total, as the one fact left ("All 182 helpers done").
     public var liveLine: String {
-        let parts = [SidebarTallyState.working, .needsYou, .paused, .failed, .stopped]
-            .filter { count($0) > 0 }.map { $0.phrase(count($0)) }
+        // A failed helper needs you: it is said as the lead's helper drawer says
+        // it, in the same words and count, never as done.
+        var parts: [String] = []
+        if count(.working) > 0 { parts.append(SidebarTallyState.working.phrase(count(.working))) }
+        let needs = count(.needsYou) + count(.failed)
+        if needs > 0 { parts.append(SidebarTallyState.needsYou.phrase(needs)) }
+        for state in [SidebarTallyState.paused, .stopped] where count(state) > 0 {
+            parts.append(state.phrase(count(state)))
+        }
         guard parts.isEmpty else { return parts.joined(separator: " · ") }
         return total == 1 ? "1 helper, done" : "All \(total) helpers done"
     }

@@ -380,13 +380,18 @@ public enum AgentInboxRowBuilder {
         let status = record.declaredStatus.flatMap { $0.declaredAt >= turnStart ? $0 : nil }
         let report = record.lastReport.flatMap { $0.filedAt >= turnStart ? $0.report : nil }
         let watchdog = record.parentAgentID == nil ? nil : record.helperWatchdogNeedsYou
-        guard status != nil || report != nil || watchdog != nil else { return nil }
+        // The same facts the lead's helper drawer calls "failed", read from the
+        // last filed report whatever turn filed it.
+        let reportedFailure = record.lastReport?.report.checks.contains(where: { $0.result == .fail }) == true
+            || record.lastReport?.report.commandEvidence?.contains(where: { $0.outcome == .observedFailed }) == true
+        guard status != nil || report != nil || watchdog != nil || reportedFailure else { return nil }
         let checks = report?.checks ?? []
         return InboxSelfReport(
             now: status.map { declaredNowLine($0, endedAt: record.latestTerminalEvent?.endedAt, at: now) },
             needsYou: watchdog ?? status?.needsYou,
             checksPassed: checks.filter { $0.result == .pass }.count,
-            checksFailed: checks.filter { $0.result == .fail }.count)
+            checksFailed: checks.filter { $0.result == .fail }.count,
+            reportedFailure: reportedFailure)
     }
 
     /// A declared "now" is only true while its turn runs. Once a turn has ended

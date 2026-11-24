@@ -832,8 +832,14 @@ public struct InboxSelfReport: Equatable, Sendable {
     /// Counted from the report's checks; `info` checks are neither.
     public let checksPassed: Int
     public let checksFailed: Int
+    /// The agent's last filed report failed a check or observed a failing
+    /// command, whichever turn filed it. The lead's helper drawer counts such a
+    /// helper as needing you; the sidebar tally reads it from here.
+    public let reportedFailure: Bool
 
-    public init(now: String? = nil, needsYou: String? = nil, checksPassed: Int = 0, checksFailed: Int = 0) {
+    public init(now: String? = nil, needsYou: String? = nil, checksPassed: Int = 0, checksFailed: Int = 0,
+                reportedFailure: Bool = false) {
+        self.reportedFailure = reportedFailure
         self.now = now
         self.needsYou = needsYou
         self.checksPassed = checksPassed
