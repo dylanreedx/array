@@ -1717,6 +1717,10 @@ final class AgentSupervisor {
     /// Queue 91 P2 host-local projection. Never persisted or published: it carries
     /// concrete checkout/current/tool-target URLs that are outside I5's wire model.
     private var locationProjectors: [AgentID: AgentLocationProjector] = [:]
+    /// One-off files agents wrote (reports, renders, exports), for the ⌘K Open file
+    /// step. Channel-scoped like the rest of the app's own state.
+    let agentMadeFiles = AgentMadeFileLog(
+        fileURL: WorkspaceStore.defaultApplicationSupportDirectory().appendingPathComponent("agent-made-files.json"))
     /// Prompt-derived naming context stays in memory only. It is deliberately not
     /// an AgentRecord field and never reaches AgentInventory or the companion.
     private var firstPromptByAgent: [AgentID: String] = [:]
@@ -3251,6 +3255,9 @@ final class AgentSupervisor {
                 runLedger.command(agent: id.rawValue, call: call, detail: detail,
                                   receivedAt: commandReceivedAt, harness: record.harness?.rawValue)
             } else { runLedger.invalidateCommandSpans() }
+        }
+        if case let .toolDetail(_, detail) = observation, !detail.fileChanges.isEmpty {
+            agentMadeFiles.record(detail.fileChanges, agent: id.rawValue, checkoutRoot: record.checkoutRoot)
         }
         ensureLocationProjector(for: record)
         locationProjectors[id]?.ingest(observation)

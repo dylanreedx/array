@@ -115,8 +115,14 @@ public actor AgentFileIndex {
 
     private struct Ranked {
         let entry: AgentFileIndexEntry
+        /// 0 exact filename, 1 filename prefix, 2 everything else (by `score`).
         let tier: Int
+        /// Tier 1: the filename's unmatched tail. Tier 2: unused.
         let gap: Int
+        /// Tier 2: `FuzzyPathMatcher`'s score, higher is better.
+        let score: Int
+        /// Matched byte offsets in the scope-local path; empty when none to show.
+        let positions: [Int]
     }
 
     private let entryLimit: Int
@@ -243,7 +249,7 @@ public actor AgentFileIndex {
                 guard !local.isEmpty,
                       !local.dropLast(entry.isDirectory ? 1 : 0).contains("/")
                 else { return nil }
-                return Ranked(entry: entry, tier: entry.isDirectory ? 0 : 1, gap: 0)
+                return Ranked(entry: entry, tier: entry.isDirectory ? 0 : 1, gap: 0, score: 0, positions: [])
             }
         } else {
             selected = visible.compactMap { item in
@@ -258,8 +264,10 @@ public actor AgentFileIndex {
                     local = Array(canonical(localPath(item.entry.relativePath, inside: scope))
                         .trimmingCharacters(in: CharacterSet(charactersIn: "/")).utf8)[...]
                 }
-                guard let rank = fuzzyRank(needle: foldedNeedle, folded: local) else { return nil }
-                return Ranked(entry: item.entry, tier: rank.tier, gap: rank.gap)
+                guard let rank = fuzzyRank(
+                    needle: foldedNeedle, folded: local, entry: item.entry, scope: scope
+                ) else { return nil }
+                return Ranked(entry: item.entry, tier: rank.tier, gap: rank.gap, score: rank.score, positions: rank.positions)
             }
         }
 
@@ -350,9 +358,12 @@ public actor AgentFileIndex {
             title: entry.fileURL.lastPathComponent + (entry.isDirectory ? "/" : ""),
             detail: displayPath,
             insertionText: "@" + displayPath,
-            score: max(0, 10_000 - ranked.tier * 1_000 - min(ranked.gap, 999)),
+            score: ranked.tier == 2
+                ? 7_000 + min(max(ranked.score, 0), 1_999)
+                : max(0, 10_000 - ranked.tier * 1_000 - min(ranked.gap, 999)),
             payload: payload,
-            provenance: provenance
+            provenance: provenance,
+            matchedPathIndices: matchedIndices(ranked.positions, local: local, displayPath: displayPath)
         )
     }
 
@@ -459,40 +470,38 @@ public actor AgentFileIndex {
     /// Both sides are `canonical` UTF-8; `candidate` has no leading or
     /// trailing slash. Gaps count bytes, which only reorders ties between
     /// non-ASCII names.
-    private func fuzzyRank(needle: [UInt8], folded candidate: ArraySlice<UInt8>) -> (tier: Int, gap: Int)? {
+    private func fuzzyRank(
+        needle: [UInt8], folded candidate: ArraySlice<UInt8>, entry: AgentFileIndexEntry, scope: String
+    ) -> (tier: Int, gap: Int, score: Int, positions: [Int])? {
         let slash = UInt8(ascii: "/")
         let basenameStart = candidate.lastIndex(of: slash).map { $0 + 1 } ?? candidate.startIndex
         let basename = candidate[basenameStart...]
-        if basename.elementsEqual(needle) { return (0, 0) }
-        if basename.starts(with: needle) { return (1, basename.count - needle.count) }
-        if let gap = subsequenceGap(needle: needle, candidate: basename) { return (2, gap) }
-        var componentStart = candidate.startIndex
-        while componentStart < candidate.endIndex {
-            if candidate[componentStart...].starts(with: needle) { return (3, candidate.count - needle.count) }
-            guard let next = candidate[componentStart...].firstIndex(of: slash) else { break }
-            componentStart = next + 1
+        let offset = basenameStart - candidate.startIndex
+        if basename.elementsEqual(needle) { return (0, 0, 0, Array(offset..<(offset + needle.count))) }
+        if basename.starts(with: needle) {
+            return (1, basename.count - needle.count, 0, Array(offset..<(offset + needle.count)))
         }
-        if let gap = subsequenceGap(needle: needle, candidate: candidate) { return (4, gap) }
-        return nil
+        // Cheap folded check first: only a plausible path pays for the scored match.
+        guard FuzzyPathMatcher.isSubsequence(needle, of: Array(candidate)) else { return nil }
+        let local = localPath(entry.relativePath, inside: scope).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        var original = Array(local.utf8)
+        // A path the fold changed in length (diacritics) has no humps to read.
+        if original.count != candidate.count { original = Array(candidate) }
+        guard let match = FuzzyPathMatcher.match(needle: needle, path: original) else { return nil }
+        return (2, 0, match.score, match.positions)
     }
 
-    private func subsequenceGap(needle: [UInt8], candidate: ArraySlice<UInt8>) -> Int? {
-        var index = needle.startIndex
-        var first = -1
-        var last = -1
-        for position in candidate.indices where index < needle.endIndex {
-            if candidate[position] == needle[index] {
-                if first < 0 { first = position }
-                last = position
-                index += 1
-            }
-        }
-        guard index == needle.endIndex, first >= 0 else { return nil }
-        return last - first + 1 - needle.count
+    /// Positions in the display path, or none when the mapping is not exact.
+    private func matchedIndices(_ positions: [Int], local: String, displayPath: String) -> [Int] {
+        guard !positions.isEmpty, displayPath.utf8.count == displayPath.count,
+              local.utf8.count == local.count, displayPath.hasSuffix(local) else { return [] }
+        let shift = displayPath.count - local.count
+        return positions.map { $0 + shift }
     }
 
     private func rankedBefore(_ lhs: Ranked, _ rhs: Ranked) -> Bool {
         if lhs.tier != rhs.tier { return lhs.tier < rhs.tier }
+        if lhs.score != rhs.score { return lhs.score > rhs.score }
         if lhs.gap != rhs.gap { return lhs.gap < rhs.gap }
         if lhs.entry.isDirectory != rhs.entry.isDirectory { return lhs.entry.isDirectory }
         if lhs.entry.relativePath.count != rhs.entry.relativePath.count {

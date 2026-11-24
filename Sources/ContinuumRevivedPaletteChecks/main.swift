@@ -41,6 +41,111 @@ func profile(
     LaunchPaletteProfileRow(id: id, displayName: displayName, detail: detail, isSelectable: isSelectable)
 }
 
+// File-open ranking witness. The ⌘K "Open file" step ranks with AgentFileIndex, so
+// this drives the real index over real files on disk and asserts the OUTCOME: which
+// file leads, which scattered hits are refused, and that the positions it returns
+// are the characters a list should highlight (not a re-derivation of the scorer).
+do {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("file-open-ranking-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let files = [
+        "Sources/LaunchPaletteModel.swift",
+        "Sources/PasswordVaultModels.swift",
+        "Sources/AgentComposerView.swift",
+        "docs/38-tickets/06-agent-ux-approvals-mobile-push.md",
+        "docs/38-tickets/06-oplog-apply-compaction-notes.md",
+        "docs/38-tickets/P2.7-partial-streaming-markdown.md",
+        "README.md",
+    ]
+    for file in files {
+        let url = root.appendingPathComponent(file)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("x".utf8).write(to: url)
+    }
+    let index = AgentFileIndex(pathDiscovery: { _ in files })
+    let context = AgentCompletionContext(
+        agentID: AgentID(rawValue: UUID()), backend: .codex, checkoutRoot: root,
+        gitRoot: root, arrayProjectRoot: root, trustState: .trusted)
+    func results(_ text: String) -> [AgentCompletion] {
+        final class Box: @unchecked Sendable { var value: [AgentCompletion] = [] }
+        let box = Box()
+        let done = DispatchSemaphore(value: 0)
+        Task.detached {
+            box.value = await index.suggestions(for: AgentCompletionQuery(
+                trigger: "@", text: text, replacementRange: NSRange(location: 0, length: text.count), context: context))
+            done.signal()
+        }
+        done.wait()
+        return box.value
+    }
+    func runs(_ indices: [Int]) -> Int {
+        guard !indices.isEmpty else { return 0 }
+        var count = 1
+        for k in 1..<indices.count where indices[k] != indices[k - 1] + 1 { count += 1 }
+        return count
+    }
+    func highlighted(_ completion: AgentCompletion) -> String {
+        let detail = Array(completion.detail ?? "")
+        return String(completion.matchedPathIndices.compactMap { detail.indices.contains($0) ? detail[$0] : nil })
+    }
+
+    let palmod = results("palmod")
+    expect(palmod.first?.title == "LaunchPaletteModel.swift",
+           "palmod must lead with the word-boundary match LaunchPaletteModel.swift, got \(palmod.map(\.title))")
+    expect(!palmod.contains { $0.title.contains("approvals") || $0.title.contains("oplog") || $0.title.contains("P2.7") },
+           "palmod must not return docs names that only match as scattered letters: \(palmod.map(\.title))")
+    if let first = palmod.first {
+        expect(highlighted(first).lowercased() == "palmod",
+               "the highlighted characters must spell the query, got '\(highlighted(first))'")
+        expect(runs(first.matchedPathIndices) == 2,
+               "palmod should highlight two contiguous runs (Pal, Mod), got indices \(first.matchedPathIndices)")
+    }
+
+    let launch = results("launch")
+    expect(launch.first?.title == "LaunchPaletteModel.swift" && runs(launch.first?.matchedPathIndices ?? []) == 1,
+           "a filename prefix leads and highlights one run: \(launch.map(\.title))")
+    let readme = results("readme.md")
+    expect(readme.first?.title == "README.md" && readme.first?.score == 10_000,
+           "an exact filename match must outrank everything: \(readme.map { ($0.title, $0.score) })")
+    let humps = results("agcomp")
+    expect(humps.first?.title == "AgentComposerView.swift" && runs(humps.first?.matchedPathIndices ?? []) == 2,
+           "agcomp must find the camel-case hump match AgentComposerView.swift: \(humps.map(\.title))")
+    print("file-open ranking witness passed")
+}
+
+// "Made by agents" source witness: what an agent's Write/apply_patch observation puts
+// in the list, by outcome (what is offered, in what order, surviving a relaunch).
+do {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("agent-made-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    for file in ["outputs/report.html", "qa-runs/sheet-3.png", "qa-runs/notes.md", "Sources/App.swift", "docs/design.md", "outputs/export.xlsx", ".build/x.png"] {
+        let url = root.appendingPathComponent(file)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("x".utf8).write(to: url)
+    }
+    let store = root.appendingPathComponent("log.json")
+    let log = AgentMadeFileLog(fileURL: store)
+    let agent = UUID()
+    let t0 = Date()
+    func change(_ path: String, _ action: AgentToolDetailObservation.FileAction = .write) -> AgentToolDetailObservation.FileChange {
+        .init(action: action, path: path)
+    }
+    log.record([change("outputs/report.html"), change("Sources/App.swift"), change("docs/design.md")], agent: agent, checkoutRoot: root.path, at: t0)
+    log.record([change("qa-runs/sheet-3.png", .add), change("qa-runs/notes.md"), change(".build/x.png"), change("outputs/report.html", .edit)],
+               agent: agent, checkoutRoot: root.path, at: t0.addingTimeInterval(60))
+    log.record([change("outputs/export.xlsx")], agent: UUID(), checkoutRoot: root.path, at: t0.addingTimeInterval(120))
+    let names = log.recent().map { URL(fileURLWithPath: $0.path).lastPathComponent }
+    expect(names == ["export.xlsx", "notes.md", "sheet-3.png", "report.html"],
+           "made-by-agents must list one-off files only (no source, no .build, no repo docs), newest first: \(names)")
+    expect(log.recent(agent: agent).count == 3, "one agent's files can be listed alone")
+    try FileManager.default.removeItem(at: root.appendingPathComponent("qa-runs/sheet-3.png"))
+    expect(!log.recent().contains { $0.path.hasSuffix("sheet-3.png") }, "a deleted file must not be offered")
+    let reloaded = AgentMadeFileLog(fileURL: store).recent().map { URL(fileURLWithPath: $0.path).lastPathComponent }
+    expect(reloaded == ["export.xlsx", "notes.md", "report.html"], "the list must survive a relaunch: \(reloaded)")
+}
+
 let builtInActionNames = [
     "New Agent…", "New Agent Without a Tile…", "Fan Out Selected Tickets…",
     "New Note", "New Board", "Open Board…", "New Browser", "New iOS Preview", "Open File...", "Open File Tree...", "New Diff Review",

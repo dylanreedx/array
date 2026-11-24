@@ -100,6 +100,9 @@ public struct AgentCompletion: Equatable, Sendable, Identifiable {
     public let disabledReason: String?
     /// Every provider that returned this deduplicated result, in stable order.
     public let providerIDs: [String]
+    /// Offsets (characters of an ASCII string) into `detail` that the query matched,
+    /// for highlighting. Empty when the provider has none to show.
+    public let matchedPathIndices: [Int]
 
     public init(
         id: String,
@@ -111,8 +114,10 @@ public struct AgentCompletion: Equatable, Sendable, Identifiable {
         payload: AgentCompletionPayload? = nil,
         provenance: AgentCompletionProvenance = .fixture,
         isEnabled: Bool = true,
-        disabledReason: String? = nil
+        disabledReason: String? = nil,
+        matchedPathIndices: [Int] = []
     ) {
+        self.matchedPathIndices = matchedPathIndices
         self.id = id
         self.title = title
         self.detail = detail
