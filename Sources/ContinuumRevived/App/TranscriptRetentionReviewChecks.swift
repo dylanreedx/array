@@ -234,8 +234,14 @@ enum TranscriptRetentionReviewChecks {
         f.api.approvalHandler = { _ in .allowOnce }
 
         var requestCounter = 0
+        var pollClock = Date()
         func dispatch(_ op: String, _ payload: [String: Any]) -> [String: AnyHashableJSON]? {
             requestCounter += 1
+            // Inspecting the same helper before and after its release is two lead
+            // decisions, not a poll: step the limiter's clock past its window.
+            pollClock = pollClock.addingTimeInterval(AgentPollLimiter.window + 1)
+            let now = pollClock
+            f.api.pollNow = { now }
             guard case let .result(object) = f.api.dispatch(
                 agentId: f.agentId, requestId: "review-\(requestCounter)", op: op, payload: payload) else { return nil }
             return object
