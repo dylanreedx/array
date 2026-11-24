@@ -48,8 +48,10 @@ enum FileUXTranscriptStills {
         let turns = [
             Turn(prompt: "Write up what you found about how I open files.", reply: "I wrote the findings up.", files: [(report, .add)]),
             Turn(prompt: "Render the drawer, write the report and draw the badge.", reply: "Here are the drawer, the report and the badge.",
-                 files: [(png, .write), (report, .write), (svg, .write)]),
+                 files: [(png, .add), (report, .add), (svg, .add)]),
             Turn(prompt: "Add the atomic writer.", reply: "The atomic writer is in.", files: [(code, .add)]),
+            Turn(prompt: "Add the writer's notes and refresh the report.", reply: "Notes added, report rewritten.",
+                 files: [(code, .add), (report, .write)]),
         ]
         for dark in [true, false] {
             for hover in [false, true] {
