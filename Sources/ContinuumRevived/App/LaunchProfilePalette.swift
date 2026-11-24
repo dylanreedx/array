@@ -998,6 +998,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         let scroll = NSScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
         scroll.documentView = table
         scroll.borderType = .noBorder
         scroll.drawsBackground = false
