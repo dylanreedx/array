@@ -286,10 +286,10 @@ public struct SidebarLeadTally: Equatable, Sendable {
 
     /// The fold: "5 folded · includes 3 stopped". It names only what the chip
     /// does not, so a failure is never said twice on one card.
-    public var foldLine: String { "\(folded) folded" }
+    public var foldLine: String { "\(folded) more" }
 
     public var accessibilityLabel: String {
-        "\(fullLine). \(shown) shown, \(folded) folded."
+        "\(fullLine). \(shown) shown, \(folded) hidden."
     }
 
     /// Partition proof, for witnesses: states sum to total, shown + folded too.

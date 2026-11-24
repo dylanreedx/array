@@ -1895,7 +1895,7 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     func ledgerFoldTitle(_ remainder: FanoutRemainder) -> String {
         // Every state's number is said once, on the lead's count line; the
         // fold says only how many it folds.
-        "\(remainder.hiddenDescendantCount) folded"
+        "\(remainder.hiddenDescendantCount) more"
     }
 
     @objc private func headerBackgroundDidChange() {
