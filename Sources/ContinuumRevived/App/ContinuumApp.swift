@@ -2044,6 +2044,18 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        // Plan UI rethink: four concepts in a real lead tile, light and dark, as PNGs in <dir>.
+        if let index = CommandLine.arguments.firstIndex(of: "--lead-plan-concepts-render") {
+            setbuf(stdout, nil)
+            _ = NSApplication.shared
+            let next = CommandLine.arguments.indices.contains(index + 1) ? CommandLine.arguments[index + 1] : nil
+            let directory = URL(fileURLWithPath: next.flatMap { $0.hasPrefix("-") ? nil : $0 } ?? NSTemporaryDirectory() + "plan-ui-rethink")
+            Task { @MainActor in
+                do { try await LeadPlanConceptsRender.render(to: directory); Foundation.exit(0) }
+                catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+            NSApp.run()
+        }
         // Mode A's tiles, tab and banner in light and dark, as PNGs in <dir>.
         if let index = CommandLine.arguments.firstIndex(of: "--shared-agent-render-check") {
             setbuf(stdout, nil)
