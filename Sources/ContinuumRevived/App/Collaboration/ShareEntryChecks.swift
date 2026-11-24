@@ -330,12 +330,15 @@ enum ShareEntryChecks {
             "the share popover stays open after the lifetime pick (closed by \(app.shareEntry.qaLastSelfDismissal ?? "nothing"))")
 
         // 5. Revoke, pressed in the popover's panel.
-        let revoked = agentPopover.session.link!.id
+        // Revoke finishes on this Mac: it stops sharing and the popover offers
+        // New link without a relay round trip. The link's revocation on the
+        // relay is the reconciler's job afterwards (ShareEntryRelayChecks).
+        let sharedArea = agentPopover.session.area
         try click(agentPopover.currentRevokeButton)
-        try await eventually("revoke") { links.revoked.count == 2 && !agentPopover.session.isWorking }
-        try expect(links.revoked.last == revoked && agentPopover.session.link == nil
+        try await eventually("revoke") { sharedArea.map { zones.stoppedShares.contains($0) } == true && !agentPopover.session.isWorking }
+        try expect(agentPopover.session.link == nil && links.revoked.count == 1
             && agentPopover.copyButton.presentation.title == "New link",
-            "Revoke link calls revokeLink for the live link and the popover offers New link")
+            "Revoke stops sharing locally at once with no relay call in the way, and the popover offers New link")
         try stillPopover("4-agent-revoked", agentPopover, to: renders)
         app.shareEntry.dismiss()
 

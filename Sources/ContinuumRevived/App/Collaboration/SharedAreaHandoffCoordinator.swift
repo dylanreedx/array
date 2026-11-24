@@ -3,13 +3,15 @@ import ContinuumRevivedCore
 import ContinuumRevivedCollaborationProtocol
 
 /// How often a host asks the relay for work. The relay cannot wake a host, so
-/// the host polls; a quiet host stretches the gap (to 3 s at most, which is the
-/// longest a guest's prompt can wait) and any activity snaps it back to 1 s.
-/// The area snapshot is re-read on every busy poll and every fifth quiet one.
+/// the host polls (its command route has no held read); a quiet host stretches
+/// the gap to 1.5 s at most, which is the longest a guest's prompt can wait,
+/// and any activity snaps it back to 1 s. The area snapshot is re-read on every
+/// busy poll and every tenth quiet one.
 struct SharedAgentHostPollPacing {
     private(set) var quietPolls = 0
-    var interval: Duration { quietPolls < 15 ? .seconds(1) : quietPolls < 45 ? .seconds(2) : .seconds(3) }
-    var refreshesState: Bool { quietPolls % 5 == 0 }
+    static let slowest: Duration = .milliseconds(1500)
+    var interval: Duration { quietPolls < 15 ? .seconds(1) : Self.slowest }
+    var refreshesState: Bool { quietPolls % 10 == 0 }
     mutating func settled(busy: Bool) { quietPolls = busy ? 0 : quietPolls + 1 }
 }
 

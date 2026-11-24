@@ -109,13 +109,22 @@ enum SharedAgentHostIdleChecks {
         guard (await transport.registered[item.id]) != nil else {
             throw Failure(description: "host idle: the host never registered, so the poll did nothing and the count means nothing")
         }
-        // Sixty requests in two minutes is half a request a second for the
-        // agent. The old loop made about three hundred and sixty.
-        guard total <= 100 else {
-            throw Failure(description: "host idle: \(total) relay requests in 120 idle seconds (\(counts)); budget 100")
+        // The command read has no held read on the relay, so it stays a poll: a
+        // guest's prompt waits at most one idle gap. The old loop made about
+        // three hundred and sixty requests; the area re-reads are what backs off.
+        guard total <= 115 else {
+            throw Failure(description: "host idle: \(total) relay requests in 120 idle seconds (\(counts)); budget 115")
         }
-        guard longest <= .seconds(3) else {
-            throw Failure(description: "host idle: the loop slept \(longest) between polls; a prompt must not wait longer than 3 seconds")
+        guard longest <= .milliseconds(1500) else {
+            throw Failure(description: "host idle: the loop slept \(longest) between polls; a prompt must not wait longer than 1.5 seconds")
+        }
+        // Activity snaps the gap back, so a busy host is polled at 1 s.
+        var pacing = SharedAgentHostPollPacing()
+        for _ in 0..<60 { pacing.settled(busy: false) }
+        guard pacing.interval == .milliseconds(1500) else { throw Failure(description: "host idle: a quiet host never reached its slowest gap") }
+        pacing.settled(busy: true)
+        guard pacing.interval == .seconds(1), pacing.refreshesState else {
+            throw Failure(description: "host idle: activity did not return the loop to 1 s with a fresh area read")
         }
         print("PASS host idle: \(total) relay requests in 120 idle seconds (\(counts)), longest wait \(longest)")
     }
