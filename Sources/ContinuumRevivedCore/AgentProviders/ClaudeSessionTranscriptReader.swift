@@ -226,7 +226,8 @@ public enum ClaudeSessionTranscriptReader {
                         absolutePath: (input?["file_path"] as? String)
                             ?? (input?["notebook_path"] as? String)
                             ?? (input?["path"] as? String),
-                        messageText: AgentToolDetailObservation.messageTextField(toolName: name, arguments: input ?? [:])?.value))
+                        messageText: AgentToolDetailObservation.messageTextField(toolName: name, arguments: input ?? [:])?.value,
+                        summaryText: Self.summaryText(from: input)))
                 }
             default:
                 continue
@@ -241,6 +242,14 @@ public enum ClaudeSessionTranscriptReader {
     /// Bash, else a description or a file/path/pattern. Control characters are
     /// stripped and the result is bounded so a card title never carries a wall
     /// of text or breaks layout.
+    private static func summaryText(from input: [String: Any]?) -> String? {
+        guard let raw = input?["description"] as? String else { return nil }
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+        else { return nil }
+        return value
+    }
+
     private static func toolDetail(from input: [String: Any]?) -> String? {
         guard let input else { return nil }
         let candidate = ["command", "description", "file_path", "path", "pattern", "query"]

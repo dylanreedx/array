@@ -122,6 +122,11 @@ struct NormalizedTranscriptMessage: Equatable {
         /// (`AgentToolDetailObservation.messageTextKey`), so a restored row says
         /// what was sent too.
         var messageText: String? = nil
+        /// claude's own `description` summary of the call ("Create outputs
+        /// folder"), the sentence a LIVE row is titled with. The restored
+        /// title otherwise carries the command, whose paths the detail
+        /// store reads as a path-bearing tool name and flattens to "Tool".
+        var summaryText: String? = nil
     }
 
     var role: Role
@@ -277,7 +282,7 @@ public enum ManagedTranscriptRehydrator {
                     // so repeating it in the title printed the same absolute path
                     // twice on one card (and put it in the document, which the
                     // live path is careful never to do).
-                    let title = kind == .fileChange && !call.fileChanges.isEmpty
+                    let title = (kind == .fileChange && !call.fileChanges.isEmpty) || call.summaryText != nil
                         ? call.name
                         : (call.detail.map { "\(call.name) · \($0)" } ?? call.name)
                     // Before the item, mirroring the live claude frame order.
@@ -303,6 +308,15 @@ public enum ManagedTranscriptRehydrator {
                                 phase: .started,
                                 toolName: call.name,
                                 fileChanges: call.fileChanges,
+                                observedAt: now()))))
+                    }
+                    if let summary = call.summaryText {
+                        append(.observation(.toolDetail(
+                            itemId: call.id,
+                            detail: AgentToolDetailObservation(
+                                phase: .started,
+                                toolName: call.name,
+                                fields: [(key: "description", value: summary)],
                                 observedAt: now()))))
                     }
                     if let messageText = call.messageText {

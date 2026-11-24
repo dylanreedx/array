@@ -12,6 +12,9 @@ if CommandLine.arguments.contains("--sidebar-history-scope-check") {
     try runSidebarHistoryScopeChecks()
     Foundation.exit(0)
 }
+if CommandLine.arguments.contains("--restored-bash-title-check") {
+    runRestoredBashTitleChecks(); print("restored bash title check passed"); exit(0)
+}
 if CommandLine.arguments.contains("--compaction-policy-check") {
     runAgentContextMeterContractChecks(); print("compaction policy checks passed"); exit(0)
 }

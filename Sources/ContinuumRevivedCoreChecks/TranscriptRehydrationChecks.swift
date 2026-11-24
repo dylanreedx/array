@@ -18,6 +18,7 @@ func runTranscriptRehydrationChecks() {
     runTranscriptRehydrationSessionIdChecks()
     runClaudeSessionTranscriptParseChecks()
     runClaudeSessionBookkeepingPromptChecks()
+    runRestoredBashTitleChecks()
     runPiSessionTranscriptParseChecks()
     runCodexSessionTranscriptParseChecks()
     runCodexItemCompletedMessageChecks()
@@ -688,3 +689,49 @@ private func runClaudeTerminalFaceWindowChecks() {
     expect(ClaudeTerminalFace.lines(in: url, after: UInt64(firstBytes)) == [second, third],
            "a read from a line boundary keeps the line there")
 }
+
+/// A restored Bash row must be titled with claude's own `description`, as the
+/// live row is. The restore used to title the item "Bash · <command>"; a command
+/// holding a path made the detail store flatten it to "Tool", and the
+/// `description` never reached the store at all.
+func runRestoredBashTitleChecks() {
+    func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
+        guard condition() else { fatalError("TranscriptRehydration check failed: \(message)") }
+    }
+    let title = "Create outputs folder and write two small files"
+    let lines = [
+        #"{"type":"user","isSidechain":false,"message":{"role":"user","content":"go"}}"#,
+        #"{"type":"assistant","isSidechain":false,"message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_T","name":"Bash","input":{"command":"mkdir -p /tmp/outputs && echo hi > /tmp/outputs/a.txt","description":"\#(title)"}}]}}"#,
+    ]
+    let transcript = ClaudeSessionTranscriptReader.parse(lines: lines, threadId: "t-title")
+    guard let scope = AgentToolDetailScope(agentID: "a", threadID: "t-title", turnID: "rehydrated-t1", provider: "claude") else { fatalError("scope") }
+    let itemID = AgentToolDetailID("toolu_T")
+    let key = AgentToolDetailKey(scope: scope, providerItemID: itemID)
+    // The same order the transcript list view replays: the item's own title
+    // start, then every observation's start, merged by the store.
+    var starts: [AgentToolDetailStart] = []
+    var itemTitle: String?
+    for step in transcript.steps {
+        if case let .event(.itemStarted(_, id, _, t)) = step, id == "toolu_T" { itemTitle = t }
+    }
+    starts.append(AgentToolDetailStart(identity: key, toolName: itemTitle ?? "Tool"))
+    for step in transcript.steps {
+        if case let .observation(.toolDetail(id, detail)) = step, id == "toolu_T", detail.phase == .started {
+            starts.append(AgentToolDetailStart(
+                identity: key, toolName: detail.toolName ?? itemTitle ?? "Tool",
+                arguments: detail.fields.map { AgentToolDetailField(key: $0.key, value: $0.value) }))
+        }
+    }
+    let box = RestoredTitleBox()
+    let done = DispatchSemaphore(value: 0)
+    Task {
+        let store = AgentToolDetailStore()
+        for start in starts { _ = await store.recordStart(start) }
+        box.line = await store.detail(for: key).map { AgentToolDetailPresenter.collapsed($0).actionLine }
+        done.signal()
+    }
+    done.wait()
+    expect(box.line == title, "restored Bash row title is \"\(box.line ?? "nil")\", expected \"\(title)\"")
+}
+
+private final class RestoredTitleBox: @unchecked Sendable { var line: String? }
