@@ -50,6 +50,10 @@ final class ShareEntryCoordinator {
         content.lifetimeChoice.presentsOffscreenForQA = presentsOffscreenForQA
         content.onResize = { [weak self] size in self?.popover.resizeContent(to: size) }
         content.onDismiss = { [weak self] in self?.popover.dismiss() }
+        content.onCopiedAfterClosing = { [weak self, weak view] in
+            guard let self, let view, view.window != nil, !self.isPresented else { return }
+            self.present(target, anchor: anchor, in: view)
+        }
         popover.presentContent(content, size: content.preferredSize, anchor: anchor, relativeTo: view,
                                placementFrame: Self.placementFrame(for: view) ?? (presentsOffscreenForQA ? view.window?.frame : nil),
                                takesFocus: !presentsOffscreenForQA,

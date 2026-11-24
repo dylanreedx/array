@@ -19,6 +19,8 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
     /// The popover asks its host to refit after the content changes height.
     var onResize: ((NSSize) -> Void)?
     var onDismiss: (() -> Void)?
+    /// Copy finished after the popover had closed: its host shows it again.
+    var onCopiedAfterClosing: (() -> Void)?
 
     private let titleLabel = NSTextField(labelWithString: "")
     private let subtitleLabel = NSTextField(wrappingLabelWithString: "")
@@ -39,7 +41,7 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
     private let lifetimeLabel = NSTextField(labelWithString: "Link")
     let lifetimeChoice = ChoiceButton(title: Collaboration.ShareLinkLifetime.once.title)
     private let lifetimeDetail = NSTextField(wrappingLabelWithString: "")
-    private let peopleHeader = NSTextField(labelWithString: "PEOPLE WITH ACCESS")
+    private let peopleHeader = NSTextField(labelWithString: "People with access")
     private var personLabels: [(name: NSTextField, detail: NSTextField)] = []
     private(set) var removeButtons: [ChoiceAccessoryButton] = []
     var titleLabelText: String { titleLabel.stringValue }
@@ -301,7 +303,8 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
         for button in removeButtons { button.removeFromSuperview() }
         personLabels = []; removeButtons = []
         let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm"
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
         for person in session.people {
             let name = NSTextField(labelWithString: person.label)
             name.font = .token(.label)
@@ -489,6 +492,9 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
             case .used, .revoked, .existing: await session.newLink()
             default: await session.copy()
             }
+            // The first share asks for a name in a sheet, which takes focus and
+            // closes this popover. Without it nothing says the link was copied.
+            if window == nil, session.copied { onCopiedAfterClosing?() }
         }
     }
 
