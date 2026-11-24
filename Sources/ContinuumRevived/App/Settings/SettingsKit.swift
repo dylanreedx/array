@@ -695,7 +695,7 @@ private struct TileAgentIconChoice: NSViewRepresentable {
 
     func makeNSView(context: Context) -> ChoiceButton {
         let button = ChoiceButton(title: AgentCharacterConfig.defaultBubbleStyle.title)
-        button.setAccessibilityLabel("Badge style")
+        button.setAccessibilityLabel("Icon style")
         button.setAccessibilityIdentifier("settings.tileAgentIcon")
         return button
     }
