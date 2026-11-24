@@ -1,6 +1,7 @@
 import AppKit
 import CoreImage
 import ContinuumRevivedAgentContent
+import ContinuumRevivedAgentUI
 import PDFKit
 import QuickLookThumbnailing
 
@@ -97,6 +98,12 @@ final class FilePreviewStore {
 
     nonisolated private static func generate(_ url: URL, kind: FilePreviewKind, dark: Bool) async -> FilePreviewPicture? {
         let pixelHeight = Int(sourceHeight * scale)
+        // The thumbnail's type is the house text colours, resolved for the theme
+        // the picture is made in (the bridge is main-actor; the drawing is not).
+        let (ink, dim) = await MainActor.run { () -> (NSColor, NSColor) in
+            let theme: TokenTheme = dark ? .dark : .light
+            return (TextToken.textPrimary.color.nsColor(for: theme), TextToken.textSecondary.color.nsColor(for: theme))
+        }
         let picture: CGImage?
         switch kind {
         case .image:
@@ -134,7 +141,7 @@ final class FilePreviewStore {
                 ctx.translateBy(x: 0, y: CGFloat(pixelHeight)); ctx.scaleBy(x: scale, y: -scale)
                 NSGraphicsContext.saveGraphicsState()
                 NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: true)
-                drawText(text, kind: kind, rect: CGRect(x: 10, y: 8, width: CGFloat(width) / scale - 20, height: sourceHeight - 16), dark: dark)
+                drawText(text, kind: kind, rect: CGRect(x: 10, y: 8, width: CGFloat(width) / scale - 20, height: sourceHeight - 16), ink: ink, dim: dim)
                 NSGraphicsContext.restoreGraphicsState()
             }
         }
@@ -165,9 +172,7 @@ final class FilePreviewStore {
     /// The first lines as type: a markdown title that wraps to two lines at
     /// most, then body lines; code as plain mono. Every line ends at an
     /// ellipsis rather than mid-glyph.
-    nonisolated private static func drawText(_ text: String, kind: FilePreviewKind, rect: CGRect, dark: Bool) {
-        let ink = dark ? NSColor(white: 0.92, alpha: 1) : NSColor(white: 0.1, alpha: 1)
-        let dim = dark ? NSColor(white: 0.6, alpha: 1) : NSColor(white: 0.4, alpha: 1)
+    nonisolated private static func drawText(_ text: String, kind: FilePreviewKind, rect: CGRect, ink: NSColor, dim: NSColor) {
         let tail = NSMutableParagraphStyle(); tail.lineBreakMode = .byTruncatingTail
         let wrap = NSMutableParagraphStyle(); wrap.lineBreakMode = .byWordWrapping
         var y = rect.minY

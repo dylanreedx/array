@@ -60,7 +60,7 @@ enum FileUXTranscriptStills {
                 let host = NSView(frame: NSRect(origin: .zero, size: size))
                 host.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
                 host.wantsLayer = true
-                host.layer?.backgroundColor = (dark ? NSColor(white: 0.09, alpha: 1) : NSColor(white: 0.97, alpha: 1)).cgColor
+                host.layer?.backgroundColor = SurfaceToken.canvas.color.cgColor(for: theme)
                 let ctx = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: theme)
                 let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
                 window.contentView = host
