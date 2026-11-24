@@ -83,6 +83,14 @@ enum SharedAgentChromeChecks {
                                  thinking: "medium", cwd: root.path, projectId: project, createdAt: Date(), lastActivityAt: Date())
         record.identityColor = "purple"
         try store.upsert(record)
+        // Agent B: a model whose window the host knows (0% before any prompt),
+        // whose turns report no usage, as the walk-through's fake CLI did.
+        let meterAgent = AgentID(rawValue: UUID())
+        var meterRecord = AgentRecord(id: meterAgent, displayName: "Summarise the preview", harness: .claudeCode,
+                                      model: "fixture/meter", thinking: "medium", cwd: root.path, projectId: project,
+                                      createdAt: Date(), lastActivityAt: Date())
+        meterRecord.providerContextWindows["fixture/meter"] = 200_000
+        try store.upsert(meterRecord)
         let supervisor = AgentSupervisor(store: store, makeRunner: { _ in ScriptedAgentRunner(script: []) },
                                          warn: { print("supervisor: \($0)") }, nameTitlerCommand: { _ in nil },
                                          transcriptStore: AgentTranscriptStore(root: root.appendingPathComponent("transcripts", isDirectory: true)))
@@ -485,5 +493,47 @@ enum SharedAgentChromeChecks {
 
         let tooBig = Wire.CharacterTheme(file: Data(noise))
         try expect(tooBig == nil, "a host never ships a set that deflates past \(Wire.CharacterTheme.maximumSharedDeflatedBytes) bytes")
+
+        // Shared after a finished turn (the two-person walk-through): the host's
+        // tile was on its canvas before the first prompt, so its meter holds the
+        // 0% it seeded then; the turn reported no usage; and the canvas status
+        // sweep (`applyAgentStatusesToCanvas`) marks the unseen finished turn
+        // "Done" on the tile. The guest's chip and meter must say what the
+        // host's say, not "Idle" and "unknown".
+        let meterThread = AgentSupervisor.threadId(for: meterAgent)
+        let meterTile = ManagedAgentTileNSView(tile: Tile(id: UUID(), kind: .managedAgent, title: "Summarise the preview",
+            frame: .init(x: 0, y: 0, width: Double(size.width), height: Double(size.height)), zPosition: .fromLegacyRank(1), runtimeRef: nil,
+            metadata: TileMetadata(launchProfileId: "managed-agent")), threadId: meterThread)
+        meterTile.frame = NSRect(origin: NSPoint(x: 20, y: 700), size: size)
+        canvas.addSubview(meterTile)
+        meterTile.attach(agentID: meterAgent, supervisor: supervisor)
+        supervisor.qaDeliver(.turnStarted(threadId: meterThread, turnId: "m1"), to: meterAgent)
+        supervisor.qaDeliver(.contentDelta(threadId: meterThread, turnId: "m1", streamKind: .assistant, delta: "A preview of sharing."), to: meterAgent)
+        supervisor.qaDeliver(.turnCompleted(threadId: meterThread, turnId: "m1", outcome: .completed, errorMessage: nil), to: meterAgent)
+        for _ in 0..<20 { await Task.yield() }
+        meterTile.agentStatus = .done
+        try await paint()
+        let meterHost = meterTile.qaChromeFacts
+        try expect(meterHost["title.statusLabel"] == "Done" && meterHost["status.context"]?.contains("%") == true,
+                   "control: the host's tile says Done and shows a percentage (\(meterHost["title.statusLabel"] ?? "nil"), \(meterHost["status.context"] ?? "nil"))")
+        let meterObject = SharedArea.ID<SharedArea.Object>()
+        let meterLane = SharedAgentTranscriptParityChecks.LaneSink(host: hostID)
+        let meterShare = SharedAreaAgentProjectionHost(supervisor: supervisor, directory: root,
+                                                       makeSink: { _ in SharedAgentTranscriptParityChecks.ProjectionSink() },
+                                                       makeTranscriptSink: { _, _ in meterLane })
+        meterShare.sync([.init(object: meterObject, binding: .init(), host: hostID, projectID: project, agentID: meterAgent)])
+        guard let meterPublisher = meterShare.transcripts[meterObject] else { throw Failure(description: "no publisher for B") }
+        meterPublisher.stop()
+        defer { meterShare.stop() }
+        await meterPublisher.tick()
+        let (meterGuestTile, meterGuest) = makeGuest(read: { _, request in try meterLane.read(request) })
+        canvas.addSubview(meterGuestTile); meterGuestTile.frame.origin = NSPoint(x: 560, y: 700)
+        _ = await meterGuest.pollTranscript(object, ticket: meterGuest.qaTicket, waitMilliseconds: 0)
+        try await paint()
+        let meterShown = meterGuestTile.qaChromeFacts
+        try expect(meterShown["title.statusLabel"] == meterHost["title.statusLabel"],
+                   "shared after a finished turn, the guest's chip says what the host's says (host \(meterHost["title.statusLabel"] ?? "nil"), guest \(meterShown["title.statusLabel"] ?? "nil"))")
+        try expect(meterShown["status.context"] == meterHost["status.context"],
+                   "shared after a turn that reported no usage, the guest's meter reads what the host's does (host \(meterHost["status.context"] ?? "nil"), guest \(meterShown["status.context"] ?? "nil"))")
     }
 }

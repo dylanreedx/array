@@ -207,6 +207,7 @@ enum SharedAgentChromeFacts {
     static func read(statusRow: AgentCompactStatusRowView, footer: AgentComposerFooterView,
                      action: ComposerActionButton, into facts: inout [String: String]) {
         facts["status.accessibility"] = statusRow.accessibilityLabel() ?? ""
+        facts["status.context"] = statusRow.qaContextText
         let selection = footer.qaLaunchSelection
         facts["footer.harness"] = selection.harness.rawValue
         facts["footer.model"] = selection.model

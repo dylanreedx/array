@@ -91,8 +91,13 @@ final class SharedAgentTileNSView: TileNSView {
         setTitleBarTint(identity.bar)
         layer?.borderWidth = identity.border == nil ? 0 : ManagedAgentTileNSView.identityBorderWidth
         layer?.borderColor = identity.border?.cgColor
-        agentStatus = chrome.header.status
-        setAgentStatusLabel(chrome.header.stateLabel)
+        if let chip = chrome.header.titleChip {
+            agentStatus = chip.status
+            setAgentStatusLabel(chip.label)
+        } else {
+            agentStatus = chrome.header.status
+            setAgentStatusLabel(chrome.header.stateLabel)
+        }
         agentHeader.showsManaged = chrome.header.managed
         agentHeader.apply(SharedAgentChromePresenter.header(chrome))
         if let pick = live.titleCharacter {

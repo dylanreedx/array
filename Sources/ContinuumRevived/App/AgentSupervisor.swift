@@ -1084,6 +1084,19 @@ private final class CompactionTerminalLatch: @unchecked Sendable {
     var event: AgentCompactionLifecycleEvent? { lock.withLock { value } }
 }
 
+/// The title-bar chip and context meter an agent's tile is showing.
+struct AgentShownChrome: Equatable {
+    /// nil: the tile shows no chip.
+    var status: AgentStatus?
+    var statusLabel: String?
+    var context: AgentContextWindowSnapshot?
+}
+
+@MainActor
+protocol AgentShownChromeSource: AnyObject {
+    func shownChrome(for id: AgentID) -> AgentShownChrome?
+}
+
 @MainActor
 final class AgentSupervisor {
     /// 0.7.30 — what each agent left running. Owned by the app delegate; tiles
@@ -1612,6 +1625,28 @@ final class AgentSupervisor {
         didSet { quotaObservationIndexDirty = true }
     }
     private var subscribers: [AgentID: [UUID: AsyncStream<AgentRuntimeEvent>.Continuation]] = [:]
+
+    /// The tile attached to each agent, read for what it SHOWS: its title-bar
+    /// chip and context meter. A shared agent's guest must show those same
+    /// words, and they are not a function of the supervisor alone: the chip
+    /// carries the canvas status sweep's "Done", and the meter holds the
+    /// reading it seeded before the first prompt (`SharedAgentChromeBuilder`).
+    private var shownChromeTiles: [AgentID: WeakShownChromeSource] = [:]
+    private struct WeakShownChromeSource { weak var source: (any AgentShownChromeSource)? }
+
+    func registerShownChrome(_ source: any AgentShownChromeSource, for id: AgentID) {
+        shownChromeTiles[id] = WeakShownChromeSource(source: source)
+    }
+
+    func unregisterShownChrome(_ source: any AgentShownChromeSource, for id: AgentID) {
+        if shownChromeTiles[id]?.source === source { shownChromeTiles[id] = nil }
+    }
+
+    /// What the agent's own tile shows now; nil when no tile is attached.
+    func shownChrome(for id: AgentID) -> AgentShownChrome? {
+        guard let source = shownChromeTiles[id]?.source else { shownChromeTiles[id] = nil; return nil }
+        return source.shownChrome(for: id)
+    }
 
     /// Which agents have a tile someone can see. Hidden agents' streamed text is
     /// batched at 4 Hz on the producer thread instead of crossing to main per

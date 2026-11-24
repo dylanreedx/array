@@ -60,13 +60,26 @@ public extension SharedAgentTranscriptWire {
             public var startedAt: Date?
             public var branch: Branch?
             public var managed: Bool
+            /// The title bar's chip exactly as the host's tile shows it, which can
+            /// differ from `status` (the canvas marks a finished turn "Done").
+            /// nil from a host that predates it: the guest shows `status`.
+            public var titleChip: TitleChip?
             public init(name: String, status: AgentStatus, stateLabel: String, stateAccessibilityLabel: String,
-                        availableActionDescription: String, startedAt: Date?, branch: Branch?, managed: Bool) {
+                        availableActionDescription: String, startedAt: Date?, branch: Branch?, managed: Bool,
+                        titleChip: TitleChip? = nil) {
                 self.name = name; self.status = status; self.stateLabel = stateLabel
                 self.stateAccessibilityLabel = stateAccessibilityLabel
                 self.availableActionDescription = availableActionDescription
                 self.startedAt = startedAt; self.branch = branch; self.managed = managed
+                self.titleChip = titleChip
             }
+        }
+
+        public struct TitleChip: Codable, Equatable, Sendable {
+            /// nil: the host's tile shows no chip.
+            public var status: AgentStatus?
+            public var label: String?
+            public init(status: AgentStatus?, label: String?) { self.status = status; self.label = label }
         }
 
         public struct Branch: Codable, Equatable, Sendable {

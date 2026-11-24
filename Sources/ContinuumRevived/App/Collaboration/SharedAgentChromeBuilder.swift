@@ -44,12 +44,19 @@ final class SharedAgentChromeBuilder {
         let presented = snapshot.map {
             AgentTileStatePresenter.present(name: name, snapshot: $0, branchContext: branch, startedAt: nil, now: now)
         } ?? AgentTileStatePresenter.present(name: name, status: .idle, branchContext: branch, startedAt: nil, now: now)
+        // The title-bar chip and the meter are read off the host's tile when one
+        // is attached: the canvas sweep writes the chip ("Done" for a finished
+        // turn), and the tile holds the meter reading it seeded before the
+        // first prompt. Neither is derivable here, and the guest must show
+        // exactly what the host sees.
+        let shown = supervisor.shownChrome(for: agent)
         let header = Chrome.Header(
             name: presented.name, status: presented.status, stateLabel: presented.stateLabel,
             stateAccessibilityLabel: presented.stateAccessibilityLabel,
             availableActionDescription: presented.availableActionDescription, startedAt: presented.startedAt,
             branch: presented.branch.map { .init(text: $0.text, tooltip: $0.tooltip, isWarning: $0.isWarning) },
-            managed: supervisor.showsManagedIndicator(for: agent))
+            managed: supervisor.showsManagedIndicator(for: agent),
+            titleChip: shown.map { .init(status: $0.status, label: $0.statusLabel) })
 
         let capabilities = snapshot?.capabilities ?? .init()
         let turn = Chrome.Turn(
@@ -58,7 +65,9 @@ final class SharedAgentChromeBuilder {
             canQueue: capabilities.canQueue, isMirrored: snapshot?.isMirrored ?? false)
 
         // The context meter's reading. Cost belongs to the host's account.
-        if let reading = supervisor.contextWindowSnapshot(for: agent) ?? supervisor.freshSessionContextWindow(for: agent) {
+        if let shown {
+            lastContext = shown.context
+        } else if let reading = supervisor.contextWindowSnapshot(for: agent) ?? supervisor.freshSessionContextWindow(for: agent) {
             lastContext = reading
         }
         var context = lastContext

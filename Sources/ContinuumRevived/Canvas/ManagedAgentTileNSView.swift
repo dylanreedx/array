@@ -849,6 +849,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         // tile can learn which checkout this agent works in — before its first
         // event, and without the tile ever reading a repository itself.
         agentSource = supervisor
+        supervisor.registerShownChrome(self, for: agentID)
         if restoredEntries.values.contains(where: { entry in
             entry.blocks.contains { block in
                 switch block.payload { case .toolCall, .diff: return true; default: return false }
@@ -2297,7 +2298,10 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         deferredTailEvents.removeAll()
         eventSubscription?.cancel()
         eventSubscription = nil
-        if let agentID = attachedAgentID { agentSource?.setEventsPresented(false, for: agentID) }
+        if let agentID = attachedAgentID {
+            agentSource?.setEventsPresented(false, for: agentID)
+            agentSource?.unregisterShownChrome(self, for: agentID)
+        }
         if let transcriptReloadObserverToken, let agentID = attachedAgentID {
             agentSource?.removeTranscriptReloadObserver(transcriptReloadObserverToken, for: agentID)
         }
@@ -6129,4 +6133,13 @@ extension ManagedAgentTileNSView {
     /// Everything the tile's host-local tool-detail store holds (shared by both
     /// renderers).
     func qaToolDetailRecords() async -> [AgentToolDetailRecord] { await toolDetailStore.allDetails() }
+}
+
+/// What a shared agent's guest shows in its chip and meter: this tile's own.
+extension ManagedAgentTileNSView: AgentShownChromeSource {
+    func shownChrome(for id: AgentID) -> AgentShownChrome? {
+        guard attachedAgentID == id, let chrome = chromeSnapshot else { return nil }
+        return AgentShownChrome(status: chrome.agentStatus, statusLabel: chrome.agentStatusLabel,
+                                context: compactContextWindow)
+    }
 }
