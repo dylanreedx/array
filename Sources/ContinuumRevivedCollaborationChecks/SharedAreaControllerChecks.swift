@@ -98,7 +98,19 @@ private actor ControllerFixtureTransport: SharedAreaControllerTransport {
         if let gate { return await gate.wait() }
         return identityValue
     }
-    func state() async throws -> Collaboration.State { stateRequests += 1; return stateValue }
+    func state() async throws -> Collaboration.State {
+        stateRequests += 1
+        if let stateRefusal { throw CollaborationClientError.server(status: stateRefusal, code: "unavailable") }
+        return stateValue
+    }
+    /// The relay's answers once this member is removed: the area and every
+    /// lane read refuse with this status.
+    private var stateRefusal: Int?
+    private var laneRefusal: Int?
+    func refuse(state: Int?, lanes: Int?) { stateRefusal = state; laneRefusal = lanes }
+    func readAgentProjection(object: UUID, cursor: Collaboration.AgentProjection.Cursor?) async throws -> Collaboration.AgentProjection.Read {
+        throw CollaborationClientError.server(status: laneRefusal ?? 404, code: "unavailable")
+    }
     func connection(initial: Collaboration.State) async throws -> any SharedAreaControllerConnection { fixtureConnection }
     func apply(_ mutation: Collaboration.Mutation) async throws -> Collaboration.Receipt {
         applyRequests += 1
@@ -330,5 +342,24 @@ func runSharedAreaControllerChecks() async throws {
     try controllerExpect(viewerApplyRequests == 0 && viewer.drafts.contains(draft),
         "viewer keeps a private draft without sending a prohibited mutation")
     await viewer.close()
+    // A removed member's tile read is refused within a second, while its
+    // held updates read can sit for 25 s before it answers. The refusal ends
+    // the view at once; a lane that is only unpublished leaves it connected.
+    let removedFixture = ControllerFixtureTransport(identity: identity,
+        state: .init(scope: .init(area: area, epoch: 1, role: .editor), document: original))
+    let removed = try makeController(makeStore("removed"), removedFixture)
+    await removed.open()
+    try await controllerEventually({ removed.status == .connected }, "the guest view never connected")
+    _ = try? await removed.readAgentProjection(object: discussion.id, cursor: nil)
+    try await Task.sleep(for: .milliseconds(200))
+    try controllerExpect(removed.status == .connected,
+        "a tile read refused while the area still reads (nothing published yet) keeps the view connected")
+    await removedFixture.refuse(state: 404, lanes: 404)
+    _ = try? await removed.readAgentProjection(object: discussion.id, cursor: nil)
+    try await controllerEventually({ removed.status == .unavailable(.accessDenied) },
+        "a removed member's refused tile read never ended the view")
+    try controllerExpect(removed.document == nil && !removed.canSubmit,
+        "a removed member's view ends as soon as a tile read is refused, without waiting for the held updates read")
+    await removed.close()
     print("Shared area controller checks passed: online identity, read-only cache, scoped lifecycle, monotonic replay/ACK, private persistence and explicit outcomes; no runner or native scene claim.")
 }

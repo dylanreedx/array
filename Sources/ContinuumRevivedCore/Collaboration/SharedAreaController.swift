@@ -292,7 +292,8 @@ public final class SharedAreaController {
     }
     public func readAgentProjection(object: SharedArea.ID<SharedArea.Object>, cursor: Collaboration.AgentProjection.Cursor?) async throws -> Collaboration.AgentProjection.Read {
         guard status == .connected, let transport else { throw CollaborationClientError.server(status: 503, code: "notConnected") }
-        return try await transport.readAgentProjection(object: object.rawValue, cursor: cursor)
+        do { return try await transport.readAgentProjection(object: object.rawValue, cursor: cursor) }
+        catch { verifyAccessAfterRefusal(error); throw error }
     }
 
     /// A shared note, file, diff, browser or terminal. The host writes state;
@@ -308,7 +309,8 @@ public final class SharedAreaController {
     }
     public func readLiveTile(object: SharedArea.ID<SharedArea.Object>, request: Collaboration.LiveTile.ReadRequest) async throws -> Collaboration.LiveTile.Read {
         guard status == .connected, let transport else { throw CollaborationClientError.server(status: 503, code: "notConnected") }
-        return try await transport.readLiveTile(object: object.rawValue, request: request)
+        do { return try await transport.readLiveTile(object: object.rawValue, request: request) }
+        catch { verifyAccessAfterRefusal(error); throw error }
     }
     /// A published agent's whole transcript: the host writes, any member reads.
     public func publishAgentTranscript(object: SharedArea.ID<SharedArea.Object>, host: SharedArea.ID<SharedArea.Host>, stream: String,
@@ -320,7 +322,31 @@ public final class SharedAreaController {
     }
     public func readAgentTranscript(object: SharedArea.ID<SharedArea.Object>, request: Collaboration.AgentTranscript.ReadRequest) async throws -> Collaboration.AgentTranscript.Read {
         guard status == .connected, let transport else { throw CollaborationClientError.server(status: 503, code: "notConnected") }
-        return try await transport.readAgentTranscript(object: object.rawValue, request: request)
+        do { return try await transport.readAgentTranscript(object: object.rawValue, request: request) }
+        catch { verifyAccessAfterRefusal(error); throw error }
+    }
+
+    /// A member removed from the area learns it from the held updates read
+    /// only when that read next returns, up to 25 s later, while the tile's
+    /// own reads are refused within a second. One refusal (403/404/410) asks
+    /// the relay for the area itself: if that is refused too, access ended
+    /// and the view closes now. A lane that is merely not published yet still
+    /// reads the area, so it changes nothing.
+    private var isVerifyingAccess = false
+    private func verifyAccessAfterRefusal(_ error: any Error) {
+        guard let client = error as? CollaborationClientError, case let .server(code, _) = client,
+              [403, 404, 410].contains(code), !isVerifyingAccess, status == .connected, let transport else { return }
+        isVerifyingAccess = true
+        let current = generation
+        Task { [weak self] in
+            defer { self?.isVerifyingAccess = false }
+            do { _ = try await transport.state() }
+            catch {
+                guard let self, let client = error as? CollaborationClientError, case let .server(code, _) = client,
+                      [401, 403, 404, 410].contains(code) else { return }
+                self.failClosed(.accessDenied, generation: current)
+            }
+        }
     }
     /// A shared terminal's stream lane: its owner's host sends, members watch.
     public func openTileStream(object: SharedArea.ID<SharedArea.Object>) async throws -> any SharedAreaTileStream {
