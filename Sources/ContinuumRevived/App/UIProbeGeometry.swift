@@ -5197,8 +5197,8 @@ enum UIProbeGeometry {
                     throw fail("\(label): P6.5 remainder did not materialize in the constrained viewport")
                 }
                 let beforeRemainderAX = accessibilityObjects(from: probe.inbox)
-                // Both layouts speak the fold as they draw it, "N folded".
-                let remainderWords = "\(remainder.hiddenDescendantCount) folded"
+                // Both layouts speak the fold as they draw it, "N more".
+                let remainderWords = "\(remainder.hiddenDescendantCount) more"
                 let remainderLabel = "Show \(remainderWords)"
                 guard let remainderButton = beforeRemainderAX.first(where: {
                     accessibilityRole(of: $0) == .button

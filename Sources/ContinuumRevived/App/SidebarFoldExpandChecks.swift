@@ -124,8 +124,8 @@ extension SidebarOwnershipChecks {
             }
             inbox.layoutViewportForQA()
         }
-        // Both layouts draw and speak the fold as "18 folded".
-        let words = "18 folded"
+        // Both layouts draw and speak the fold as "18 more".
+        let words = "18 more"
         let collapsed = try fold()
         guard collapsed.qaTitle == words,
               collapsed.qaAccessibilityLabel == "Show \(words)" else {
@@ -200,7 +200,7 @@ extension SidebarOwnershipChecks {
             throw fail("the five done helpers have no fold line")
         }
         fold.layoutSubtreeIfNeeded()
-        let words = "5 folded"
+        let words = "5 more"
         guard Set(remainder.hiddenDescendantIDs) == Set(done), remainder.hiddenNeedsYou == 0,
               fold.qaTitle == words, fold.qaAccessibilityLabel?.contains("need") == false else {
             throw fail("the fold draws \"\(fold.qaTitle)\" (AX \(fold.qaAccessibilityLabel ?? "nil")), holding \(remainder.hiddenDescendantCount) with \(remainder.hiddenNeedsYou) asking")
@@ -408,9 +408,9 @@ extension SidebarOwnershipChecks {
         let resting = foldRecent.map(uuid)
         guard helpers() == resting else { throw fail("at rest the card shows \(helpers().map(name))") }
         guard lineTitles() == ["40 more, all done"] else { throw fail("the line reads \(lineTitles())") }
-        // The words the line draws, in both layouts: what it holds, "40 folded".
+        // The words the line draws, in both layouts: what it holds, "40 more".
         // The card's count line is the one place a failure is said.
-        let restingWords = "40 folded"
+        let restingWords = "40 more"
         // The card is the list's last: its foot, the line, sits at the viewport's bottom.
         inbox.scrollToBottomForQA(materializeAll: false)
         guard try isOnScreen(fold()), try isOnScreen(cell(foldRecent[2])) else {
@@ -590,22 +590,22 @@ extension SidebarOwnershipChecks {
         let lineY = windowY(try fold())
         _ = try clickFold()
         let folded = [foldArrival] + foldRecent
-        guard helpers() == folded.map(uuid), try fold().qaTitle.hasPrefix("40 folded"),
+        guard helpers() == folded.map(uuid), try fold().qaTitle.hasPrefix("40 more"),
               !inbox.expandedFanoutParentsForQA.contains(uuid(foldLead)) else {
             throw fail("Show less left \(helpers().map(name)), line \(try fold().qaTitle)")
         }
         guard abs(windowY(try fold()) - lineY) < 0.5, try isOnScreen(cell(foldLead)) else {
             throw fail("folding back moved the line from y \(lineY) to \(windowY(try fold())) or hid its lead")
         }
-        // A folded helper failed (step 5a): the card says "N failed" once, on the
-        // lead's count line, and never again on its fold.
-        let failures = try NSRegularExpression(pattern: "\\d+ failed")
+        // A folded helper failed (step 5a): a failed helper needs you, so the card
+        // says "N needs you" once, on the lead's count line, and never on its fold.
+        let failures = try NSRegularExpression(pattern: "\\d+ needs? you")
         let countLine = inbox.countLineTextForQA(id: uuid(foldLead)) ?? ""
         let card = (try cell(foldLead).visibleTextForQA + [try fold().qaTitle]
             + (inbox.sidebarLayout == .quietInbox ? [countLine] : [])).joined(separator: " | ")
         let saidFailed = failures.numberOfMatches(in: card, range: NSRange(card.startIndex..., in: card))
-        guard saidFailed == 1, countLine.contains("1 failed") else {
-            throw fail("the card says failed \(saidFailed) times, wanted once on the count line: \(card)")
+        guard saidFailed == 1, countLine.contains("1 needs you") else {
+            throw fail("the card says needs you \(saidFailed) times, wanted once on the count line: \(card)")
         }
         try still("folded")
         return "\(label): \"\(restingWords)\" lights and presses like a subagent row; clicking its words opens "

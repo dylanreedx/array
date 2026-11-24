@@ -5809,6 +5809,18 @@ enum ContinuumApp {
                 }
             }
         }
+        if CommandLine.arguments.contains("--sidebar-more-click-check") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    print(try SidebarMoreClickChecks.run())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: sidebar-more-click: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
         if CommandLine.arguments.contains("--sidebar-hover-card-overlay-check") {
             _ = NSApplication.shared
             MainActor.assumeIsolated {

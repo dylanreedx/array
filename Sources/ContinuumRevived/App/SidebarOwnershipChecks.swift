@@ -553,9 +553,9 @@ enum SidebarOwnershipChecks {
             inbox.ownershipRemaindersForQA.first { $0.qaParentID == uuid(lead) }
         }
         func expectFold(_ lead: Int, _ quietText: String, _ step: String) throws {
-            // Both layouts draw a closed fold as "N folded" (none here is stopped).
+            // Both layouts draw a closed fold as "N more" (none here is stopped).
             let text = quietText != "Show less"
-                ? "\(quietText.prefix { $0.isNumber }) folded" : quietText
+                ? "\(quietText.prefix { $0.isNumber }) more" : quietText
             guard let row = fold(lead), row.qaTitle == text else {
                 throw Failure(description: "\(label), \(step): \(name(uuid(lead)))'s fold row reads \(fold(lead)?.qaTitle ?? "nothing"), wanted \"\(text)\"")
             }
@@ -588,7 +588,7 @@ enum SidebarOwnershipChecks {
         try expectFold(busyLead, "3 more", "at rest")
         try expectFold(quietLead, "2 more, all done", "at rest")
         let restTail = try leadTail("at rest")
-        guard restTail.contains("2 failed") else {
+        guard restTail.contains("3 need you") else {
             throw Failure(description: "\(label): the lead does not count both failed subagents: \(restTail)")
         }
         if let outputDirectory {
@@ -619,7 +619,7 @@ enum SidebarOwnershipChecks {
         try expectRows([busyLead, needsYou, working, recentDone, quietLead, quietLead + 1], "after 21 minutes")
         try expectFold(busyLead, "5 more", "after 21 minutes")
         let agedTail = try leadTail("aged")
-        guard agedTail.contains("2 failed") else {
+        guard agedTail.contains("3 need you") else {
             throw Failure(description: "\(label): the failed subagent aged out and its lead stopped saying so: \(agedTail)")
         }
         guard let next = scheduled.last, abs(next - 4 * 60) <= 1 else {
@@ -629,7 +629,7 @@ enum SidebarOwnershipChecks {
         // 4. Reading a failed helper preserves the reconciled outcome count.
         push(priorityRows(recentFailedRead: true), updated: [recentFailed])
         let openedTail = try leadTail("opened")
-        guard openedTail.contains("2 failed") else {
+        guard openedTail.contains("3 need you") else {
             throw Failure(description: "\(label): reading one failure changed the family outcome count: \(openedTail)")
         }
 

@@ -255,8 +255,8 @@ enum SidebarLedgerChecks {
                 }
                 let title = cell.titleForQA
                 foldTitles.append(title)
-                guard title.contains(" folded"), let n = Int(title.prefix { $0.isNumber }) else {
-                    throw fail("fold line reads '\(title)' (expected E's 'N folded' grammar)")
+                guard title.hasSuffix(" more"), let n = Int(title.prefix { $0.isNumber }) else {
+                    throw fail("fold line reads '\(title)' (expected 'N more')")
                 }
                 if title.contains("failed") { throw fail("fold line repeats failed: '\(title)'") }
                 foldNumbers.append(n)
@@ -411,7 +411,7 @@ enum SidebarLedgerChecks {
             throw fail("switching to Quiet inbox did not re-render (layout \(inbox.sidebarLayout))")
         }
         if inbox.itemsForQA.contains(where: { $0.agentRow?.id == uuid(lead) }),
-           inbox.countLineTextForQA(id: uuid(lead))?.hasPrefix("12 paused · 1 failed") != true {
+           inbox.countLineTextForQA(id: uuid(lead))?.hasPrefix("1 needs you · 12 paused") != true {
             throw fail("the Quiet inbox lost the shared count line")
         }
         defaults.set(SidebarLayout.ledger.rawValue, forKey: SidebarLayout.defaultsKey)
@@ -884,7 +884,7 @@ extension SidebarLedgerChecks {
             let count = try familyCounts()
             try expect(count.shown + count.folded == 18, "rendered \(count.shown) shown + \(count.folded) folded != 18")
             let countAX = inbox.cellForQA(id: uuid(lead))?.accessibilityHelp() ?? ""
-            try expect(countAX.contains("\(count.shown) shown, \(count.folded) folded"), "rendered rows and AX disagree: \(countAX)")
+            try expect(countAX.contains("\(count.shown) shown, \(count.folded) hidden"), "rendered rows and AX disagree: \(countAX)")
 
             // Settings' real ChoiceButton -> defaults -> event -> existing list.
             let model = SettingsModel(defaults: defaults, navKeymap: .resolve(defaults: defaults, warn: { _ in }), initialPaneID: "sidebar")

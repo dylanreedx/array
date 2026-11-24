@@ -352,7 +352,7 @@ enum SidebarQuietInboxChecks {
             try expect(cell.accessibilityLabel()?.contains("Paused") == true,
                        "known usage row's AX must also say Paused")
         }
-        try expect(inbox.countLineTextForQA(id: lead.rawValue)?.hasPrefix("2 paused · 1 failed") == true,
+        try expect(inbox.countLineTextForQA(id: lead.rawValue)?.hasPrefix("1 needs you · 2 paused") == true,
                    "Quiet's rendered lead must reconcile paused and failed in one count line")
         Q.photograph(sidebar, "quiet-1-head")
 
