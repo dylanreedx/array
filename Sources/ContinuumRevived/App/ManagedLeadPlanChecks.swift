@@ -103,6 +103,8 @@ enum ManagedLeadPlanChecks {
             view.presentation?.steps.contains { $0.ownerAgent == quick } == true
         }
         try await ManagedModeChecks.settled(b, quick)
+        // Done needs the helper's report, not just its turn ending.
+        try await call(b.configuration(for: quick), "array_report", ["summary": "Quick check passed"])
         try await AgentPresenceChecks.eventually("settled helper did not move to Done") {
             view.presentation?.steps.first { $0.ownerAgent == quick }?.state == .done
                 && view.presentation?.steps.contains { $0.isSection && $0.title == "Done" } == true
@@ -407,6 +409,8 @@ enum ManagedLeadPlanChecks {
         trace.removeAll(); heightChanges = 0
         let done = helpers[3], doneThread = AgentSupervisor.threadId(for: done)
         let ended = Date().addingTimeInterval(-120)
+        // Its report, filed in its turn (the fixture stamps that turn start + 3 s).
+        _ = supervisor.fileReport(AgentReport(summary: "Finished"), for: done, at: max(Date(), start.addingTimeInterval(Double(names.count))))
         supervisor.qaDeliver(.turnCompleted(threadId: doneThread, turnId: "t1", outcome: .completed, errorMessage: nil), to: done, now: ended)
         supervisor.qaDeliver(.sessionStateChanged(.ready), to: done, now: ended)
         try await AgentPresenceChecks.eventually("the finished helper did not move to Done") {
@@ -469,6 +473,7 @@ enum ManagedLeadPlanChecks {
         for id in idle { supervisor.qaDeliver(.sessionStateChanged(.ready), to: id, now: Date().addingTimeInterval(-500)) }
         let done = helper("Release notes")
         startTurn(done, at: Date().addingTimeInterval(-300)); finishTurn(done, .completed, at: Date().addingTimeInterval(-120))
+        _ = supervisor.fileReport(AgentReport(summary: "Release notes written"), for: done, at: Date().addingTimeInterval(-120))
         let running = helper("Drawer rework")
         startTurn(running, at: Date().addingTimeInterval(-30))
         let names = ["Sidebar audit": failed[0], "Login flow": failed[1], "History export": failed[2],
@@ -536,7 +541,37 @@ enum ManagedLeadPlanChecks {
         guard failures.isEmpty else {
             throw WorkspaceAgentReportChecks.Failure(description: "lead-plan-model: " + failures.joined(separator: "; "))
         }
-        print("Lead plan model passed: steps link to helpers, stale failures do not need you, waiting is not working, order is stable")
+        // 6. A turn ending is not the helper being done. Live 2026-11-24: the plan
+        // read "2 of 4 done" while the lead said alpha was not, because a turn
+        // that ended without a report, with a background command still running,
+        // read Done. Done needs its report and no live job of its own.
+        let previousTracker = supervisor.processTracker
+        let tracker = AgentProcessTracker(internalPathPrefixes: [])
+        supervisor.processTracker = tracker
+        tracker.onJobsEnded = nil // the idle waker's wake is not under test here
+        defer { supervisor.processTracker = previousTracker }
+        let alpha = helper("Alpha")
+        tracker.knownAgents = { [alpha] }
+        func alphaState() -> String {
+            let h = view.presentation?.tail.first { $0.id == alpha }
+            return h.map { "\($0.state.rawValue)/\($0.bucket.rawValue)" } ?? "absent"
+        }
+        startTurn(alpha, at: Date().addingTimeInterval(-60)); finishTurn(alpha, .completed, at: Date().addingTimeInterval(-10))
+        try await AgentPresenceChecks.eventually("alpha's turn did not end") { !supervisor.isRunning(alpha) && view.presentation?.tail.contains { $0.id == alpha } == true }
+        try await Task.sleep(for: .milliseconds(300))
+        check(alphaState() == "Waiting/waiting", "a turn that ended without a report reads \(alphaState()), not Waiting")
+        tracker.publish([alpha.rawValue.uuidString: [AgentBackgroundJob(id: "job-4242", owner: alpha.rawValue.uuidString, rootPid: 4242,
+            pids: [4242], startTimes: [:], label: "swift test", commandLine: "swift test", ports: [],
+            startedAt: Date().addingTimeInterval(-30), detached: true)]])
+        _ = supervisor.fileReport(AgentReport(summary: "Alpha done"), for: alpha)
+        try await Task.sleep(for: .milliseconds(300))
+        check(alphaState() == "Waiting/waiting", "a reported helper with a live background job reads \(alphaState()), not Waiting")
+        tracker.publish([:])
+        try await AgentPresenceChecks.eventually("alpha did not read Done once its report was in and its job ended") { alphaState() == "Done/finished" }
+        guard failures.isEmpty else {
+            throw WorkspaceAgentReportChecks.Failure(description: "lead-plan-model: " + failures.joined(separator: "; "))
+        }
+        print("Lead plan model passed: steps link to helpers, stale failures do not need you, waiting is not working, order is stable, done needs a report and no live job")
     }
 
     static func stills(_ tile: ManagedAgentTileNSView, view: AgentLeadPlanView, to dir: URL, name: String) throws {

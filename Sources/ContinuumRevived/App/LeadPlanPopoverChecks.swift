@@ -37,6 +37,7 @@ enum LeadPlanFixture {
         }
         let done = try spawn("iOS preview tiles")
         start(done, at: now.addingTimeInterval(-4000)); finish(done, .completed, at: now.addingTimeInterval(-3600))
+        _ = s.fileReport(AgentReport(summary: "Preview tiles shipped"), for: done, at: now.addingTimeInterval(-3600))
         let running = try spawn("Drawer data model")
         start(running, at: now.addingTimeInterval(-30))
         let design = try spawn("Drawer redesign view")

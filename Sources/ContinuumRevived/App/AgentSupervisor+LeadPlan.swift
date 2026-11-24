@@ -133,7 +133,12 @@ extension AgentSupervisor {
                     || helper.lastReport?.report.commandEvidence?.contains(where: { $0.outcome == .observedFailed }) == true {
             return .failed
         } else if status == .done || helper.latestTerminalEvent?.outcome == .succeeded {
-            return .done
+            // A turn ending is not the helper being done: it may have ended
+            // without its report, or left a background command running. Done
+            // needs a report filed in or after its latest turn and nothing of
+            // its own still alive; until then it is between turns, waiting.
+            let reported = helper.lastReport.map { $0.filedAt >= (helper.latestTurnAt ?? .distantPast) } ?? false
+            return reported && idleWaitingFact(for: helper.id, now: Date()) == nil ? .done : .waiting
         }
         return .waiting
     }

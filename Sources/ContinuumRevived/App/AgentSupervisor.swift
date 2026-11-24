@@ -1101,9 +1101,18 @@ protocol AgentShownChromeSource: AnyObject {
 final class AgentSupervisor {
     /// 0.7.30 — what each agent left running. Owned by the app delegate; tiles
     /// read it through the supervisor they attach to.
+    private var backgroundJobsObserver: NSObjectProtocol?
     weak var processTracker: AgentProcessTracker? {
         didSet {
             processTracker?.onJobsEnded = { [weak self] agent, jobs in self?.idleWaker.jobsEnded(agent, jobs) }
+            // A helper's live background job holds its plan step off Done.
+            backgroundJobsObserver.map(NotificationCenter.default.removeObserver)
+            backgroundJobsObserver = processTracker.map { tracker in
+                NotificationCenter.default.addObserver(forName: .agentBackgroundJobsDidChange, object: tracker, queue: .main) { [weak self] note in
+                    let ids = note.userInfo?["agentIDs"] as? Set<AgentID> ?? []
+                    MainActor.assumeIsolated { for id in ids { self?.notifyLeadPlanChanged(id) } }
+                }
+            }
             processTracker?.onHeadlessCalls = { [weak self] agent, count in
                 guard let label = AgentProcessAttribution.headlessCallsLabel(count) else { return }
                 self?.appendAgentDiagnostics("headless claude calls=\(count) (\(label); counted, never blocked)", agentID: agent)
