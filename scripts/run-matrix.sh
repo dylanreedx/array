@@ -1687,6 +1687,8 @@ run_leg .build/debug/ContinuumRevivedCoreChecks --dictation-vocabulary-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --context-meter-contract-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --uuid-string-order-check
 run_leg .build/debug/ContinuumRevivedCoreChecks --sidebar-history-scope-check
+# A restored Bash row keeps claude's description as its title, never "Tool".
+run_leg .build/debug/ContinuumRevivedCoreChecks --restored-bash-title-check
 # Live-usage profile 2026-11-12: the activity fold copied every agent entry per
 # event (a rebuild went quadratic in agents). Scaling ratio at 575 vs 2,300 agents.
 run_leg .build/debug/ContinuumRevivedCoreChecks --activity-snapshot-scaling-check

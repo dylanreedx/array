@@ -78,6 +78,7 @@ check --browser-download-check
 check --browser-durable-takeover-check
 check --browser-element-context-check
 check --browser-focus-restoration-check
+check --browser-handback-check
 check --browser-inspector-actions-check
 check --browser-inspector-console-check
 check --browser-inspector-dom-tree-check
@@ -163,6 +164,7 @@ check --editor-navigation-check
 check --editor-web-bridge-check
 check --effort-catalog-check
 check --empty-workspace-creation-check
+check --external-session-fsevents-check
 check --external-session-move-check
 check --external-session-watch-check
 check --external-sessions-sidebar-check
@@ -322,11 +324,13 @@ check --resize-snap-check
 check --resource-bundle-layout-check
 check --restore-delivery-scaling-check
 check --restore-scaling-check
+check --restored-bash-title-check
 check --retired-flat-write-check
 check --reveal-in-finder-check
 check --role-registry-check
 check --run-artifacts-tile-check
 check --run-ledger-gaps-check
+check --runner-signal-kill-check
 check --session-observer-check
 check --session-resume-check
 check --settings-modal-check
@@ -362,6 +366,7 @@ check --sidebar-dogfood-check
 check --sidebar-event-cost-check
 check --sidebar-family-cap-check
 check --sidebar-fold-expand-check
+check --sidebar-halo-default-check
 check --sidebar-helper-hover-check
 check --sidebar-hidden-footer-check
 check --sidebar-hide-any-row-check
@@ -469,6 +474,7 @@ check --unified-model-boot-check
 check --update-channel-check
 check --usage-account-fallback-check
 check --usage-pause-account-switch-check
+check --usage-resume-herd-check
 check --usage-stop-queue-check
 check --uuid-string-order-check
 check --viewport-sanitize-check
@@ -653,6 +659,7 @@ leg run_app_check .build/debug/Array --browser-download-check
 leg run_app_check .build/debug/Array --browser-durable-takeover-check
 leg run_app_check .build/debug/Array --browser-element-context-check
 leg run_app_check .build/debug/Array --browser-focus-restoration-check
+leg run_app_check .build/debug/Array --browser-handback-check
 leg run_app_check .build/debug/Array --browser-inspector-actions-check
 leg run_app_check .build/debug/Array --browser-inspector-console-check
 leg run_app_check .build/debug/Array --browser-inspector-dom-tree-check
@@ -726,6 +733,7 @@ leg run_app_check .build/debug/Array --editor-navigation-check
 leg run_app_check .build/debug/Array --editor-web-bridge-check
 leg run_app_check .build/debug/Array --effort-catalog-check
 leg run_app_check .build/debug/Array --empty-workspace-creation-check
+leg run_app_check .build/debug/Array --external-session-fsevents-check
 leg run_app_check .build/debug/Array --external-session-move-check
 leg run_app_check .build/debug/Array --external-session-watch-check
 leg run_app_check .build/debug/Array --external-sessions-sidebar-check
@@ -734,13 +742,13 @@ leg run_app_check .build/debug/Array --fake-cli-lifecycle-check
 leg run_app_check .build/debug/Array --file-card-check
 leg run_app_check .build/debug/Array --file-data-grid-check
 leg run_app_check .build/debug/Array --file-formats-scene-check
-leg run_app_check .build/debug/Array --file-surface-routing-check
 leg run_app_check .build/debug/Array --file-image-check
 leg run_app_check .build/debug/Array --file-initial-load-check
 leg run_app_check .build/debug/Array --file-markdown-perf-check
 leg run_app_check .build/debug/Array --file-markdown-preview-check
 leg run_app_check .build/debug/Array --file-markdown-scroller-check
 leg run_app_check .build/debug/Array --file-open-active-context-check
+leg run_app_check .build/debug/Array --file-surface-routing-check
 leg run_app_check .build/debug/Array --file-tile-zoom-check
 leg run_app_check .build/debug/Array --file-tree-boot-persistence-check
 leg run_app_check .build/debug/Array --file-tree-hardening-check
@@ -791,6 +799,7 @@ leg run_app_check .build/debug/Array --layout-commit-scope-check
 leg run_app_check .build/debug/Array --layout-commit-truth-check
 leg run_app_check .build/debug/Array --lead-character-check
 leg run_app_check .build/debug/Array --lead-checkout-ledger-check
+leg run_app_check .build/debug/Array --lead-plan-steady-check
 leg run_app_check .build/debug/Array --leader-activation-check
 leg run_app_check .build/debug/Array --leader-composer-hold-check
 leg run_app_check .build/debug/Array --leader-jump-check
@@ -811,7 +820,6 @@ leg run_app_check .build/debug/Array --managed-codex-launch-check
 leg run_app_check .build/debug/Array --managed-compaction-tools-check
 leg run_app_check .build/debug/Array --managed-lead-context-transition-check
 leg run_app_check .build/debug/Array --managed-lead-plan-check
-leg run_app_check .build/debug/Array --lead-plan-steady-check
 leg run_app_check .build/debug/Array --managed-lead-tool-loading-check
 leg run_app_check .build/debug/Array --managed-mode-hooks-check
 leg run_app_check .build/debug/Array --managed-mode-launch-check
@@ -879,6 +887,7 @@ leg run_app_check .build/debug/Array --retired-flat-write-check
 leg run_app_check .build/debug/Array --reveal-in-finder-check
 leg run_app_check .build/debug/Array --run-artifacts-tile-check
 leg run_app_check .build/debug/Array --run-ledger-gaps-check
+leg run_app_check .build/debug/Array --runner-signal-kill-check
 leg run_app_check .build/debug/Array --session-observer-check
 leg run_app_check .build/debug/Array --session-resume-check
 leg run_app_check .build/debug/Array --settings-modal-check
@@ -913,6 +922,7 @@ leg run_app_check .build/debug/Array --sidebar-dogfood-check
 leg run_app_check .build/debug/Array --sidebar-event-cost-check
 leg run_app_check .build/debug/Array --sidebar-family-cap-check
 leg run_app_check .build/debug/Array --sidebar-fold-expand-check
+leg run_app_check .build/debug/Array --sidebar-halo-default-check
 leg run_app_check .build/debug/Array --sidebar-helper-hover-check
 leg run_app_check .build/debug/Array --sidebar-hidden-footer-check
 leg run_app_check .build/debug/Array --sidebar-hide-any-row-check
@@ -1018,6 +1028,7 @@ leg run_app_check .build/debug/Array --unified-model-boot-check
 leg run_app_check .build/debug/Array --update-channel-check
 leg run_app_check .build/debug/Array --usage-account-fallback-check
 leg run_app_check .build/debug/Array --usage-pause-account-switch-check
+leg run_app_check .build/debug/Array --usage-resume-herd-check
 leg run_app_check .build/debug/Array --usage-stop-queue-check
 leg run_app_check .build/debug/Array --viewport-sanitize-check
 leg run_app_check .build/debug/Array --web-link-open-check
@@ -1129,6 +1140,7 @@ leg run_leg .build/debug/ContinuumRevivedCoreChecks --managed-duckherd-live-chec
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --project-standards-index-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --provider-context-support-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --resource-bundle-layout-check
+leg run_leg .build/debug/ContinuumRevivedCoreChecks --restored-bash-title-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --role-registry-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --settings-schema-check
 leg run_leg .build/debug/ContinuumRevivedCoreChecks --sidebar-history-scope-check
@@ -1218,7 +1230,7 @@ count ContinuumRevivedAgentContentChecks 25
 count ContinuumRevivedAgentUIChecks 24
 count ContinuumRevivedCollaborationChecks 25
 count ContinuumRevivedCollaborationServiceChecks 29
-count ContinuumRevivedCoreChecks 218
+count ContinuumRevivedCoreChecks 220
 count ContinuumRevivedFileTreeChecks 0
 count ContinuumRevivedPaletteChecks 0
 count ContinuumRevivedPerfChecks 0
