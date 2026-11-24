@@ -220,7 +220,7 @@ func runCollaborationDeletionChecks() async throws {
             try referencing(db, [x.uuidString]) + (try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM areas WHERE id=?", arguments: [x.uuidString]) == 0 ? [] : ["areas"])
         }
         try expect(leftovers.isEmpty, "no row anywhere still points at the deleted area (\(leftovers))")
-        try expect(try await raw.read { try Row.fetchAll($0, sql: "PRAGMA foreign_key_check") }.isEmpty, "the database passes a foreign key check")
+        try expect(try await raw.read { try Row.fetchAll($0, sql: "PRAGMA foreign_key_check").isEmpty }, "the database passes a foreign key check")
         try expect(try await api.send("GET", "areas/\(x)", token: o.token).0 == 404, "the owner no longer reaches the deleted area")
         try expect(try await admin.send("DELETE", "areas/\(x)", token: adminToken).0 == 404, "deleting it again answers 404")
         let yAfter = try await api.json(Collaboration.State.self, "GET", "areas/\(y)", token: k.token, status: 200)
@@ -258,7 +258,7 @@ func runCollaborationDeletionChecks() async throws {
         let oDevices = Set([o.identity.device.uuidString, o.identity.person.rawValue.uuidString, h.identity.device.uuidString, h.identity.person.rawValue.uuidString])
         let oLeft = try await raw.read { db in try referencing(db, oDevices) }
         try expect(oLeft.isEmpty, "no row anywhere still points at a deleted person or their devices (\(oLeft))")
-        try expect(try await raw.read { try Row.fetchAll($0, sql: "PRAGMA foreign_key_check") }.isEmpty, "the database still passes a foreign key check")
+        try expect(try await raw.read { try Row.fetchAll($0, sql: "PRAGMA foreign_key_check").isEmpty }, "the database still passes a foreign key check")
         try expect(try await admin.send("GET", "people/\(o.identity.person.rawValue)", token: adminToken).0 == 404, "a deleted person is gone")
         try expect(try await admin.send("DELETE", "people/\(UUID())", token: adminToken).0 == 404, "an unknown person answers 404")
         try expect(try await admin.send("DELETE", "areas/not-a-uuid", token: adminToken).0 == 404, "a malformed id answers 404")
