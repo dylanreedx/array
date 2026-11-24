@@ -23085,23 +23085,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             return
         }
         let supervisor = agentSupervisor
-        guard let readToken = supervisor.beginProviderHistoryRead(for: agentId) else { return }
-        Task.detached(priority: .userInitiated) { [weak self, weak view] in
-            let transcript = ManagedTranscriptRehydrator.rehydrate(inputs)
+        _ = Self.restorePreviousSession(
+            supervisor: supervisor, agentId: agentId, view: view,
+            stillCurrent: { [weak self] in self?.agentSupervisor === supervisor },
+            read: { ManagedTranscriptRehydrator.rehydrate(inputs) })
+    }
+
+    /// The read-then-render half of a restore, taking its read as a closure so a
+    /// witness can hold the read open. The result is seeded into the supervisor
+    /// whether or not the tile is still attached when the read lands: a tile far
+    /// off screen parks (detaches) during the read and comes back through
+    /// `attach`, which renders what the supervisor holds. Dropping it here left
+    /// that tile blank, with no transcript and no notice.
+    @discardableResult
+    static func restorePreviousSession(
+        supervisor: AgentSupervisor, agentId: AgentID, view: ManagedAgentTileNSView,
+        stillCurrent: @escaping @MainActor () -> Bool,
+        read: @escaping @Sendable () -> RehydratedTranscript?
+    ) -> Task<Void, Never>? {
+        guard let readToken = supervisor.beginProviderHistoryRead(for: agentId) else { return nil }
+        return Task.detached(priority: .userInitiated) { [weak view] in
+            let transcript = read()
             await MainActor.run {
                 defer { supervisor.endProviderHistoryRead(readToken, for: agentId) }
-                guard let self, self.agentSupervisor === supervisor,
-                      supervisor.isProviderHistoryReadActive(readToken, for: agentId), let view,
-                      view.attachedAgentID == agentId else { return }
+                guard stillCurrent(), supervisor.isProviderHistoryReadActive(readToken, for: agentId) else { return }
                 // A live prompt during the read makes rehydration moot: the real
                 // transcript now replays, and the placeholder/rehydration would
                 // land underneath it.
                 guard supervisor.needsPreviousSessionNotice(agentId) else { return }
+                let attached = view?.attachedAgentID == agentId ? view : nil
                 if let transcript {
                     supervisor.seedRehydratedTranscript(transcript, for: agentId)
-                    view.renderRehydratedPreviousSession(transcript)
+                    attached?.renderRehydratedPreviousSession(transcript)
                 } else {
-                    view.showPreviousSessionNotice()
+                    attached?.showPreviousSessionNotice()
                 }
             }
         }

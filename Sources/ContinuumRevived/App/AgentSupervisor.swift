@@ -23524,11 +23524,13 @@ func runAgentRestoreChecks() async throws {
     // renders it, and falls back to the plain notice when there is no file.
     let rehydrationBranch = try paletteAgentSpawnBranch(
         "private func rehydratePreviousSessionOrNotice(agentId: AgentID, into view: ManagedAgentTileNSView) {")
+    let restoreBranch = try paletteAgentSpawnBranch(") -> Task<Void, Never>? {")
     guard rehydrationBranch.contains("ManagedTranscriptRehydrator.rehydrate("),
-          rehydrationBranch.contains("seedRehydratedTranscript("),
-          rehydrationBranch.contains("renderRehydratedPreviousSession("),
-          rehydrationBranch.contains("showPreviousSessionNotice()") else {
-        throw fail("rehydratePreviousSessionOrNotice must read the session file, seed + render the transcript, and fall back to the notice:\n\(rehydrationBranch)")
+          rehydrationBranch.contains("restorePreviousSession("),
+          restoreBranch.contains("seedRehydratedTranscript("),
+          restoreBranch.contains("renderRehydratedPreviousSession("),
+          restoreBranch.contains("showPreviousSessionNotice()") else {
+        throw fail("rehydratePreviousSessionOrNotice must read the session file, seed + render the transcript, and fall back to the notice:\n\(rehydrationBranch)\n\(restoreBranch)")
     }
 
     print("AgentRestore: 2 of 3 stored agents adopted with no runner (1 marked stale for a missing project root, adopted once that root came back), the tiled one re-resolved from its tileId and took a view showing idle plus a previous-session notice, a prompt then started it with --session-id and retired its placeholder, and restoring four times neither duplicated, clobbered, nor pulled from ManagedAgentSessionStore")

@@ -2806,7 +2806,7 @@ enum FileOpenChecks {
         // 7. The path a relaunch really takes: the supervisor owns the restored session,
         //    and a tile ATTACHES to the agent. The body must build (text, composer) and
         //    draw one folded card, exactly as the neighbouring tile does.
-        func attachedRestore() throws {
+        func sessionLines() throws -> [String] {
             let sessionRoot = checkout.appendingPathComponent("outputs/attached", isDirectory: true)
             try fileManager.createDirectory(at: sessionRoot, withIntermediateDirectories: true)
             var lines: [String] = []
@@ -2825,6 +2825,10 @@ enum FileOpenChecks {
                     ["type": "tool_result", "tool_use_id": id, "content": "File created successfully at: \(path.path)"]]]])
             }
             line(["type": "assistant", "timestamp": "2026-11-24T05:44:10.000Z", "message": ["role": "assistant", "content": [["type": "text", "text": "Attached restore closing text."]]]])
+            return lines
+        }
+        func attachedRestore() throws {
+            let lines = try sessionLines()
             let support = tempRoot.appendingPathComponent("attached-support", isDirectory: true)
             let supervisor = AgentSupervisor(
                 store: AgentStore(applicationSupportDirectory: support),
@@ -2859,6 +2863,64 @@ enum FileOpenChecks {
             print("file preview strip: a tile attached to a supervisor-restored session draws its text around one folded card")
         }
         try attachedRestore()
+        // 8. The restore read lands AFTER the tile parked (a tile far off screen detaches while its
+        //    session file is read). The history must still reach the tile that attaches next; it used to
+        //    be dropped, leaving a tile with no transcript and no notice for good.
+        func parkedDuringRead() throws {
+            let lines = try sessionLines()
+            let support = tempRoot.appendingPathComponent("parked-support", isDirectory: true)
+            func makeSupervisor() -> AgentSupervisor {
+                AgentSupervisor(
+                    store: AgentStore(applicationSupportDirectory: support),
+                    makeRunner: { _ in ScriptedAgentRunner(script: []) },
+                    transcriptStore: AgentTranscriptStore(root: support.appendingPathComponent("transcripts", isDirectory: true)))
+            }
+            let id = makeSupervisor().spawn(role: nil, prompt: nil, cwd: checkout, model: "anthropic/claude-haiku-4-5-20251001", thinking: "low")
+            let supervisor = makeSupervisor()
+            _ = supervisor.restore()
+            try expect(supervisor.wasRestored(id) && supervisor.needsPreviousSessionNotice(id), "the second supervisor must restore the agent")
+            let tile = ManagedAgentTileNSView(tile: Tile(
+                id: UUID(), kind: .managedAgent, title: "parked", frame: TileFrame(x: 0, y: 0, width: 760, height: 760),
+                zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata(launchProfileId: "managed")))
+            tile.frame = NSRect(x: 0, y: 0, width: 760, height: 760)
+            let window = NSWindow(contentRect: tile.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = tile
+            window.orderFrontOffscreenForChecks()
+            defer { tile.detach(); window.orderOut(nil) }
+            tile.attach(agentID: id, supervisor: supervisor)
+            let threadId = tile.qaThreadIdForChecks
+            let release = DispatchSemaphore(value: 0)
+            let task = AppDelegate.restorePreviousSession(
+                supervisor: supervisor, agentId: id, view: tile, stillCurrent: { true },
+                read: {
+                    release.wait()
+                    return ClaudeSessionTranscriptReader.parse(lines: lines, threadId: threadId)
+                })
+            try expect(task != nil, "the restore read must start")
+            tile.detach()          // the park, while the read is in flight
+            release.signal()
+            let landed = Date().addingTimeInterval(30)
+            while supervisor.needsPreviousSessionNotice(id) && Date() < landed {
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            }
+            try expect(supervisor.rehydratedTranscript(for: id) != nil, "a read that lands on a parked tile must still be seeded")
+            tile.attach(agentID: id, supervisor: supervisor)   // the unpark
+            let deadline = Date().addingTimeInterval(30)
+            while Date() < deadline {
+                tile.layoutSubtreeIfNeeded()
+                tile.qaCanvasTranscript?.flushPendingVisualUpdate()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+                if (tile.qaCanvasTranscript?.qaFileThumbs.count ?? 0) >= 3 { break }
+            }
+            guard let canvas = tile.qaCanvasTranscript else { throw Failure(message: "the unparked tile has no drawn transcript") }
+            let text = canvas.qaLaidOutText
+            try expect(text.contains("Attached restore opening text.") && text.contains("Attached restore closing text."),
+                       "a tile that parked during its restore read must draw the history on return; drew '\(text.prefix(200))'")
+            try expect(canvas.qaChangesCards.filter { $0.files.count == 3 }.count == 1,
+                       "the restored history must fold into one card of three files, got \(canvas.qaChangesCards.map { $0.files.count })")
+            print("file preview strip: a restore that lands on a parked tile still draws on return")
+        }
+        try parkedDuringRead()
         try exercise(drawn: true)
         try exercise(drawn: false)
         print("file preview strip: thumbnails cached by mtime; opens in Array on both transcript renderers")
