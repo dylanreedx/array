@@ -2,6 +2,7 @@ import AppKit
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import ContinuumRevivedCollaborationProtocol
+import ContinuumRevivedCollaborationClient
 
 /// A teammate's live view of the selected published agent, with full access:
 /// the host's projection above, and the same composer a local agent has below.
@@ -21,6 +22,14 @@ final class SharedAgentLiveView: NSView {
     /// the rows fallback asks again whether the host now publishes the lane.
     static let transcriptWaitMilliseconds = 20_000
     static let transcriptRetryInterval: Duration = .seconds(10)
+    /// A tile restored at launch starts reading before its area has opened.
+    /// Those reads fail here without reaching the relay, so they are asked
+    /// again this soon rather than after the full interval: waiting out the
+    /// ten seconds left a relaunched guest on an empty tile.
+    static let connectingRetryInterval: Duration = .milliseconds(150)
+    /// The area is still opening; a read cannot succeed yet. A dropped
+    /// connection (`.reconnecting`) keeps the normal intervals.
+    var awaitingConnection: Bool { controller.status == .cached || controller.status == .connecting }
     let controller: SharedAreaController
     private let read: Reader
     private let readTranscript: TranscriptReader
@@ -246,14 +255,16 @@ final class SharedAgentLiveView: NSView {
                 // Holds the view only for the read itself, never across the wait.
                 guard let more = await self?.poll(selected, ticket: ticket), self?.generation == ticket else { return }
                 if more { continue }
-                do { try await Task.sleep(for: Self.pollInterval) } catch { return }
+                let wait = self?.awaitingConnection == true ? Self.connectingRetryInterval : Self.pollInterval
+                do { try await Task.sleep(for: wait) } catch { return }
             }
         }
         transcriptTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
                 guard let outcome = await self?.pollTranscript(selected, ticket: ticket), self?.generation == ticket else { return }
                 if outcome { continue }
-                do { try await Task.sleep(for: Self.transcriptRetryInterval) } catch { return }
+                let wait = self?.awaitingConnection == true ? Self.connectingRetryInterval : Self.transcriptRetryInterval
+                do { try await Task.sleep(for: wait) } catch { return }
             }
         }
     }
@@ -285,6 +296,7 @@ final class SharedAgentLiveView: NSView {
 
     private func setTranscriptLive(_ live: Bool) {
         guard transcriptLive != live else { return }
+        if live { CollaborationTimeline.mark("join.transcript-painted") }
         transcriptLive = live
         transcriptView.isHidden = !live || openedHelper != nil
         scroll.isHidden = live
@@ -370,6 +382,7 @@ final class SharedAgentLiveView: NSView {
                 replica = .init()
                 render(); return true
             case .applied:
+                if !confirmed { CollaborationTimeline.mark("join.projection-painted") }
                 confirmed = true; unavailable = false
             }
             if case .frames(_, _, true) = value { more = true }

@@ -461,6 +461,28 @@ enum SharedAgentChromeChecks {
             }
             tile.removeFromSuperview()
         }
+        // Cold start: a guest tile restored at launch starts reading before its
+        // area has opened, so the first transcript read fails without reaching
+        // the relay. It must be asked again as soon as the area opens. Waiting
+        // out the 10 s retry left a relaunched guest on an empty tile.
+        nonisolated(unsafe) let restoredLane = lane
+        let restored = try SharedAreaCheckRig.controller(root: root.appendingPathComponent("guest-relaunch"), identity: me, label: "Sam",
+                                                         authority: authority, seed: (document, .editor),
+                                                         transcript: { request in try await MainActor.run { try restoredLane.read(request) } })
+        let relaunched = SharedAgentLiveView(controller: restored)
+        relaunched.show(object: object, in: document)
+        try await Task.sleep(for: .milliseconds(100))
+        try expect(!relaunched.transcriptLive && restored.status != .connected,
+                   "control: before its area opens, a restored guest tile has no transcript (status \(restored.status))")
+        let opening = Date()
+        await restored.open()
+        while !relaunched.transcriptLive && Date().timeIntervalSince(opening) < 3 { try await Task.sleep(for: .milliseconds(10)) }
+        let shownAfter = Date().timeIntervalSince(opening) * 1000
+        relaunched.stop()
+        await restored.close()
+        try expect(relaunched.transcriptLive && shownAfter < 1000,
+                   "a guest tile restored at launch shows the transcript within 1 s of its area opening (\(Int(shownAfter)) ms)")
+
         let tooBig = Wire.CharacterTheme(file: Data(noise))
         try expect(tooBig == nil, "a host never ships a set that deflates past \(Wire.CharacterTheme.maximumSharedDeflatedBytes) bytes")
     }

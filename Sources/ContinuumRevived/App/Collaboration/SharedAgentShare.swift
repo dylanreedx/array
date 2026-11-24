@@ -1,6 +1,7 @@
 import AppKit
 import ContinuumRevivedCore
 import ContinuumRevivedCollaborationProtocol
+import ContinuumRevivedCollaborationClient
 
 // Mode A of the share redesign (`.plans/105-collaboration/SHARE-REDESIGN.md`):
 // share one agent. Copy publishes the agent into an area that is only a
@@ -107,7 +108,10 @@ final class SharedAgentTileSession {
         refresh()
         openTask = Task { [weak self] in
             guard let self else { return }
-            await controller.open()
+            // A link's join hands over the controller it has just opened;
+            // opening it again would drop that connection and repeat the
+            // identity, area and subscription round trips before first paint.
+            if controller.status != .connected { await controller.open() }
             refresh()
         }
     }
@@ -431,13 +435,17 @@ extension AppDelegate {
         // a placeholder on another install will say.
         let controller = try model.makeSharedAreaController(area: area)
         await controller.open()
+        CollaborationTimeline.mark("join.area-open")
         let owner = item.source?.owner
         // Member names come with the first authority frame, a moment after open.
         for _ in 0..<50 where owner.map({ controller.memberNames[$0] == nil }) ?? false {
             try? await Task.sleep(for: .milliseconds(100))
         }
         let hostName = owner.flatMap { controller.memberNames[$0] }.map { String($0.prefix(28)) } ?? "A teammate"
-        let label = model.activeAccount?.knownAreas.first(where: { $0.id == area })?.label ?? "Shared agent"
+        // A link's area is remembered under its slug; the tile and its sidebar
+        // row read it as the words it was made from, until the host's title arrives.
+        let known = model.activeAccount?.knownAreas.first(where: { $0.id == area })?.label
+        let label = known.map { ShareLinkURL.isValidSlug($0) ? ShareLinkSession.title(fromSlug: $0) : $0 } ?? "Shared agent"
         let reference = SharedAgentTileReference(areaId: area, objectId: item.id.rawValue, hostName: hostName,
                                                  hostPerson: owner?.rawValue, accountId: model.activeAccount?.id)
         let view: SharedAgentTileNSView
@@ -445,6 +453,7 @@ extension AppDelegate {
         case .success(let spawned): view = spawned
         case .failure(let error): await controller.close(); throw error
         }
+        CollaborationTimeline.mark("join.tile-installed")
         attachSharedAgentTile(view, model: model, controller: controller)
         canvas.centerOnTile(view.tile.id)
         focusSpawnedTile(view.tile.id)

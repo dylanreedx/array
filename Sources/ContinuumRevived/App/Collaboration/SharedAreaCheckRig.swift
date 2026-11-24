@@ -112,7 +112,14 @@ enum SharedAreaCheckRig {
         let identityValue: Collaboration.Identity
         let label: String
         let authority: Authority
+        /// The agent transcript lane, for a check that reads it through the
+        /// controller as production does. Without one the read is unavailable.
+        var transcript: (@Sendable (Collaboration.AgentTranscript.ReadRequest) async throws -> Collaboration.AgentTranscript.Read)? = nil
         func identity() async throws -> Collaboration.Identity { identityValue }
+        func readAgentTranscript(object: UUID, request: Collaboration.AgentTranscript.ReadRequest) async throws -> Collaboration.AgentTranscript.Read {
+            guard let transcript else { throw CollaborationClientError.server(status: 503, code: "transcriptUnavailable") }
+            return try await transcript(request)
+        }
         func state() async throws -> Collaboration.State { try await authority.state(identityValue) }
         func connection(initial: Collaboration.State) async throws -> any SharedAreaControllerConnection { try await authority.connection(identityValue) }
         func apply(_ mutation: Collaboration.Mutation) async throws -> Collaboration.Receipt { try await authority.apply(mutation, from: identityValue) }
@@ -130,7 +137,9 @@ enum SharedAreaCheckRig {
     }
 
     static func controller(root: URL, identity: Collaboration.Identity, label: String, authority: Authority,
-                           seed: (SharedArea.Document, Collaboration.Role)? = nil) throws -> SharedAreaController {
+                           seed: (SharedArea.Document, Collaboration.Role)? = nil,
+                           transcript: (@Sendable (Collaboration.AgentTranscript.ReadRequest) async throws -> Collaboration.AgentTranscript.Read)? = nil)
+        throws -> SharedAreaController {
         let endpoint = try CollaborationServiceEndpoint(URL(string: "https://rig.example.test")!)
         let credentials = CollaborationCredentialStore(vault: MemoryVault(), bundleIdentifier: nil)
         let scope = CollaborationCredentialScope(endpoint: endpoint, identity: identity)
@@ -141,7 +150,7 @@ enum SharedAreaCheckRig {
         // reopened shared window does.
         if let (document, _) = seed { try cache.save(.init(scope: cache.scope, document: document, observedMembershipEpoch: 1)) }
         return try SharedAreaController(localStore: cache, credentialStore: credentials, credentialScope: scope,
-            bundleIdentifier: nil, transportFactory: { _, _, _ in Transport(identityValue: identity, label: label, authority: authority) })
+            bundleIdentifier: nil, transportFactory: { _, _, _ in Transport(identityValue: identity, label: label, authority: authority, transcript: transcript) })
     }
 
     /// A disposable directory under the isolated app support root.
