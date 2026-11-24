@@ -23065,13 +23065,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
     }
 
-    private func openTerminal(at url: URL) {
-        let script = "tell application \"Terminal\" to do script "
-            + String(reflecting: "cd " + url.path.shellQuoted())
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", script]
-        try? process.run()
+    /// Opens Terminal's own new-window-at-folder, as `open -a Terminal <dir>`
+    /// does. Never AppleScript: driving Terminal by Apple Events needs an
+    /// Automation grant, and a denied one failed with nothing on screen.
+    /// Checks swap the opener.
+    static var qaOpenFolderInApp: ((URL, URL) -> Void)?
+
+    func openTerminal(at url: URL) {
+        guard let terminal = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal") else {
+            NSSound.beep()
+            return
+        }
+        if let open = Self.qaOpenFolderInApp {
+            open(url, terminal)
+            return
+        }
+        NSWorkspace.shared.open([url], withApplicationAt: terminal, configuration: NSWorkspace.OpenConfiguration()) { _, error in
+            if let error {
+                fputs("Open Terminal failed: \(error)\n", stderr)
+                Task { @MainActor in NSSound.beep() }
+            }
+        }
     }
 
     static func runLocationActionPolicySelfCheck() throws {
@@ -23099,6 +23113,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         try fileManager.createSymbolicLink(at: symlinkRoot, withDestinationURL: symlinkTarget)
 
         let delegate = AppDelegate()
+        // "Open Terminal at …" hands the folder to Terminal itself, so it
+        // needs no Automation permission and cannot fail silently on a denial.
+        if let terminal = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.Terminal") {
+            var opened: [(URL, URL)] = []
+            AppDelegate.qaOpenFolderInApp = { opened.append(($0, $1)) }
+            defer { AppDelegate.qaOpenFolderInApp = nil }
+            delegate.openTerminal(at: validRoot)
+            try expect(opened.count == 1 && opened[0].0 == validRoot && opened[0].1 == terminal,
+                       "Open Terminal must open the folder with Terminal, not through AppleScript; got \(opened)")
+        }
         try expect(delegate.usableAgentHomeDirectory(validRoot)?.path == validRoot.resolvingSymlinksInPath().path,
                    "location action policy rejected an existing directory")
         try expect(delegate.usableAgentHomeDirectory(regularFile) == nil,
