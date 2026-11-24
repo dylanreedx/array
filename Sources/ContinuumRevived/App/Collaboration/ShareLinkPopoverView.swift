@@ -70,8 +70,11 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
         slugField.isBordered = false
         slugField.drawsBackground = false
         slugField.focusRingType = .none
-        slugField.lineBreakMode = .byTruncatingTail
-        slugField.cell?.isScrollable = true
+        // At rest a long slug ends in an ellipsis rather than mid-letter. The
+        // field editor still scrolls to the caret while it is being edited.
+        slugField.lineBreakMode = .byTruncatingMiddle
+        slugField.cell?.isScrollable = false
+        slugField.cell?.wraps = false
         slugField.delegate = self
         slugField.setAccessibilityLabel("Link name")
         usedLabel.font = .token(.caption)
@@ -378,7 +381,9 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
         let textHeight = ceil(slugField.intrinsicContentSize.height)
         let prefixWidth = ceil(prefixLabel.cell?.cellSize.width ?? prefixLabel.intrinsicContentSize.width)
         let textY = field.minY + (controlHeight - textHeight) / 2
-        let usedWidth = usedLabel.isHidden ? 0 : ceil(usedLabel.intrinsicContentSize.width) + CGFloat(Space.m)
+        // A label's intrinsic width leaves its last glyph a fraction short
+        // ("Usec"); its cell size includes the padding the glyphs draw into.
+        let usedWidth = usedLabel.isHidden ? 0 : ceil(usedLabel.cell?.cellSize.width ?? usedLabel.intrinsicContentSize.width) + CGFloat(Space.m)
         place(prefixLabel, NSRect(x: field.minX + CGFloat(Space.m), y: textY, width: prefixWidth, height: textHeight))
         place(slugField, NSRect(x: field.minX + CGFloat(Space.m) + prefixWidth, y: textY,
                                 width: max(40, field.width - CGFloat(Space.m) * 2 - prefixWidth - usedWidth), height: textHeight))
