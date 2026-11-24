@@ -600,13 +600,13 @@ enum SettingsSelfChecks {
         }
         try expect(stray.isEmpty, "Settings created windows: \(stray.map { "\(type(of: $0))" })")
         if let dir = ProcessInfo.processInfo.environment["CONTINUUM_SETTINGS_STILLS_DIR"] {
-            try renderStills(to: URL(fileURLWithPath: dir))
+            try renderNotificationPaneStills(to: URL(fileURLWithPath: dir))
         }
     }
 
     /// Offscreen stills of the notifications-to-advanced panes in both
     /// appearances, for review. Only when `CONTINUUM_SETTINGS_STILLS_DIR` is set.
-    private static func renderStills(to directory: URL) throws {
+    private static func renderNotificationPaneStills(to directory: URL) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let states: [(name: String, pane: String, paired: Int, soundsOff: Bool)] = [
             ("sounds-on", "activityAndNotifications", 0, false), ("sounds-off", "activityAndNotifications", 0, true),
