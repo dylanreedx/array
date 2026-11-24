@@ -18,7 +18,7 @@ enum FilePreviewKind: Equatable {
         switch url.pathExtension.lowercased() {
         case "png", "jpg", "jpeg", "gif", "webp", "heic": self = .image
         case "pdf": self = .pdf
-        case "html", "htm": self = .web
+        case "html", "htm", "svg": self = .web
         case "md", "markdown": guard created else { return nil }; self = .document
         case "swift", "ts", "py", "js", "json", "sh": guard action == .add else { return nil }; self = .code
         default: return nil

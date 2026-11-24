@@ -43,10 +43,12 @@ enum FileUXTranscriptStills {
             public func write(_ data: Data, to url: URL) throws {}
         }
         """.utf8).write(to: code)
+        let svg = fixtures.appendingPathComponent("badge.svg")
+        try Data("<svg xmlns='http://www.w3.org/2000/svg' width='160' height='100'><rect width='160' height='100' fill='#3b5bdb'/><circle cx='80' cy='50' r='30' fill='white'/></svg>".utf8).write(to: svg)
         let turns = [
             Turn(prompt: "Write up what you found about how I open files.", reply: "I wrote the findings up.", files: [(report, .add)]),
-            Turn(prompt: "Render the drawer, the report and the landing page.", reply: "Here are the drawer, the report and the landing page.",
-                 files: [(png, .add), (pdf, .add), (html, .add)]),
+            Turn(prompt: "Render the drawer, write the report and draw the badge.", reply: "Here are the drawer, the report and the badge.",
+                 files: [(png, .write), (report, .write), (svg, .write)]),
             Turn(prompt: "Add the atomic writer.", reply: "The atomic writer is in.", files: [(code, .add)]),
         ]
         for dark in [true, false] {
@@ -100,18 +102,21 @@ enum FileUXTranscriptStills {
             for event in translator.translate(stream: [line]) { projection.ingest(event.withThreadId(thread)) }
             entries += projection.document.entries
             let scope = AgentToolDetailScope(agentID: "stills-agent", threadID: thread, turnID: "turn-\(index)", provider: "runtime")!
-            let itemID = AgentToolDetailID(stringLiteral: "write-\(index)")
-            let key = AgentToolDetailKey(scope: scope, providerItemID: itemID)
-            _ = await store.recordStart(AgentToolDetailStart(
-                identity: key, toolName: "write", affectedFiles: turn.files.map(\.0),
-                fileChanges: turn.files.map { .init(action: $0.1 == .add ? .add : .write, path: $0.0.lastPathComponent, addedLines: 24, removedLines: 0) }))
-            _ = await store.recordEnd(AgentToolDetailEnd(identity: key, status: .completed))
-            let block = AgentBlock(id: AgentNodeID(rawValue: "stills-diff-\(index)")!, revision: 1, kind: .diff,
-                                   payload: .diff(AgentDiffPayload(text: "", summary: "")))
-            let entry = AgentEntry(id: AgentNodeID(rawValue: "stills-diff-entry-\(index)")!, revision: 1, role: .assistant,
-                                   provenance: .providerItem(provider: "runtime", itemID: itemID.rawValue), blocks: [block])
-            _ = canvas.bindToolDetailIdentity(key, to: entry.id)
-            entries.append(entry)
+            // As the live app records it: one Write operation, and one entry, per file.
+            for (fileIndex, file) in turn.files.enumerated() {
+                let itemID = AgentToolDetailID(stringLiteral: "write-\(index)-\(fileIndex)")
+                let key = AgentToolDetailKey(scope: scope, providerItemID: itemID)
+                _ = await store.recordStart(AgentToolDetailStart(
+                    identity: key, toolName: "write", affectedFiles: [file.0],
+                    fileChanges: [.init(action: file.1 == .add ? .add : .write, path: file.0.lastPathComponent, addedLines: 24, removedLines: nil)]))
+                _ = await store.recordEnd(AgentToolDetailEnd(identity: key, status: .completed))
+                let block = AgentBlock(id: AgentNodeID(rawValue: "stills-diff-\(index)-\(fileIndex)")!, revision: 1, kind: .diff,
+                                       payload: .diff(AgentDiffPayload(text: "", summary: "Write")))
+                let entry = AgentEntry(id: AgentNodeID(rawValue: "stills-diff-entry-\(index)-\(fileIndex)")!, revision: 1, role: .assistant,
+                                       provenance: .providerItem(provider: "runtime", itemID: itemID.rawValue), blocks: [block])
+                _ = canvas.bindToolDetailIdentity(key, to: entry.id)
+                entries.append(entry)
+            }
         }
         let document = AgentDocument(version: 1, entries: entries)
         try canvas.enqueue(document: document, patch: AgentDocumentPatch(

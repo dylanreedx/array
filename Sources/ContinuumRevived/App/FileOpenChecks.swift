@@ -2384,6 +2384,8 @@ enum FileOpenChecks {
         try Data("# A report with a title long enough that it has to wrap onto a second line of the preview\n\nFirst paragraph of the report.\n".utf8).write(to: md)
         let html = checkout.appendingPathComponent("page.html")
         try Data("<html><body style='background:#123'><h1 style='color:white'>Hello</h1></body></html>".utf8).write(to: html)
+        let svg = checkout.appendingPathComponent("badge.svg")
+        try Data("<svg xmlns='http://www.w3.org/2000/svg' width='160' height='100'><rect width='160' height='100' fill='#c33'/><circle cx='80' cy='50' r='30' fill='white'/></svg>".utf8).write(to: svg)
         let swift = checkout.appendingPathComponent("Sources/Writer.swift")
         try Data("import Foundation\n\nstruct Writer {\n    func write() {}\n}\n".utf8).write(to: swift)
         let pdf = checkout.appendingPathComponent("doc.pdf")
@@ -2402,7 +2404,8 @@ enum FileOpenChecks {
         //    by path and modification time.
         let store = FilePreviewStore.shared
         store.resetForChecks()
-        let kinds: [(URL, FilePreviewKind)] = [(png, .image), (md, .document), (html, .web), (swift, .code), (pdf, .pdf)]
+        try expect(FilePreviewKind(url: svg, action: .write) == .web, "a created svg must get a preview, rendered as the page tile renders it")
+        let kinds: [(URL, FilePreviewKind)] = [(png, .image), (md, .document), (html, .web), (svg, .web), (swift, .code), (pdf, .pdf)]
         for (url, kind) in kinds {
             var ready = false
             let immediate = store.preview(url, kind: kind, dark: true) { ready = true }
@@ -2637,6 +2640,63 @@ enum FileOpenChecks {
             try expect(cover(1) == 1, "\(renderer): leaving restores the fade")
             print("file preview strip (\(renderer)): thumbnails for 5 kinds, click opens beside the agent, second click reveals, hover clears the fade")
         }
+        // 4. One turn that writes three files draws ONE Changes card with ONE strip,
+        //    not a card and a "Write" line per file. An edit of an existing file in
+        //    the same turn keeps its own card.
+        func groupedTurn() throws {
+            let store = AgentToolDetailStore()
+            let canvas = AgentTranscriptCanvasView(toolDetailStore: store)
+            canvas.frame = NSRect(x: 0, y: 0, width: 1_100, height: 640)
+            let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = canvas
+            window.orderFrontOffscreenForChecks()
+            try canvas.updateRenderContext(AgentRenderContext(actions: AgentRenderActions({ _ in }), tokens: .transcript, appearance: .dark))
+            try finishAsync {
+                let thread = "group-thread"
+                var projection = AgentTranscriptProjection(threadId: thread)
+                try projection.appendUserPrompt(id: AgentNodeID(rawValue: "group-user")!, text: "Make three files and tidy the writer.")
+                var entries = projection.document.entries
+                let scope = AgentToolDetailScope(agentID: "group-agent", threadID: thread, turnID: "turn-0", provider: "runtime")!
+                let operations: [(String, URL, AgentToolDetailObservation.FileAction)] = [
+                    ("shot", png, .write), ("report", md, .write), ("badge", svg, .write), ("writer", swift, .edit)]
+                for (name, url, action) in operations {
+                    let itemID = AgentToolDetailID(stringLiteral: "op-\(name)")
+                    let key = AgentToolDetailKey(scope: scope, providerItemID: itemID)
+                    _ = await store.recordStart(AgentToolDetailStart(
+                        identity: key, toolName: action == .edit ? "edit" : "write", affectedFiles: [url],
+                        fileChanges: [.init(action: action, path: url.lastPathComponent, addedLines: 4, removedLines: action == .edit ? 1 : nil)]))
+                    _ = await store.recordEnd(AgentToolDetailEnd(identity: key, status: .completed))
+                    let block = AgentBlock(id: AgentNodeID(rawValue: "group-diff-\(name)")!, revision: 1, kind: .diff,
+                                           payload: .diff(AgentDiffPayload(text: "", summary: action == .edit ? "Edit" : "Write")))
+                    let entry = AgentEntry(id: AgentNodeID(rawValue: "group-entry-\(name)")!, revision: 1, role: .assistant,
+                                           provenance: .providerItem(provider: "runtime", itemID: itemID.rawValue), blocks: [block])
+                    _ = canvas.bindToolDetailIdentity(key, to: entry.id)
+                    entries.append(entry)
+                }
+                let document = AgentDocument(version: 1, entries: entries)
+                try canvas.enqueue(document: document, patch: AgentDocumentPatch(
+                    fromVersion: 0, toVersion: 1, inserted: document.entries.flatMap(\.blocks).map(\.id)), final: true)
+                await canvas.qaAdoptStoreRecords()
+                await canvas.qaWaitForToolDetailRefresh()
+            }
+            let settle = Date().addingTimeInterval(20)
+            repeat {
+                canvas.flushPendingVisualUpdate(); canvas.layoutSubtreeIfNeeded()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            } while (canvas.qaFileThumbs.count < 3 || canvas.qaFileThumbs.contains { !$0.hasPicture }) && Date() < settle
+            let cards = canvas.qaChangesCards
+            let created = cards.filter { $0.files.allSatisfy { $0.action == .write } }
+            try expect(created.count == 1, "three Writes in one turn must make one Changes card, got \(created.count) (of \(cards.count) cards)")
+            try expect(created.first?.files.map(\.displayName).count == 3, "the one card must hold all three files, got \(created.first?.files.map(\.displayName) ?? [])")
+            try expect(created.first?.summary == nil, "the grouped card must not carry a per-operation \"Write\" line")
+            try expect(cards.count == 2 && cards.contains { $0.files.contains { $0.action == .edit } },
+                       "an edit to an existing file keeps its own card, got \(cards.count) cards")
+            let thumbs = canvas.qaFileThumbs
+            try expect(thumbs.count == 3, "the one strip must hold three thumbnails (png, md, svg), got \(thumbs.count)")
+            try expect(thumbs.allSatisfy(\.hasPicture), "every thumbnail, the svg included, must be a real picture")
+            print("file preview strip: three Writes in one turn draw one Changes card with three thumbnails; the edit keeps its card")
+        }
+        try groupedTurn()
         try exercise(drawn: true)
         try exercise(drawn: false)
         print("file preview strip: thumbnails cached by mtime; opens in Array on both transcript renderers")

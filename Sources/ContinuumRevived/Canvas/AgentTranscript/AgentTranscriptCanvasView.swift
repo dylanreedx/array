@@ -888,6 +888,11 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             }
             block.children.forEach(collect)
         }
+        // A created file joins its turn's one Changes card, which may sit in an
+        // earlier entry: the full planner owns every change to a diff block.
+        if (Array(suffix) + [oldTail]).contains(where: { $0.blocks.contains { if case .diff = $0.payload { return true }; return false } }) {
+            return false
+        }
         for entry in suffix {
             suffixIDs.insert(entry.id)
             entry.blocks.forEach(collect)
@@ -999,6 +1004,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             // A delegation is one row: its superseded tool row and the
             // chips that follow a run's first chip draw nowhere else.
             if chipFold.superseded.contains(block.id) || chipFold.leaderByFollower[block.id] != nil { return nil }
+            if fileFold.followers.contains(block.id) { return nil }
             if let followers = chipFold.followersByLeader[block.id] {
                 return .block(Self.presentedChipRun(block, followers: followers), entry)
             }
@@ -1038,6 +1044,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         var previousEntryID: AgentNodeID?
         let entries = document.entries
         chipFold = Self.foldDelegations(entries)
+        fileFold = foldFileCreations(entries)
         entryPlacementStarts.removeAll(keepingCapacity: true)
         historicalChipSources.removeAll(keepingCapacity: true)
         earliestUndatedReasoning = nil
@@ -1365,6 +1372,78 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         return presented
     }
 
+    // MARK: Created files
+
+    /// One turn's created files share one Changes card and one strip, as the
+    /// approved stills draw it, instead of a card per Write. The turn's first
+    /// file-creating card carries every created file; the later ones draw
+    /// nowhere else. Edits to existing files keep their own cards.
+    struct FileFold {
+        /// A turn's first created-file card → that card with every created file.
+        var merged: [AgentNodeID: AgentBlock] = [:]
+        var followers: Set<AgentNodeID> = []
+    }
+
+    private var fileFold = FileFold()
+
+    private static func isCreation(_ files: [AgentDiffFileSummary]) -> Bool {
+        !files.isEmpty && files.allSatisfy { $0.action == .add || $0.action == .write }
+    }
+
+    private func foldFileCreations(_ entries: [AgentEntry]) -> FileFold {
+        var fold = FileFold()
+        guard entries.contains(where: { $0.blocks.contains { if case .diff = $0.payload { return true }; return false } }) else {
+            return fold
+        }
+        var turn: [AgentBlock] = []
+        func flush() {
+            defer { turn.removeAll() }
+            guard let leader = turn.first, case var payload = leader.payload, case .diff(var diff) = payload else { return }
+            var files: [AgentDiffFileSummary] = []
+            var slot: [String: Int] = [:]
+            var identity = Hasher()
+            var canOpenReview = false
+            for block in turn {
+                guard case let .diff(member) = block.payload else { continue }
+                identity.combine(block.id); identity.combine(block.revision)
+                canOpenReview = canOpenReview || member.canOpenReview
+                for file in member.files {
+                    let key = file.fileURL?.path ?? file.displayName
+                    if let index = slot[key] { files[index] = file } else { slot[key] = files.count; files.append(file) }
+                }
+                if block.id != leader.id { fold.followers.insert(block.id) }
+            }
+            diff.files = files
+            diff.summary = nil
+            diff.text = ""
+            diff.canOpenReview = canOpenReview
+            diff.presentedFilesArePending = false
+            payload = .diff(diff)
+            var merged = leader
+            merged.payload = payload
+            merged.revision = UInt64(bitPattern: Int64(identity.finalize()))
+            fold.merged[leader.id] = merged
+        }
+        for entry in entries {
+            if entry.role == .user { flush(); continue }
+            if entry.role == .reasoning { continue }
+            for block in entry.blocks {
+                guard case .diff = block.payload else { continue }
+                let presented = toolDetail.presented(block, in: entry)
+                guard case let .diff(diff) = presented.payload, Self.isCreation(diff.files) else { continue }
+                turn.append(presented)
+            }
+        }
+        flush()
+        return fold
+    }
+
+    /// The block as the transcript draws it: a turn's merged created-file card
+    /// when it leads one, else its own presentation from the detail store.
+    func presentedBlock(_ block: AgentBlock, in entry: AgentEntry) -> AgentBlock {
+        fileFold.merged[block.id] ?? toolDetail.presented(block, in: entry)
+    }
+
     var qaSupersededBlockIDs: Set<AgentNodeID> { chipFold.superseded }
     var qaChipRunLeaderByFollower: [AgentNodeID: AgentNodeID] { chipFold.leaderByFollower }
 
@@ -1378,7 +1457,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             for block in entry.blocks { hasher.combine(renderContext.actions.presentationRevision(blockID: block.id)) }
             return (entry.revision, nil, hasher.finalize())
         case let .block(block, entry):
-            let presented = toolDetail.presented(block, in: entry)
+            let presented = presentedBlock(block, in: entry)
             combineLiveVariant(of: presented, into: &hasher)
             switch presented.payload {
             case .toolCall, .diff: return (block.revision, presented.payload, hasher.finalize())
@@ -1725,6 +1804,14 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         // The ease-out the sidebar's hover card uses.
         let eased = 1 - (1 - t) * (1 - t)
         return hover.from + (hover.to - hover.from) * CGFloat(eased)
+    }
+
+    /// Every Changes card the transcript draws, in document order.
+    var qaChangesCards: [AgentDiffPayload] {
+        qaPlaced.compactMap { item in
+            if case let .diff(payload)? = item.block.presented { return payload }
+            return nil
+        }
     }
 
     /// Every drawn thumbnail in document order: its hit centre in view

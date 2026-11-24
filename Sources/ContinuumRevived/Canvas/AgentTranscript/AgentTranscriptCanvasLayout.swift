@@ -31,7 +31,7 @@ extension AgentTranscriptCanvasView {
     func layoutUnit(_ unit: Unit, width: CGFloat, signature: Int, variant: Int) -> LaidBlock {
         switch unit {
         case let .block(block, entry):
-            let presented = toolDetail.presented(block, in: entry)
+            let presented = presentedBlock(block, in: entry)
             let body = body(for: presented, role: entry.role, width: width)
             let presentedPayload: AgentBlockPayload?
             switch presented.payload {
