@@ -164,6 +164,34 @@ func runAgentAccountManageChecks() async throws {
                     && loaded.defaultLabels.isEmpty,
                 "an accounts.json from before rename must still load, got \(loaded)")
 
+    // 2026-11-23: sixteen "Work N" Codex accounts, none ever signed in, sat in
+    // the Dev store. "Add account" saves the account before the CLI's login
+    // runs, and a cancelled or failed login left it behind.
+    let stray = try supervisor.addAccount(harness: .codex, label: supervisor.nextAccountLabel(for: .codex))
+    let strayFolder = supervisor.accountStore.root.appendingPathComponent(stray.id, isDirectory: true)
+    try require(fm.fileExists(atPath: strayFolder.path), "the saved account must have its folder before sign-in")
+    try require(!supervisor.abandonSignIn(accountId: stray.id, exitCode: 0)
+                    && supervisor.accounts.contains { $0.id == stray.id },
+                "a sign-in that exited cleanly must keep its account, the login may not be read yet")
+    try require(!supervisor.abandonSignIn(accountId: work.id, exitCode: 1)
+                    && supervisor.accounts.contains { $0.id == work.id },
+                "a signed-in account must survive a failed re-sign-in")
+    try require(supervisor.abandonSignIn(accountId: stray.id, exitCode: 1), "a failed sign-in must drop its account")
+    try require(!supervisor.accounts.contains { $0.id == stray.id }
+                    && !AgentAccountStore(applicationSupportDirectory: support).load().accounts.contains { $0.id == stray.id }
+                    && !fm.fileExists(atPath: strayFolder.path),
+                "an abandoned sign-in must leave no account, no accounts.json row and no folder")
+    // Fixture accounts a check mints land in the check's own folder, never the store the binary defaulted to.
+    let usageRoot = root.appendingPathComponent("usage-live", isDirectory: true)
+    let usageSupervisor = AgentSupervisor(
+        store: AgentStore(applicationSupportDirectory: root.appendingPathComponent("usage-default", isDirectory: true)),
+        makeRunner: AgentSupervisor.productionRunner,
+        submissionRecoveryStore: AgentComposerDraftStore(applicationSupportDirectory: root, debounceInterval: 0))
+    defer { usageSupervisor.stopAll() }
+    try SidebarDogfoodChecks.makeUsageLive(usageSupervisor, harness: .codex, root: usageRoot, secondLogin: true)
+    try require(!fm.fileExists(atPath: root.appendingPathComponent("usage-default/accounts.json").path),
+                "makeUsageLive must not write accounts.json into the supervisor's default store")
+
     if let capture = ProcessInfo.processInfo.environment["CONTINUUM_ACCOUNT_MANAGE_CAPTURE_DIR"], !capture.isEmpty {
         let directory = URL(fileURLWithPath: capture, isDirectory: true)
         try fm.createDirectory(at: directory, withIntermediateDirectories: true)

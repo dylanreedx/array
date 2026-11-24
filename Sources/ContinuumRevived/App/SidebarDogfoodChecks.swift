@@ -128,6 +128,8 @@ enum SidebarDogfoodChecks {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         }
         supervisor.accountUsageReader = { _ in nil }
+        // Accounts added below go in this check's folder, never the channel's own store.
+        supervisor.qaUseAccountStore(under: folders)
         func read(_ accountId: String, org: String, used: Double) {
             supervisor.applyAccountUsageReading(
                 .init(identity: AgentAccountIdentity(harness: harness, email: "\(org)@example.test",

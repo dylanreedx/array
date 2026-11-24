@@ -3314,7 +3314,7 @@ final class AgentSupervisor {
 
     /// Saved logins and the account each CLI uses, beside the agent store (so
     /// channel-split, and a check's temp store gets its own).
-    private lazy var accountStore = AgentAccountStore(
+    private(set) lazy var accountStore = AgentAccountStore(
         applicationSupportDirectory: store.layout.applicationSupportDirectory)
     private lazy var accountState: AgentAccountStore.State = accountStore.load() {
         didSet { quotaObservationIndexDirty = true }
@@ -3560,6 +3560,38 @@ final class AgentSupervisor {
         accountState = state
         NotificationCenter.default.post(name: Self.accountUsageDidChangeNotification, object: self)
         return account
+    }
+
+    /// A sign-in terminal ended without a login: the account `addAccount` saved
+    /// for it would otherwise stay forever as a "Work N" nobody can sign in to.
+    /// Removes it, and its folder, only when it is an added account that is not
+    /// in use, has no login read from it, and no running agent holds it.
+    /// A clean exit is left alone: the login may not have been read yet.
+    @discardableResult
+    func abandonSignIn(accountId: String, exitCode: Int32?) -> Bool {
+        guard exitCode != 0,
+              let account = accountState.accounts.first(where: { $0.id == accountId }), !account.isDefault,
+              activeAccount(for: account.harness).id != accountId,
+              accountIdentities[accountId] == nil,
+              !runnerAccounts.values.contains(where: { $0.id == accountId }) else { return false }
+        var state = accountState
+        state.accounts.removeAll { $0.id == accountId }
+        state.active = state.active.filter { $0.value != accountId }
+        guard (try? accountStore.save(state)) != nil else { return false }
+        accountState = state
+        signedOutAccounts.remove(accountId)
+        let folder = accountStore.root.appendingPathComponent(accountId, isDirectory: true)
+        try? FileManager.default.removeItem(at: folder)
+        NotificationCenter.default.post(name: Self.accountUsageDidChangeNotification, object: self)
+        return true
+    }
+
+    /// A check's own account store, so accounts it adds never land in the
+    /// channel's real `accounts.json` (a bare check binary defaults to the Dev
+    /// store).
+    func qaUseAccountStore(under directory: URL) {
+        accountStore = AgentAccountStore(applicationSupportDirectory: directory)
+        accountState = accountStore.load()
     }
 
     /// "Work", then "Work 2": the label a new account of a CLI gets.

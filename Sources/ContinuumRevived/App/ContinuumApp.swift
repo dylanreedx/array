@@ -16879,6 +16879,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             let previous = runtime.onRuntimeExited
             runtime.onRuntimeExited = { [weak self] runtimeId, exitCode in
                 previous?(runtimeId, exitCode)
+                // A cancelled or failed login leaves no account behind.
+                if self?.agentSupervisor.abandonSignIn(accountId: account.id, exitCode: exitCode) == true { return }
                 // Who signed in, read straight away rather than on the next poll.
                 self?.agentSupervisor.refreshAccountUsage(account: account, minimumInterval: 0)
             }
