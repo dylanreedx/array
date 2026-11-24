@@ -1754,6 +1754,19 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
         if case let .external(reason) = kind {
             showRichMessage(reason); observeRichContent(); return
         }
+        if case .video = kind {
+            // Streamed from the file itself, never decoded into memory, so it
+            // skips the snapshot pipeline (and its refresh observation).
+            let body = FileVideoRenderer(url: URL(fileURLWithPath: path))
+            body.onRevisionChange = { [weak self] in self?.bumpSurfaceEpoch() }
+            contentLoad = nil
+            renderer = body
+            promoteForIncomingFocus()
+            rebuildEditorShell(documentBody: body.view)
+            body.setVisible(window != nil)
+            bumpSurfaceEpoch()
+            return
+        }
         showMessage("Preparing read-only preview…")
         let generation = loadGeneration
         // These two OS aliases are fixed system locations, not user-controlled
@@ -1779,6 +1792,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
             let body: any FileTileRenderer
             switch load.payload {
             case let .image(document): body = FileImageRenderer(document: document)
+            case let .pdf(document): body = FilePDFRenderer(document: document)
             case let .table(document):
                 let viewerLease = try FileContentBudget.shared.reserve(32 * 1_024 * 1_024)
                 let grid = DelimitedGridRenderer(source: RetainedDelimitedSource(document: document, owner: load, viewerLease: viewerLease),
@@ -1834,7 +1848,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     }
 
     private func observeRichContent() {
-        guard window != nil, richKind != nil, contentObserver == nil, let filePath else { return }
+        guard window != nil, richKind != nil, richKind != .video, contentObserver == nil, let filePath else { return }
         contentObserver = FileContentObservation.shared.observe(
             path: filePath, stamp: observedStamp ?? .init(path: filePath)) { [weak self] in
                 self?.scheduleRichRefresh()

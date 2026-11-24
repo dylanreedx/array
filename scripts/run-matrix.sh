@@ -2781,6 +2781,7 @@ run_app_check .build/debug/Array --file-image-check
 run_app_check .build/debug/Array --file-tile-zoom-check
 run_app_check .build/debug/Array --file-data-grid-check
 run_app_check .build/debug/Array --file-formats-scene-check
+run_app_check .build/debug/Array --file-surface-routing-check
 run_app_check .build/debug/Array --editor-navigation-check
 # A transcript file link resolves against its source checkout/zone, canonicalizes
 # to one tile, preserves line reveal, and records/draws multiple referring agents.

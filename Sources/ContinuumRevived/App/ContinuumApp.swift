@@ -3288,6 +3288,14 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        if CommandLine.arguments.contains("--file-surface-routing-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do { try await FileSurfaceRoutingChecks.run(); exit(0) }
+                catch { fputs("FAIL: file-surface-routing-check: \(error)\n", stderr); exit(1) }
+            }
+            NSApp.run()
+        }
         if CommandLine.arguments.contains("--file-data-grid-check") {
             _ = NSApplication.shared
             Task { @MainActor in

@@ -177,6 +177,7 @@ check --file-markdown-perf-check
 check --file-markdown-preview-check
 check --file-markdown-scroller-check
 check --file-open-active-context-check
+check --file-surface-routing-check
 check --file-tile-zoom-check
 check --file-tree-boot-persistence-check
 check --file-tree-hardening-check
@@ -733,6 +734,7 @@ leg run_app_check .build/debug/Array --fake-cli-lifecycle-check
 leg run_app_check .build/debug/Array --file-card-check
 leg run_app_check .build/debug/Array --file-data-grid-check
 leg run_app_check .build/debug/Array --file-formats-scene-check
+leg run_app_check .build/debug/Array --file-surface-routing-check
 leg run_app_check .build/debug/Array --file-image-check
 leg run_app_check .build/debug/Array --file-initial-load-check
 leg run_app_check .build/debug/Array --file-markdown-perf-check

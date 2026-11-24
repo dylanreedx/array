@@ -1,12 +1,13 @@
 import AppKit
 import Darwin
+import PDFKit
 import UniformTypeIdentifiers
 import ContinuumRevivedCore
 
 /// Selection is separate from loading and presentation. New backends add one
 /// factory case without changing canvas identity, navigation or text saving.
 enum FileContentKind: Equatable, Sendable {
-    case text, image, delimited(UInt8), workbook, external(String)
+    case text, image, delimited(UInt8), workbook, external(String), pdf, video
     static func select(path: String) -> Self {
         let ext = URL(fileURLWithPath: path).pathExtension.lowercased()
         switch ext {
@@ -16,6 +17,8 @@ enum FileContentKind: Equatable, Sendable {
         case "xls", "xlsb", "xlsm", "ods", "numbers":
             return .external("This workbook format requires an external application. Array’s read-only data viewer currently supports XLSX, CSV and TSV.")
         case "svg", "html", "htm": return .text
+        case "pdf": return .pdf
+        case "mp4", "m4v", "mov": return .video
         default:
             if UTType(filenameExtension: ext)?.conforms(to: .image) == true { return .image }
             return .text
@@ -70,6 +73,7 @@ enum FileContentPayload: @unchecked Sendable {
     case image(FileImageDocument)
     case table(DelimitedFileDocument)
     case workbook(XLSXDocument)
+    case pdf(PDFDocument)
 }
 
 final class FileContentLoad: @unchecked Sendable {
@@ -184,7 +188,7 @@ final class FileContentCoordinator: @unchecked Sendable {
                 let sourceLimit: Int
                 switch kind {
                 case .delimited: sourceLimit = 256 * 1_024 * 1_024
-                case .image, .workbook: sourceLimit = 64 * 1_024 * 1_024
+                case .image, .workbook, .pdf: sourceLimit = 64 * 1_024 * 1_024
                 default: throw FileContentFailure.unsupported
                 }
                 let injectFailure = cacheLock.withLock { qaCaptureFailures.remove(qaPath) != nil }
@@ -240,6 +244,12 @@ final class FileContentCoordinator: @unchecked Sendable {
                     case .workbook:
                         let document = try XLSXDocument.load(snapshot: snapshot, cancelled: { request.isCancelled })
                         payload = .workbook(document)
+                    case .pdf:
+                        guard let document = PDFDocument(url: snapshot.url), document.pageCount > 0 else {
+                            throw FileContentFailure.unsupported
+                        }
+                        reservation.reduce(to: snapshot.byteCount * 2)
+                        payload = .pdf(document)
                     default: throw FileContentFailure.unsupported
                     }
                     guard !request.isCancelled else { throw FileContentFailure.cancelled }

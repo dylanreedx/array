@@ -2989,6 +2989,15 @@ final class TileSpawner {
         spawnFileImpl(location: location, title: title, at: worldPoint, beside: anchorTileId, targetZoneId: targetZoneId)
     }
 
+    /// Local web pages and SVGs that exist on disk. A missing file stays a file
+    /// tile so it can say "File not found".
+    static func opensInBrowserTile(path: String) -> Bool {
+        let ext = URL(fileURLWithPath: path).pathExtension.lowercased()
+        guard ["html", "htm", "svg"].contains(ext) else { return false }
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && !isDirectory.boolValue
+    }
+
     /// Gap between an anchor tile and the file tile docked beside it.
     static var anchoredFileGap: Double { TileGapResolver.resolvedGap() }
 
@@ -3023,6 +3032,20 @@ final class TileSpawner {
             ?? canvasView.activeProjectZonePlacement?.zoneId
         if let existing = canvasView.allWorkspaceTiles().first(where: { $0.kind == .file && ($0.metadata.documentLocation?.path ?? $0.metadata.filePath) == canonicalPath }) {
             return .alreadyOpen(tileId: existing.id)
+        }
+
+        // A web page is meant to be seen, not read as source: html and svg open
+        // in a browser tile on the file's URL, placed exactly as a file tile would be.
+        if Self.opensInBrowserTile(path: canonicalPath) {
+            let fileURL = URL(fileURLWithPath: canonicalPath).absoluteString
+            if let existing = canvasView.allWorkspaceTiles().first(where: { $0.kind == .browser && $0.metadata.url == fileURL }) {
+                return .alreadyOpen(tileId: existing.id)
+            }
+            switch spawnBrowser(url: fileURL, at: worldPoint, beside: anchorTileId, targetZoneId: targetZoneId) {
+            case .spawned(let runtime): return .spawned(tileId: runtime.tileId)
+            case .invalidURL: return .invalidPath
+            case .failure(let error): return .failure(error)
+            }
         }
 
         let size = CanvasEngine.defaultFrame(for: .file)

@@ -481,7 +481,14 @@ final class WKWebViewBrowserRuntime: NSObject, BrowserRuntime {
         }
         loadingState = .loading(progress: 0)
         onStateChange?()
-        webView.load(URLRequest(url: url))
+        if url.isFileURL {
+            // `load(_:)` grants a local page no read access at all, so its own
+            // stylesheet, script and images never load. Give it the folder it
+            // sits in, and nothing wider.
+            webView.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+        } else {
+            webView.load(URLRequest(url: url))
+        }
     }
 
     func goBack() { webView.goBack() }
