@@ -228,6 +228,8 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         paletteView?.layoutSubtreeIfNeeded()
         return (tableView?.frame.height ?? 0, tableView?.enclosingScrollView?.contentView.bounds.height ?? 0)
     }
+    var panelViewForQA: NSView? { paletteView }
+    var panelHeightForQA: CGFloat { paletteView?.frame.height ?? 0 }
     var isChoosingFileForQA: Bool { navigationLevel == .files }
     var fileRowsForQA: [PaletteFileRow] { displayEntries.compactMap { if case let .file(row) = $0 { return row }; return nil } }
     var sectionTitlesForQA: [String] { displayEntries.compactMap { if case let .section(title) = $0 { return title }; return nil } }
@@ -1604,15 +1606,19 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     var fileEmptyTextForQA: String? { fileEmptyLabel.flatMap { $0.isHidden ? nil : $0.stringValue } }
 
     /// Grow or shrink the surface to its rows, as `show` sizes it.
+    /// What the inset table style adds around its rows, measured against the table's own frame.
+    private static let tableStyleInset: CGFloat = 8
+
     private func resizeForEntries() {
         guard let paletteView, let host = paletteView.superview else { return }
-        // The panel is the chrome around the clip view (measured, not guessed) plus the
-        // table's own height, so a short list fits with nothing left to scroll.
+        // The panel is the chrome around the clip view (measured after layout; the scroll view has content insets)
+        // plus the rows. The table itself is stretched to the clip's height, so its frame
+        // cannot be read back as the rows' height; the last row's rect can.
         paletteView.layoutSubtreeIfNeeded()
-        let clipHeight = tableView?.enclosingScrollView?.contentView.bounds.height ?? 0
-        let chrome = paletteView.frame.height - clipHeight
-        let tableHeight = displayEntries.isEmpty ? 2 * CommandCenterItemCell.rowHeight : (tableView?.frame.height ?? 0)
-        let contentHeight = chrome + tableHeight
+        let chrome = paletteView.frame.height - (tableView?.enclosingScrollView?.contentView.bounds.height ?? 0)
+        let rows = displayEntries.isEmpty ? 2 * CommandCenterItemCell.rowHeight
+            : (tableView.map { $0.rect(ofRow: displayEntries.count - 1).maxY + $0.intercellSpacing.height + Self.tableStyleInset } ?? 0)
+        let contentHeight = chrome + rows
         let height = min(520, contentHeight, max(0, host.bounds.height - 32))
         let top = paletteView.frame.maxY
         paletteView.frame = NSRect(x: paletteView.frame.minX, y: top - height, width: paletteView.frame.width, height: height)

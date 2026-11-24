@@ -21,6 +21,16 @@ enum PaletteOpenFileChecks {
         }
     }
 
+    /// Optional: CONTINUUM_PALETTE_SHOTS=<dir> saves the real panel's pixels for a human to look at.
+    private static func shot(_ palette: LaunchProfilePalette, _ name: String) {
+        guard let dir = ProcessInfo.processInfo.environment["CONTINUUM_PALETTE_SHOTS"], let view = palette.panelViewForQA else { return }
+        view.layoutSubtreeIfNeeded()
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+        view.cacheDisplay(in: view.bounds, to: rep)
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+        try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: dir).appendingPathComponent(name + ".png"))
+    }
+
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
         if !condition() { throw Failure(description: message) }
     }
@@ -49,6 +59,7 @@ enum PaletteOpenFileChecks {
         let docs = f.pbRoot.appendingPathComponent("docs", isDirectory: true)
         try FileManager.default.createDirectory(at: docs, withIntermediateDirectories: true)
         try Data("handbook\n".utf8).write(to: docs.appendingPathComponent("handbook.txt"))
+        for n in 1...5 { try Data("x\n".utf8).write(to: docs.appendingPathComponent("zebrafile-\(n).txt")) }
         delegate.qaAgentSupervisor.agentMadeFiles.record(
             [.init(action: .write, path: "outputs/q3-report.html")],
             agent: f.agentId.rawValue, checkoutRoot: f.pbRoot.path)
@@ -114,6 +125,25 @@ enum PaletteOpenFileChecks {
         // A short list must fit its clip view exactly, or a scroller shows with nothing to scroll.
         var heights = palette.listHeightsForQA
         try expect(heights.document <= heights.clip + 0.5, "one-result list overflows its clip view: document \(heights.document) > clip \(heights.clip)")
+        // The panel follows its rows: 5 results, then 1, then 5 again.
+        palette.typeForQA("zebrafile")
+        try pump(palette) { palette.fileRowsForQA.filter { $0.name.hasPrefix("zebrafile") }.count == 5 }
+        let tall = palette.panelHeightForQA
+        shot(palette, "live-5-rows")
+        heights = palette.listHeightsForQA
+        try expect(heights.document <= heights.clip + 0.5 || tall >= 520, "five-result list overflows: \(heights)")
+        palette.typeForQA("hanbook")
+        try pump(palette) { palette.fileRowsForQA.map(\.name) == ["handbook.txt"] }
+        let short = palette.panelHeightForQA
+        shot(palette, "live-1-row")
+        heights = palette.listHeightsForQA
+        try expect(tall - short >= 2 * 46, "panel must shrink by at least two rows from five results to one, \(tall) -> \(short)")
+        try expect(abs(heights.document - heights.clip) <= 0.5, "one-result list must fit its clip exactly (no empty list, no scroller): \(heights)")
+        palette.typeForQA("zebrafile")
+        try pump(palette) { palette.fileRowsForQA.filter { $0.name.hasPrefix("zebrafile") }.count == 5 }
+        try expect(abs(palette.panelHeightForQA - tall) < 0.5, "panel must grow back to \(tall), got \(palette.panelHeightForQA)")
+        palette.typeForQA("hanbook")
+        try pump(palette) { palette.fileRowsForQA.map(\.name) == ["handbook.txt"] }
         // A file at the project root is filed under the project's name, not "./".
         palette.typeForQA("notes.md")
         try pump(palette) { palette.fileRowsForQA.contains { $0.name == "notes.md" } }
@@ -124,6 +154,7 @@ enum PaletteOpenFileChecks {
         // A query nothing matches says so, in the footer's own type.
         palette.typeForQA("qzxjwvk")
         try pump(palette) { palette.fileEmptyTextForQA != nil }
+        shot(palette, "live-no-match")
         try expect(palette.fileEmptyTextForQA == "No files match “qzxjwvk”" && palette.fileRowsForQA.isEmpty,
                    "no match must say so, got \(String(describing: palette.fileEmptyTextForQA))")
         palette.typeForQA("hanbook")
