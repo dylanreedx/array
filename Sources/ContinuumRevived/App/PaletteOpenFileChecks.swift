@@ -59,6 +59,10 @@ enum PaletteOpenFileChecks {
         let docs = f.pbRoot.appendingPathComponent("docs", isDirectory: true)
         try FileManager.default.createDirectory(at: docs, withIntermediateDirectories: true)
         try Data("handbook\n".utf8).write(to: docs.appendingPathComponent("handbook.txt"))
+        let strip = outputs.appendingPathComponent("strip", isDirectory: true)
+        try FileManager.default.createDirectory(at: strip, withIntermediateDirectories: true)
+        try Data("<svg xmlns=\"http://www.w3.org/2000/svg\"/>".utf8).write(to: strip.appendingPathComponent("zbadge.svg"))
+        try Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]).write(to: outputs.appendingPathComponent("zshot.png"))
         for n in 1...5 { try Data("x\n".utf8).write(to: docs.appendingPathComponent("zebrafile-\(n).txt")) }
         delegate.qaAgentSupervisor.agentMadeFiles.record(
             [.init(action: .write, path: "outputs/q3-report.html")],
@@ -125,6 +129,12 @@ enum PaletteOpenFileChecks {
         // A short list must fit its clip view exactly, or a scroller shows with nothing to scroll.
         var heights = palette.listHeightsForQA
         try expect(heights.document <= heights.clip + 0.5, "one-result list overflows its clip view: document \(heights.document) > clip \(heights.clip)")
+        // Open file searches every file, images and svg included (the composer's @ does not).
+        for (query, expected) in [("zbadge", "zbadge.svg"), ("zshot", "zshot.png")] {
+            palette.typeForQA(query)
+            try pump(palette) { palette.fileRowsForQA.contains { $0.name == expected } }
+            try expect(palette.fileRowsForQA.first { $0.name == expected }?.absolutePath?.hasSuffix(expected) == true, "\(expected) must be found by '\(query)'")
+        }
         // The panel follows its rows: 5 results, then 1, then 5 again.
         palette.typeForQA("zebrafile")
         try pump(palette) { palette.fileRowsForQA.filter { $0.name.hasPrefix("zebrafile") }.count == 5 }

@@ -9336,7 +9336,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var agentActivityChangeBase = ActivityLogSnapshot.empty
     private var profilePalette: LaunchProfilePalette?
     private var paletteContextTileId: UUID?
-    private let paletteFileIndex = AgentFileIndex()
+    private let paletteFileIndex = AgentFileIndex(includesAllFiles: true)
     /// Where "Copy file" writes and what "Reveal in Finder" calls: injectable so a check never touches the user's pasteboard or Finder.
     var paletteFilePasteboard: NSPasteboard = .general
     var paletteRevealInFinder: ([URL]) -> Void = { NSWorkspace.shared.activateFileViewerSelecting($0) }

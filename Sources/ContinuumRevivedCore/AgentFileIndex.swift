@@ -1,4 +1,5 @@
 import Foundation
+import UniformTypeIdentifiers
 
 public struct AgentFileIndexEntry: Equatable, Sendable {
     public let relativePath: String
@@ -128,6 +129,9 @@ public actor AgentFileIndex {
     private let entryLimit: Int
     private let resultLimit: Int
     private let pathDiscovery: PathDiscovery?
+    /// True for the ⌘K Open file step: every regular file, images and svg included. The
+    /// composer's `@` menu keeps its referenceable-only rule (images take the attachment path).
+    private let includesAllFiles: Bool
     /// Where the listings live: shared by every production index, private to
     /// one built with its own discovery, whose listing is its own.
     private let listings: Listings
@@ -138,12 +142,15 @@ public actor AgentFileIndex {
     public init(
         entryLimit: Int = 50_000,
         resultLimit: Int = 50,
-        pathDiscovery: PathDiscovery? = nil
+        pathDiscovery: PathDiscovery? = nil,
+        includesAllFiles: Bool = false
     ) {
+        self.includesAllFiles = includesAllFiles
         self.entryLimit = max(1, entryLimit)
         self.resultLimit = max(1, resultLimit)
         self.pathDiscovery = pathDiscovery
-        self.listings = pathDiscovery == nil ? .shared : Listings()
+        // An all-files listing must not be shared with the referenceable-only one.
+        self.listings = pathDiscovery == nil && !includesAllFiles ? .shared : Listings()
     }
 
     deinit {
@@ -310,7 +317,7 @@ public actor AgentFileIndex {
     private func indexedEntry(relativePath: String, fileURL: URL, rootPath: String, isDirectory: Bool) -> Indexed? {
         // The lookup caches resource values on `fileURL`; the entry keeps only
         // its path, so that cache goes when the URL does.
-        guard isDirectory || AgentFileReferenceRules.referenceableContentType(for: fileURL) != nil else { return nil }
+        guard isDirectory || includesAllFiles || AgentFileReferenceRules.referenceableContentType(for: fileURL) != nil else { return nil }
         return Indexed(
             entry: AgentFileIndexEntry(
                 relativePath: isDirectory ? relativePath + "/" : relativePath,
@@ -346,7 +353,8 @@ public actor AgentFileIndex {
         if entry.isDirectory {
             payload = .directory(DirectoryNavigationTarget(directoryURL: entry.fileURL))
         } else {
-            guard let contentType = AgentFileReferenceRules.referenceableContentType(for: entry.fileURL) else { return nil }
+            guard let contentType = AgentFileReferenceRules.referenceableContentType(for: entry.fileURL)
+                    ?? (includesAllFiles ? (UTType(filenameExtension: entry.fileURL.pathExtension) ?? .data) : nil) else { return nil }
             payload = .file(AgentPromptFileReference(
                 displayName: entry.fileURL.lastPathComponent,
                 contentType: contentType.identifier,
