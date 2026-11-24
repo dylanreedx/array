@@ -581,6 +581,10 @@ enum SettingsSelfChecks {
                    && openedSettings[0].absoluteString.hasPrefix("x-apple.systempreferences:com.apple.Notifications-Settings.extension?id="),
                    "Open Notification Settings must deep-link to Notifications › Array, got \(openedSettings)")
         try expect(requestedAuthorization == 0, "a denied row must not ask again: macOS never re-prompts")
+        let settingsHandler = NSWorkspace.shared.urlForApplication(toOpen: MacNotificationPermission.settingsURL)
+            .flatMap { Bundle(url: $0)?.bundleIdentifier }
+        try expect(settingsHandler == "com.apple.systempreferences",
+                   "the deep link must open System Settings, resolved to \(settingsHandler ?? "nothing")")
         bannerStatus = .allowed
         becomeActive()
         try expect(model.renderedTexts[bannerRow] == nil, "once banners are allowed the row must go on its own")

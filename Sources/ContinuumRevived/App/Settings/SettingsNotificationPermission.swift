@@ -75,10 +75,10 @@ struct SettingsNotificationPermissionSection: View {
             let denied = status == .denied
             let detail = denied
                 ? "Array can’t show a banner when an agent needs you while you’re in another app."
-                : "Array shows a banner when an agent needs you while you’re in another app."
+                : "Lets Array show a banner when an agent needs you while you’re in another app."
             Section {
                 StatusRow(title: "Notifications", status: denied ? "Off" : "Not set up", symbol: "bell.slash",
-                          tone: .neutral, detail: detail,
+                          tone: .warning, detail: detail,
                           actionTitle: denied ? "Open Notification Settings" : "Allow Notifications…",
                           action: { denied ? model.openNotificationSettings() : model.requestNotifications() })
                     .settingsRenderedText(Self.textID, denied ? "denied" : "notDetermined", model: model)
