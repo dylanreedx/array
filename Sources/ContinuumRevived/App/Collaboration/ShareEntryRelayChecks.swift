@@ -46,20 +46,18 @@ enum ShareEntryRelayChecks {
         let link = try await links.createShareLink(area: area, slug: "fresh-link", lifetime: .untilRevoked)
         links.access[link.id] = .init(id: link.id, area: .init(area), slug: link.slug, lifetime: link.lifetime,
                                     status: .active, createdAt: link.createdAt, people: [])
-        // No refresh: Revoke must read this new link itself.
-        links.refuseRevoke = true
-        await session.revoke()
-        try expect(session.failure != nil && session.area == area && zones.stoppedShares.isEmpty,
-            "failed relay revocation keeps the host and a retryable session")
-        links.refuseRevoke = false; zones.refuseStop = true
+        zones.refuseStop = true
         await session.revoke()
         try expect(session.failure != nil && session.area == area && zones.stoppedShares.isEmpty,
             "failed host persistence reports failure and remains retryable")
-        zones.refuseStop = false
+        // The relay refuses everything: Revoke still finishes, on this Mac.
+        // Its links are the reconciler's to end, never a reason to stay shared.
+        zones.refuseStop = false; links.refuseRevoke = true
         await session.revoke()
-        try expect(links.revoked.contains(link.id) && zones.stoppedShares == [area]
+        try expect(session.failure == nil && zones.stoppedShares == [area]
             && session.area == nil && session.accessRows.isEmpty && session.people.isEmpty,
-            "retry revokes newly discovered links and clears the sharing session")
+            "a relay that refuses revocation does not keep the tile shared: Revoke stops sharing locally")
+        links.refuseRevoke = false
         await session.refreshAccess()
         try expect(session.phase == .revoked(area: area), "polling cannot resurrect a revoked share")
         await session.newLink()
@@ -82,7 +80,7 @@ enum ShareEntryRelayChecks {
     /// `continuum-relay` on loopback with its own databases and keys, the way
     /// `scripts/check-collaboration-pair.py` runs it.
     final class Relay {
-        let process = Process()
+        private(set) var process = Process()
         let port: Int
         let environment: [String: String]
         let executable: URL
@@ -129,8 +127,20 @@ enum ShareEntryRelayChecks {
         }
 
         func stop() {
-            if process.isRunning { process.terminate(); process.waitUntilExit() }
+            halt()
             try? log.close()
+        }
+
+        /// The relay goes away, as a network drop or a relay restart looks to the app.
+        func halt() {
+            if process.isRunning { process.terminate(); process.waitUntilExit() }
+        }
+
+        /// Back on the same port and databases.
+        func restart() async throws {
+            halt()
+            process = Process()
+            try await start()
         }
 
         private static func loopback(_ port: Int) -> sockaddr_in {
@@ -432,7 +442,11 @@ enum ShareEntryRelayChecks {
             "New link mints a second link on the same area (\(existing.session.failure ?? ""))")
         try ShareEntryChecks.click(existing.currentRevokeButton)
         try await eventually("revoke everyone") { !existing.session.isWorking && existing.session.phase == .revoked(area: areaA) }
-        let afterRevoke = try await app.shareLinks.listAccess(area: areaA)
+        var afterRevoke: [Collaboration.ShareLinkAccess] = []
+        try await eventually("the relay ends every link on the area") {
+            app.pendingShareRevocations?.contains(area: areaA) == false
+        }
+        afterRevoke = try await app.shareLinks.listAccess(area: areaA)
         try expect(afterRevoke.allSatisfy { $0.status == .revoked } && afterRevoke.flatMap(\.people).allSatisfy { !$0.active },
             "Revoke everyone's access ends every link on the area and Sam's access")
         try expect(app.hostedAgentArea(forTile: agentA) == nil
@@ -445,6 +459,79 @@ enum ShareEntryRelayChecks {
         try await app.shareLinks.revokeLink(area: areaA, link: revokable.id)
         let revoked = try await open(revokable.url, as: "Priya", insecureLoopback: true)
         try expect(revoked == .refused(ShareLinkOpener.refusedMessage), "a revoked link says it was already used or revoked")
+        // 6. Unshare with the relay gone (23 Nov: "it would load forever and
+        //    keep sharing"). Revoke finishes on this Mac at once; the relay's
+        //    links end when it is back.
+        AppDelegate.shareRevocationRetryDelay = .milliseconds(300)
+        canvas.centerOnTile(agentB)
+        canvas.layoutSubtreeIfNeeded()
+        app.qaInstallShareEntry(pasteboard: pasteboard)
+        app.shareEntry.presentsOffscreenForQA = true
+        let popoverC = try share(agentB)
+        popoverC.slugField.stringValue = "unshare-while-offline"
+        try ShareEntryChecks.click(popoverC.copyButton)
+        try await eventually("B is shared") { !popoverC.session.isWorking && (popoverC.session.link != nil || popoverC.session.failure != nil) }
+        guard let linkC = popoverC.session.link, let areaC = popoverC.session.area else {
+            throw Failure(description: "share entry (relay): B's Copy made no link (\(popoverC.session.failure ?? ""))")
+        }
+        relay.halt()
+        popoverC.layoutSubtreeIfNeeded()
+        try ShareEntryChecks.click(popoverC.currentRevokeButton)
+        try await eventually("Revoke finishes with the relay unreachable", timeout: 5) {
+            !popoverC.session.isWorking && popoverC.session.phase == .revoked(area: areaC)
+        }
+        try expect(popoverC.session.failure == nil && popoverC.session.area == nil && app.hostedAgentArea(forTile: agentB) == nil
+            && app.hostedAgentShares.map { HostedAgentShareIndex(directory: $0.url.deletingLastPathComponent()) }?.entries.allSatisfy { $0.area != areaC } == true
+            && app.sharedAreaHostSessions.keys.allSatisfy { !$0.hasSuffix("/" + areaC.uuidString) }
+            && canvas.tileView(for: agentB)?.ownershipMark == nil,
+            "with the relay unreachable, Revoke still finishes within 5 s: B is no longer hosted, remembered or marked (\(popoverC.session.failure ?? "no failure"))")
+        // Read back from disk, as the next launch reads it.
+        let pendingURL = app.pendingShareRevocations?.url
+        let onDisk = pendingURL.map { PendingShareRevocations(directory: $0.deletingLastPathComponent()) }
+        try expect(onDisk?.contains(area: areaC) == true,
+            "the relay clean-up is written down, so a quit before the relay returns still finishes it (\(pendingURL?.path ?? "no file"), account dir \(account.storeDirectory.path))")
+        app.shareEntry.dismiss()
+        try await relay.restart()
+        try await eventually("the relay clean-up finishes once the relay is back", timeout: 20) {
+            app.pendingShareRevocations?.contains(area: areaC) == false
+        }
+        let rowsC = try await app.shareLinks.listAccess(area: areaC)
+        try expect(rowsC.contains { $0.id == linkC.id } && rowsC.allSatisfy { $0.status == .revoked },
+            "once the relay is back, every link on the unshared area is revoked there")
+        // An area the relay no longer has (an admin deleted it, or another
+        // relay): there is nothing left to end, so the clean-up settles.
+        let ghost = UUID()
+        try app.pendingShareRevocations?.add(.init(account: account.activeAccount!.id, area: ghost))
+        app.reconcilePendingShareRevocations()
+        try await eventually("an area missing on the relay settles", timeout: 10) {
+            app.pendingShareRevocations?.contains(area: ghost) == false
+        }
+        try expect(true, "an unshare whose area the relay no longer has settles instead of retrying forever")
+
+        // 7. Closing a shared tile ends its share. It used to stay in
+        //    hosted-agents.json, hosted again at every launch, with no tile
+        //    left to turn it off from.
+        let agentD = TileInsertSlideChecks.tileD
+        canvas.centerOnTile(agentD)
+        canvas.layoutSubtreeIfNeeded()
+        let popoverD = try share(agentD)
+        popoverD.slugField.stringValue = "closed-while-shared"
+        try ShareEntryChecks.click(popoverD.copyButton)
+        try await eventually("D is shared") { !popoverD.session.isWorking && (popoverD.session.link != nil || popoverD.session.failure != nil) }
+        guard let linkD = popoverD.session.link, let areaD = popoverD.session.area else {
+            throw Failure(description: "share entry (relay): D's Copy made no link (\(popoverD.session.failure ?? ""))")
+        }
+        app.shareEntry.dismiss()
+        app.deleteTile(id: agentD)
+        try await eventually("closing D ends its share", timeout: 10) {
+            canvas.tileView(for: agentD) == nil && app.hostedAgentArea(forTile: agentD) == nil
+                && app.sharedAreaHostSessions.keys.allSatisfy { !$0.hasSuffix("/" + areaD.uuidString) }
+                && app.pendingShareRevocations?.contains(area: areaD) == false
+        }
+        let rowsD = try await app.shareLinks.listAccess(area: areaD)
+        try expect(app.hostedAgentShares.map { HostedAgentShareIndex(directory: $0.url.deletingLastPathComponent()) }?.entries.allSatisfy { $0.area != areaD } == true
+            && rowsD.contains { $0.id == linkD.id } && rowsD.allSatisfy { $0.status == .revoked },
+            "closing a shared tile ends its share: not hosted, not remembered for the next launch, and its link revoked on the relay")
         print("Share entry relay checks passed: a header Share and Copy against a local continuum-relay share one agent with no zone and nothing moved, a slug collision shares nothing, and a link that cannot open says why.")
     }
 }

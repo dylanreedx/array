@@ -318,18 +318,15 @@ final class ShareLinkSession {
         }
     }
 
-    /// Ends the link in hand and every other link on the area that still
-    /// admits or holds someone, and everyone's access through them.
+    /// Ends sharing: this Mac stops hosting at once, and every link on the
+    /// area that still admits or holds someone is revoked on the relay after,
+    /// retried until the relay answers (`ShareRevocationReconciler.swift`).
+    /// No relay round trip stands between Revoke and "stopped": a slow,
+    /// unreachable or disagreeing relay used to leave the popover spinning
+    /// and the tile shared.
     func revoke() async {
         guard let area else { return }
-        let currentLink = link
         await run {
-            // Read the relay now: another popover may have minted a link since
-            // our last poll. A read/revoke failure must not claim sharing is off.
-            let rows = try await self.links.listAccess(area: area)
-            var ids = rows.filter { $0.status != .revoked }.map(\.id)
-            if let link = currentLink, !ids.contains(link.id) { ids.append(link.id) }
-            for id in ids { try await self.links.revokeLink(area: area, link: id) }
             try await self.zones.stopSharing(area: area)
             self.people = []
             self.accessRows = []

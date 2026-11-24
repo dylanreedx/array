@@ -663,8 +663,11 @@ extension AppDelegate {
             _ = remembered
             guard model.status == .ready, let account = model.activeAccount?.id,
                   let entries = hostedPortalIndex?.entries(account: account), !entries.isEmpty else { return }
-            for entry in entries { startHostingPortal(entry, model: model) }
+            for entry in entries where pendingShareRevocations?.contains(area: entry.area) != true {
+                startHostingPortal(entry, model: model)
+            }
             refreshHostedPortalMarks()
+            reconcilePendingShareRevocations()
         }
     }
 

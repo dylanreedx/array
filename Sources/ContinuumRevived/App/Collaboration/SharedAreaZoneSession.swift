@@ -299,6 +299,8 @@ extension AppDelegate {
         reopenSharedAreas()
         resumeHostedAgentShares()
         resumeHostedPortals()
+        // An unshare whose relay clean-up did not finish before the last quit.
+        if pendingShareRevocations?.entries.isEmpty == false { reconcilePendingShareRevocations() }
     }
 
     /// Every open area leaves the canvas: presence ends and each controller

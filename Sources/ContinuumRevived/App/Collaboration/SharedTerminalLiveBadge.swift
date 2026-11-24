@@ -73,7 +73,12 @@ extension AppDelegate {
             let id = tile.id
             badge.onStop = { [weak self] in
                 fputs("terminal badge: Stop sharing pressed (\(inPortal ? "portal" : "own share"))\n", stderr)
-                Task { inPortal ? await self?.stopPortalTerminal(area: area, tile: id) : await self?.cancelAgentShare(area: area) }
+                // Its own share ends the way the popover's Revoke does: at once
+                // here, and its links and everyone's access on the relay after.
+                Task {
+                    if inPortal { await self?.stopPortalTerminal(area: area, tile: id) }
+                    else { try? await self?.stopSharing(area: area) }
+                }
             }
             // At the right of the tile's under-bar, which scales with the title bar.
             view.installLiveBadge(badge)

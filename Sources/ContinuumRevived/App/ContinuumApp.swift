@@ -9357,6 +9357,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// Every open `.sharedTile` (a teammate's note, file, diff, browser or terminal).
     var sharedTileSessions: [UUID: SharedTileSession] = [:]
     var hostedAgentSharesStorage: HostedAgentShareIndex?
+    /// Areas unshared here whose relay side is still to clean (`ShareRevocationReconciler.swift`).
+    var pendingShareRevocationsStorage: PendingShareRevocations?
+    var shareRevocationTask: Task<Void, Never>?
+    var shareRevocationRerun = false
     var hostedAgentPeople: [UUID: [String]] = [:]
     var hostedAgentAccessTask: Task<Void, Never>?
     private var pendingSharedAreaCapture: SharedAreaCaptureRequest?
@@ -11690,6 +11694,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             (canvasView.tileView(for: id) as? ManagedAgentTileNSView)?.detach()
         }
+        // A tile this Mac shares takes its share with it: nothing on the canvas
+        // could turn it off afterwards, and every launch would host it again.
+        endSharesOnTileClose(id)
 
         if unattended {
             canvasView.removeTile(id: id)

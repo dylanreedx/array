@@ -184,6 +184,9 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
                 + "Whoever opens the link sees everything it prints from now on. Press Share anyway to share it."
         } else if session.confirmingTerminal, session.link != nil {
             messageLabel.stringValue = "Sharing this terminal's output, read only. Typing stays on this Mac."
+        } else if case .revoked = phase, session.area == nil {
+            // Stopped here at once; the relay's links end as soon as it is reached.
+            messageLabel.stringValue = "Sharing stopped. The link and everyone's access end as soon as the relay is reached."
         } else if case .revoked = phase {
             messageLabel.stringValue = "The link no longer works, and nobody it let in has access."
         } else if case .existing = phase {

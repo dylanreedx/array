@@ -230,15 +230,28 @@ extension AppDelegate {
         return area
     }
 
-    /// Explicit Revoke: persist the decision before stopping hosts, so a
-    /// relaunch cannot resume the share. Failed persistence remains retryable.
+    /// Explicit Revoke. It finishes on this Mac with no relay round trip:
+    /// the area is written down for relay clean-up first, then the share is
+    /// forgotten and every host for it stops, so a relaunch cannot resume it.
+    /// The relay's links and items are ended afterwards by
+    /// `reconcilePendingShareRevocations`, retried until the relay answers.
+    /// Only a failed disk write is reported, and it stays retryable.
     func stopSharing(area: UUID) async throws {
+        let model = try? collaborationAccountModel()
+        let account = hostedAgentShares?.entries.first { $0.area == area }?.account
+            ?? hostedPortalIndex?.entry(area: area)?.account
+            ?? model?.activeAccount?.id ?? model?.selectedAccountID
+        if let account { try pendingShareRevocations?.add(.init(account: account, area: area)) }
         try hostedAgentShares?.remove(area: area)
         try hostedPortalIndex?.remove(area: area)
         hostedAgentPeople.removeValue(forKey: area)
-        await cancelPortalShare(area: area)
-        await cancelAgentShare(area: area)
-        await cancelSharedZone(areaId: area)
+        let suffix = "/" + area.uuidString
+        for key in hostedPortalSessions.keys where key.hasSuffix(suffix) { hostedPortalSessions.removeValue(forKey: key)?.stop() }
+        for key in sharedAreaHostSessions.keys where key.hasSuffix(suffix) { sharedAreaHostSessions.removeValue(forKey: key)?.stop() }
+        if let zone = sharedAreaRuntime?.sharedAreaZone(for: area) { closeSharedAreaZone(zone.zoneId) }
+        refreshHostedAgentMarks()
+        refreshHostedPortalMarks()
+        reconcilePendingShareRevocations()
     }
 
     /// Undo of `shareAgent` when no link could be minted: the agent leaves the
@@ -293,11 +306,18 @@ extension AppDelegate {
               hostedAgentShares?.entries(account: remembered).isEmpty == false else { return }
         Task { [weak self] in
             guard let self else { return }
-            if model.status != .ready { _ = try? await model.select(accountID: remembered) }
+            // Restored guest tiles and reopened areas can hold the account at
+            // launch; one busy answer used to leave every shared agent unhosted.
+            if model.status != .ready { await Self.awaitPortalAccount(model) }
+            _ = remembered
             guard model.status == .ready, let account = model.activeAccount?.id,
                   let entries = hostedAgentShares?.entries(account: account), !entries.isEmpty else { return }
-            for entry in entries { startHostingSharedAgent(area: entry.area, model: model) }
+            // An unshare interrupted before its relay clean-up stays unshared.
+            for entry in entries where pendingShareRevocations?.contains(area: entry.area) != true {
+                startHostingSharedAgent(area: entry.area, model: model)
+            }
             refreshHostedAgentMarks()
+            reconcilePendingShareRevocations()
         }
     }
 
