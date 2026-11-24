@@ -385,6 +385,22 @@ enum SettingsSelfChecks {
         for key in steeringKeys {
             try expect(model.renderedAnchors["field.\(key)"] != nil, "\(key) must show while Managed mode is on")
         }
+        // New agents: Agent CLI, Model and Reasoning effort are one control, the
+        // shared ChoiceButton, with one title font and one trailing edge.
+        fixture.settle()
+        let newAgentIDs = ["settings.agentCLI", "settings.agentModel", "settings.agentEffort"]
+        let newAgentButtons = newAgentIDs.compactMap { id in
+            fixture.descendants(ChoiceButton.self).first { $0.accessibilityIdentifier() == id }
+        }
+        try expect(newAgentButtons.count == 3,
+                   "Agent CLI, Model and Reasoning effort must all be ChoiceButtons; found \(newAgentButtons.count) of 3")
+        let titleFonts = newAgentButtons.map { $0.qaTitleFont }
+        try expect(titleFonts.allSatisfy { $0 != nil && $0 == titleFonts[0] }
+                   && titleFonts[0]?.pointSize == 13,
+                   "the New agents buttons must share one 13 pt title font, got \(titleFonts.map { $0.map { "\($0.fontName) \($0.pointSize)" } ?? "nil" })")
+        let trailingEdges = newAgentButtons.map { $0.convert($0.bounds, to: nil).maxX }
+        try expect(trailingEdges.allSatisfy { abs($0 - trailingEdges[0]) < 0.5 },
+                   "the New agents buttons must share one trailing x, got \(trailingEdges)")
         // The rules file exists only under its switch.
         let personalField = sections.flatMap(\.fields).first { $0.key == PersonalRulesConfig.enabledKey }!
         let rulesPathKey = "field.\(PersonalRulesConfig.pathKey)"

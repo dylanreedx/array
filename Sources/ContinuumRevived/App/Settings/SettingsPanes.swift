@@ -441,6 +441,10 @@ struct SettingsFieldRow: View {
             ToolbarButtonsRow(row: row, model: model)
         case let .choice(key, _, _, _, _) where key == AgentModelConfig.modelKey:
             SettingsModelPickerRow(model: model, row: row)
+        case let .choice(key, _, _, _, _) where key == AgentBackendConfig.key:
+            SettingsChoiceButtonRow(model: model, row: row, identifier: "settings.agentCLI")
+        case let .choice(key, _, _, _, _) where key == AgentModelConfig.thinkingKey:
+            SettingsChoiceButtonRow(model: model, row: row, identifier: "settings.agentEffort")
         case let .choice(key, _, _, _, _) where key == AppTheme.defaultsKey:
             NeutralThemePickerRow(model: model, row: row)
         case let .choice(key, _, _, _, _) where key == SidebarHeaderBackground.defaultsKey:
@@ -540,14 +544,14 @@ private struct SettingsModelPickerRow: View {
         VStack(alignment: .leading, spacing: 6) {
             let selectedTitle = items.first { $0.id == model.storedModel }.map { $0.offered ? $0.title : "\($0.id) (not offered)" }
                 ?? model.storedModel
-            HStack {
-                SettingsRowLabel(title: row.field.label, help: items.isEmpty ? "Waiting for \(model.currentHarness.rawValue) to list its models." : row.help)
-                Spacer()
-                SettingsModelChoice(model: model, field: row.field, items: items)
-                    .frame(width: ChoiceButton.fittingWidth(forTitle: selectedTitle), height: ChoiceButton.controlHeight)
-                    // The button's own inset would pull its chevron in from the row's trailing edge.
-                    .padding(.trailing, -ChoiceButton.horizontalPadding(zoom: .default))
-            }
+            SettingsChoiceLine(
+                label: row.field.label,
+                help: items.isEmpty ? "Waiting for \(model.currentHarness.rawValue) to list its models." : row.help,
+                identifier: "settings.agentModel",
+                items: items.map { ChoiceItem(id: $0.id, title: $0.offered ? $0.title : "\($0.id) (not offered)", detail: nil, icon: nil,
+                                              enabled: $0.offered, destructive: false, toolTip: nil) },
+                selectedID: model.storedModel, selectedTitle: selectedTitle,
+                onSelect: { model.write(.string($0), to: row.field) })
             if let missing {
                 Label("\(model.currentHarness.rawValue) does not offer \(missing.id). Choose one of its models.",
                       systemImage: "exclamationmark.triangle.fill")
@@ -559,25 +563,86 @@ private struct SettingsModelPickerRow: View {
     }
 }
 
-/// The default model, on Array's shared choice surface, as wide as its title.
-private struct SettingsModelChoice: NSViewRepresentable {
+/// A plain choice (Agent CLI, Reasoning effort) on the same button as Model.
+struct SettingsChoiceButtonRow: View {
     let model: SettingsModel
-    let field: SettingsField
-    let items: [SettingsModel.ModelItem]
+    let row: SettingsRow
+    let identifier: String
+
+    var body: some View {
+        if case let .choice(key, label, schemaOptions, _, _) = row.field {
+            let options = key == AgentModelConfig.thinkingKey
+                ? AgentModelConfig.thinkingOptions(for: model.storedModel, harness: model.currentHarness) : schemaOptions
+            let current = model.binding(for: row.field).string
+            // A stored value this CLI/model no longer lists still has to name itself.
+            let items = (options.contains(current) ? options : [current] + options).map {
+                ChoiceItem(id: $0, title: row.field.displayTitle(forOption: $0), detail: nil, icon: nil,
+                           enabled: true, destructive: false, toolTip: nil)
+            }
+            SettingsChoiceLine(
+                label: label, help: row.help, identifier: identifier, items: items, selectedID: current,
+                selectedTitle: items.first { $0.id == current }?.title ?? row.field.displayTitle(forOption: current),
+                onSelect: { model.write(.string($0), to: row.field) })
+        }
+    }
+}
+
+/// The label on the left and a ChoiceButton on the right, the button's title
+/// in the row label's font and on its baseline, its chevron on the trailing edge.
+private struct SettingsChoiceLine: View {
+    let label: String
+    let help: String?
+    let identifier: String
+    let items: [ChoiceItem]
+    let selectedID: String
+    let selectedTitle: String
+    let onSelect: (String) -> Void
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            SettingsRowLabel(title: label, help: help)
+            Spacer()
+            SettingsChoiceControl(label: label, identifier: identifier, items: items, selectedID: selectedID, onSelect: onSelect)
+                .frame(width: ChoiceButton.fittingWidth(forTitle: selectedTitle, font: SettingsChoiceControl.titleFont),
+                       height: ChoiceButton.controlHeight)
+                // The button's own inset would pull its chevron in from the row's trailing edge.
+                .padding(.trailing, -ChoiceButton.horizontalPadding(zoom: .default))
+                .alignmentGuide(.firstTextBaseline) { _ in
+                    SettingsChoiceControl.baselineFromTop
+                }
+        }
+    }
+}
+
+/// The settings choice button: Array's shared surface, painting nothing at
+/// rest, titled in the row label's 13 pt regular.
+private struct SettingsChoiceControl: NSViewRepresentable {
+    let label: String
+    let identifier: String
+    let items: [ChoiceItem]
+    let selectedID: String
+    let onSelect: (String) -> Void
+
+    static let titleFont = NSFont.systemFont(ofSize: 13, weight: .regular)
+    @MainActor static var baselineFromTop: CGFloat {
+        let probe = ChoiceButton(title: "Probe")
+        probe.titleFont = titleFont
+        return probe.titleBaselineFromTop
+    }
 
     func makeNSView(context: Context) -> ChoiceButton {
-        let button = ChoiceButton(title: "Model")
-        button.setAccessibilityLabel("Model")
-        button.setAccessibilityIdentifier("settings.agentModel")
+        let button = ChoiceButton(title: label)
+        button.setAccessibilityLabel(label)
+        button.setAccessibilityIdentifier(identifier)
         button.restingFillsComposer = false
+        button.titleFont = Self.titleFont
         return button
     }
 
     func updateNSView(_ button: ChoiceButton, context: Context) {
-        button.items = items.map { ChoiceItem(id: $0.id, title: $0.offered ? $0.title : "\($0.id) (not offered)", detail: nil, icon: nil,
-                                              enabled: $0.offered, destructive: false, toolTip: nil) }
-        button.selectedID = model.storedModel
-        button.onSelection = { item in model.write(.string(item.id), to: field) }
+        button.items = items
+        button.selectedID = selectedID
+        button.onSelection = { item in onSelect(item.id) }
     }
 }
 

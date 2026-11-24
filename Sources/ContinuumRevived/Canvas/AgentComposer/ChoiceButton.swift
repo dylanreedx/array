@@ -66,6 +66,22 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
     var onSelection: ((ChoiceItem) -> Void)?
     /// Whether the button rests on the composer fill. Off paints nothing at rest.
     var restingFillsComposer = true
+    /// Settings sets the row label's font here so the title matches its row;
+    /// nil keeps the composer's token font.
+    var titleFont: NSFont? {
+        didSet {
+            titleLabel.font = effectiveTitleFont
+            invalidateIntrinsicContentSize()
+            needsLayout = true
+        }
+    }
+    /// Distance from the button's top edge to the title's first baseline, so a
+    /// row can line it up with its label's baseline.
+    var titleBaselineFromTop: CGFloat {
+        let top = bounds.height > 0 ? bounds.height : scaledControlHeight
+        return floor((top - scaledTitleHeight) / 2) + titleLabel.firstBaselineOffsetFromTop
+    }
+    private var effectiveTitleFont: NSFont { titleFont ?? .token(.label, zoom: pageZoom) }
     /// A checklist row's accessory (`Only`, `…`) was pressed.
     var onAccessory: ((ChoiceItem, String) -> Void)?
     /// The focused row of the open list changed; nil when the pointer leaves it.
@@ -112,7 +128,7 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
         wantsLayer = true
         layer?.applyCorner(.card, zoom: pageZoom)
         titleLabel.stringValue = title
-        titleLabel.font = .token(.label, zoom: pageZoom)
+        titleLabel.font = effectiveTitleFont
         titleLabel.lineBreakMode = .byTruncatingTail
         chevronView.image = CanvasSymbolImage.image(named: "chevron.up.chevron.down")
         chevronView.imageScaling = .scaleProportionallyDown
@@ -159,14 +175,14 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
     /// needs. `ChoiceLabelMetrics` measures it from a real label instead.
     private var measuredTitleWidth: CGFloat {
         ChoiceLabelMetrics.labelWidth(
-            for: titleLabel.stringValue, font: .token(.label, zoom: pageZoom))
+            for: titleLabel.stringValue, font: effectiveTitleFont)
     }
 
     /// What a button showing `title` needs, measured the way the button measures
     /// itself — for callers (the footer's fit decision) that must reason about a
     /// title BEFORE installing it.
-    static func fittingWidth(forTitle title: String, zoom: AgentPageZoom = .default) -> CGFloat {
-        let titleWidth = ChoiceLabelMetrics.labelWidth(for: title, font: .token(.label, zoom: zoom))
+    static func fittingWidth(forTitle title: String, zoom: AgentPageZoom = .default, font: NSFont? = nil) -> CGFloat {
+        let titleWidth = ChoiceLabelMetrics.labelWidth(for: title, font: font ?? .token(.label, zoom: zoom))
         return horizontalPadding(zoom: zoom) * 2 + titleWidth + CGFloat(zoom.scaled(Space.m))
             + chevronSize(zoom: zoom)
     }
@@ -284,7 +300,7 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
     func applyPageZoom(_ zoom: AgentPageZoom) {
         pageZoom = zoom
         layer?.applyCorner(.card, zoom: pageZoom)
-        titleLabel.font = .token(.label, zoom: pageZoom)
+        titleLabel.font = effectiveTitleFont
         popoverController.pageZoom = pageZoom
         invalidateIntrinsicContentSize()
         needsLayout = true
@@ -392,6 +408,7 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
     // against what the string plus the cell's own padding need — comparing
     // strings is vacuous by construction.
     var qaRenderedTitle: String { titleLabel.stringValue }
+    var qaTitleFont: NSFont? { titleLabel.font }
     var qaSelectedTitle: String? { items.first(where: { $0.id == selectedID })?.title }
     var qaPresentedItems: [ChoiceItem] { popoverController.listView?.qaItems ?? [] }
     var qaPopoverWidth: CGFloat? { popoverController.surfaceFrame?.width }
