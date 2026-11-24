@@ -3138,7 +3138,15 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
                 _ = transcriptCollectionFixture?.bindToolDetailIdentity(identity, to: candidates[0].id)
             }
         }
-        refreshV2TurnSnapshot()
+        // A streamed chunk moves no turn fact either: re-reading the snapshot and
+        // repainting both headers per chunk was the largest slice of tile-side
+        // ingest with 20 agents streaming. Chunks coalesce onto the chunk timer.
+        if case .contentDelta = event {
+            chunkSnapshotRefreshPending = true
+        } else {
+            chunkSnapshotRefreshPending = false
+            refreshV2TurnSnapshot()
+        }
         updateCompactStatusFacts(for: event)
         // A streamed chunk changes no status fact (the location projector dedupes
         // it, and the elapsed clock has its own tick), but rebuilding the row per
@@ -3814,6 +3822,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     /// last draft and the debounced sweep wrote over every surface. The projection
     /// derivation remains the compatibility path's, untouched.
     private func refreshV2TurnSnapshot() {
+        qaTurnSnapshotRefreshCount += 1
         defer { chromeDidChange() }
         evaluatePendingTerminalFlip()
         refreshFaceSwitch()
@@ -5143,6 +5152,9 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
 
     static let chunkStatusInterval: TimeInterval = 0.25
     private var chunkStatusTimer: Timer?
+    private var chunkSnapshotRefreshPending = false
+    /// QA: turn-snapshot refreshes, however they were triggered.
+    private(set) var qaTurnSnapshotRefreshCount = 0
     /// QA: status-row refreshes, however they were triggered.
     private(set) var qaLocationRefreshCount = 0
 
@@ -5156,6 +5168,10 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     }
 
     private func refreshLocationStatus(at now: Date = AgentElapsedClock.now()) {
+        if chunkSnapshotRefreshPending {
+            chunkSnapshotRefreshPending = false
+            refreshV2TurnSnapshot()
+        }
         chunkStatusTimer?.invalidate()
         chunkStatusTimer = nil
         locationStaleTimer?.invalidate()

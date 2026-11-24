@@ -85,16 +85,22 @@ enum StreamingIngestChecks {
         let view = ManagedAgentTileNSView(tile: tile, threadId: "status")
         view.ingest(.turnStarted(threadId: "status", turnId: "t"))
         let before = view.qaLocationRefreshCount
+        let snapshotsBefore = view.qaTurnSnapshotRefreshCount
         for index in 0..<20 {
             view.ingest(.contentDelta(threadId: "status", turnId: "t", streamKind: .assistant, delta: "chunk \(index) "))
         }
         try expect(view.qaLocationRefreshCount == before,
                    "20 chunks refreshed the status row \(view.qaLocationRefreshCount - before) times at once")
+        try expect(view.qaTurnSnapshotRefreshCount == snapshotsBefore,
+                   "20 chunks re-read the turn snapshot \(view.qaTurnSnapshotRefreshCount - snapshotsBefore) times at once")
         RunLoop.main.run(until: Date().addingTimeInterval(ManagedAgentTileNSView.chunkStatusInterval + 0.1))
+        try expect(view.qaTurnSnapshotRefreshCount == snapshotsBefore + 1,
+                   "the chunks must re-read the snapshot once after the interval; \(view.qaTurnSnapshotRefreshCount - snapshotsBefore)")
         try expect(view.qaLocationRefreshCount == before + 1,
                    "the chunks must refresh the row once after the interval; \(view.qaLocationRefreshCount - before)")
         view.ingest(.turnCompleted(threadId: "status", turnId: "t", outcome: .completed, errorMessage: nil))
         try expect(view.qaLocationRefreshCount == before + 2, "a turn boundary must refresh the row at once")
+        try expect(view.qaTurnSnapshotRefreshCount == snapshotsBefore + 2, "a turn boundary must re-read the snapshot at once")
         print("streaming ingest: 20 chunks refreshed the status row once; a turn boundary refreshed it at once")
     }
 }
