@@ -93,10 +93,17 @@ enum WorkspaceAPIAgentsChecks {
         f.api.dispatch(agentId: f.agentId, requestId: nextRequestId(), op: "agent.find", payload: payload)
     }
 
+    @MainActor private static var inspectClock = Date()
+
     @MainActor
     private static func inspect(_ f: WorkspaceAPIChecks.Fixture, _ target: AgentID, _ extra: [String: Any] = [:]) -> WorkspaceAPIService.Reply {
         var payload = extra
         payload["agentId"] = target.rawValue.uuidString
+        // These cases inspect one helper many times; each is a separate lead
+        // decision, not a poll, so step the poll clock past the limiter window.
+        inspectClock = inspectClock.addingTimeInterval(AgentPollLimiter.window + 1)
+        let now = inspectClock
+        f.api.pollNow = { now }
         return f.api.dispatch(agentId: f.agentId, requestId: nextRequestId(), op: "agent.inspect", payload: payload)
     }
 
