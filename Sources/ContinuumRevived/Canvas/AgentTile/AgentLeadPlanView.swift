@@ -3,22 +3,11 @@ import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 
-/// Plan drawer redesign round (2026-11-23). `ARRAY_LEAD_PLAN_DRAWER` =
-/// `checklist` | `track` | `triage` is a QA override only; unset keeps the
-/// shipped drawer until Dylan picks one.
-enum LeadPlanDrawerDirection: String, CaseIterable {
-    case shipped, checklist, track, triage
+/// The plan drawer above a lead agent's composer: a checklist.
 
-    @MainActor static var current: LeadPlanDrawerDirection = {
-        ProcessInfo.processInfo.environment["ARRAY_LEAD_PLAN_DRAWER"].flatMap(LeadPlanDrawerDirection.init(rawValue:)) ?? .shipped
-    }()
-}
-
-/// What the redesigned drawer draws: ONE list. Plan steps own their helpers;
-/// helpers the plan does not name are `strays`. The model side owns ordering,
-/// linking and ageing (`stale`); the view only reads them. Until that model
-/// lands, `init(adapting:)` derives an approximation from the shipped
-/// `LeadPlanPresentation`.
+/// What the drawer draws: ONE list. Plan steps own their helpers; helpers the
+/// plan does not name are `strays`. Built from `LeadPlanPresentation`'s
+/// `entries` / `tail` (the model owns ordering, linking and ageing).
 struct LeadPlanDrawerModel: Equatable {
     enum Phase: Equatable { case needsYou, failed, working, idle, done }
     struct Helper: Equatable {
@@ -45,47 +34,31 @@ struct LeadPlanDrawerModel: Equatable {
 }
 
 extension LeadPlanDrawerModel {
-    /// Interim bridge from the shipped presentation (sections and display
-    /// strings), so the override works live before the model is joined.
-    init(adapting p: LeadPlanPresentation) {
-        var steps: [Step] = [], strays: [Helper] = []
-        var inRoster = false
-        func phase(_ s: LeadPlanPresentation.State) -> Phase {
-            switch s {
-            case .needsYou: return .needsYou
-            case .failed: return .failed
-            case .running: return .working
-            case .waiting: return .idle
-            case .done: return .done
+    init(from p: LeadPlanPresentation, now: Date = Date()) {
+        func helper(_ h: LeadPlanPresentation.Helper) -> Helper {
+            let phase: Phase
+            switch h.bucket {
+            case .needsYou: phase = h.state == .failed ? .failed : .needsYou
+            case .working: phase = .working
+            case .waiting: phase = .idle
+            case .finished: phase = h.state == .failed ? .failed : .done
             }
+            let ended = (h.bucket == .finished || phase == .failed) ? h.endedAt.map { max(0, now.timeIntervalSince($0)) } : nil
+            return Helper(id: h.id, name: h.name, model: h.model, phase: phase, endedAgo: ended,
+                          stale: h.bucket == .finished && h.state == .failed)
         }
-        func ago(_ note: String?) -> TimeInterval? {
-            guard let note, let n = Double(note.prefix { $0.isNumber }) else { return nil }
-            if note.contains("d ago") { return n * 86400 }
-            if note.contains("h ago") { return n * 3600 }
-            if note.contains("min ago") { return n * 60 }
-            return nil
-        }
-        for row in p.steps {
-            if row.isSection { inRoster = !row.title.hasPrefix("Plan"); continue }
-            if inRoster {
-                let age = ago(row.note)
-                strays.append(Helper(id: row.ownerAgent, name: row.title, model: row.owner, phase: phase(row.state),
-                                     endedAgo: age, stale: row.state == .failed && (age ?? 0) > 86400))
-                continue
-            }
+        let steps = p.entries.map { e -> Step in
             let owner: Owner
-            if row.owner == "Lead" { owner = .lead }
-            else if row.owner == "You" { owner = .you }
-            else if let id = row.ownerAgent {
-                let parts = row.owner.components(separatedBy: " · ")
-                owner = .helpers([Helper(id: id, name: parts.first ?? row.owner, model: parts.dropFirst().joined(separator: " · "),
-                                         phase: phase(row.state))])
-            } else if row.owner == "Helper unavailable" { owner = .unavailable }
-            else { owner = .unstarted(row.owner) }
-            steps.append(Step(title: row.title, owner: owner, done: row.state == .done))
+            switch e.ownerKind {
+            case .lead: owner = .lead
+            case .you: owner = .you
+            case .unavailable: owner = .unavailable
+            case .unstarted: owner = .unstarted(e.ownerLabel)
+            case .helpers: owner = e.helpers.isEmpty ? .unavailable : .helpers(e.helpers.map(helper))
+            }
+            return Step(title: e.title, owner: owner, done: e.state == .done && e.ownerKind != .helpers)
         }
-        self.init(steps: steps, strays: strays, decision: p.decision, options: p.options, collapsed: p.collapsed)
+        self.init(steps: steps, strays: p.tail.map(helper), decision: p.decision, options: p.options, collapsed: p.collapsed)
     }
 
     enum StepPhase: Equatable { case needsYou, failed, working, idle, todo, done }
@@ -106,47 +79,41 @@ extension LeadPlanDrawerModel {
     }
 }
 
-/// Bounded rows. Draws the selected pinned-steps layout using tokens;
+/// Bounded rows. Draws the checklist using tokens;
 /// no per-step view tree, timers, or text measurement in layout.
 @MainActor
 final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
     var drawnContentFingerprint: Int {
         var hash = Hasher()
-        hash.combine(presentation?.header)
-        for step in presentation?.steps ?? [] {
-            hash.combine(step.title); hash.combine(step.owner); hash.combine(step.state.rawValue); hash.combine(step.note); hash.combine(step.liveDot); hash.combine(step.isSection); hash.combine(step.stale)
-        }
-        hash.combine(presentation?.decision); hash.combine(presentation?.options)
         hash.combine(zoom)
-        hash.combine(direction.rawValue)
-        hash.combine(drawerLayout.map { "\($0.rows.count)" + ($0.header.text.map(\.0).joined()) })
-        hash.combine(triageFilter.rawValue)
+        if let drawerLayout {
+            hash.combine(drawerLayout.rows.count)
+            hash.combine(drawerLayout.height)
+            hash.combine(drawerLayout.header.text.map(\.0).joined())
+            for row in drawerLayout.rows {
+                hash.combine(row.title); hash.combine(row.owner); hash.combine(row.state); hash.combine(row.lead); hash.combine("\(row.glyph)")
+            }
+        }
         return hash.finalize()
     }
     private(set) var presentation: LeadPlanPresentation?
-    /// Which drawer this view draws. Production reads the override once.
-    var direction: LeadPlanDrawerDirection = .current {
-        didSet { refreshDrawer() }
-    }
-    /// The joined model the redesign draws (fixtures set it directly).
+    /// The joined model the drawer draws (fixtures set it directly).
     private(set) var drawer: LeadPlanDrawerModel?
     private var fixtureDrawer = false
     let chevron = NSImageView()
     /// The lead's offered answers, in the composer's own chip style.
     let optionRail = ComposerReplyOptionRailView(frame: .zero)
     var onToggle: (() -> Void)?
-    /// Clicking a helper row's owner.
+    /// Clicking a row's owner or title reveals that helper.
     var onRevealOwner: ((AgentID) -> Void)?
     /// Clicking an answer chip.
     var onChoose: ((String) -> Void)?
     var zoom: AgentPageZoom = .default {
-        didSet { refreshDrawer(); invalidateIntrinsicContentSize(); needsLayout = true; applyTokens() }
+        didSet { relayoutDrawer(); invalidateIntrinsicContentSize(); needsLayout = true; applyTokens() }
     }
     override var isFlipped: Bool { true }
     override var intrinsicContentSize: NSSize {
-        if let drawerLayout { return NSSize(width: NSView.noIntrinsicMetric, height: drawerLayout.height) }
-        let height = presentation.map { $0.collapsed ? 32 : 37 + 23 * $0.steps.count + ($0.decision == nil ? 0 : 23) + ($0.options.isEmpty ? 0 : 34) } ?? 0
-        return NSSize(width: NSView.noIntrinsicMetric, height: zoom.scaled(Double(height)))
+        NSSize(width: NSView.noIntrinsicMetric, height: drawerLayout?.height ?? 0)
     }
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -173,7 +140,10 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         let oldHeight = intrinsicContentSize.height
         presentation = value
         isHidden = value == nil
-        if !fixtureDrawer { refreshDrawer() }
+        if !fixtureDrawer {
+            drawer = value.map { LeadPlanDrawerModel(from: $0) }
+            relayoutDrawer()
+        }
         if oldHeight != intrinsicContentSize.height { invalidateIntrinsicContentSize() }
         setAccessibilityLabel(drawerLayout?.header.text.map(\.0).joined() ?? value?.header)
         setAccessibilityValue(value?.collapsed == true ? "collapsed" : "expanded")
@@ -197,25 +167,6 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         needsLayout = true
     }
 
-    // MARK: Geometry (one source for drawing and hit-testing)
-    private var rowsTop: CGFloat {
-        let z = CGFloat(zoom.factor)
-        guard let p = presentation else { return 34 * z }
-        return (34 + (p.decision == nil ? 0 : 23) + (p.options.isEmpty ? 0 : 34)) * z
-    }
-    private var ownerX: CGFloat { min(314 * CGFloat(zoom.factor), bounds.width * 0.49) }
-    /// Always room for "Done · 14 min ago": sizing this to whether any row has
-    /// an age moved every row's owner and state cells when one helper finished.
-    private var stateX: CGFloat { bounds.width - 150 * CGFloat(zoom.factor) }
-    func rowRect(_ index: Int) -> NSRect {
-        let z = CGFloat(zoom.factor)
-        return NSRect(x: 0, y: rowsTop + CGFloat(index * 23) * z, width: bounds.width, height: 23 * z)
-    }
-    /// The clickable owner cell of a helper row, in this view's coordinates.
-    func ownerRect(_ index: Int) -> NSRect {
-        let row = rowRect(index)
-        return NSRect(x: ownerX, y: row.minY, width: max(0, stateX - ownerX - 10 * CGFloat(zoom.factor)), height: row.height)
-    }
     func applyTokens() {
         // Same SF Symbol treatment as ProcessesDisclosureRow, also used by
         // Array's choice menus. A real image view, never a drawn/text arrow.
@@ -233,7 +184,7 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         if chevron.frame != frame { chevron.frame = frame }
         optionRail.applyPageZoom(zoom)
         let z = CGFloat(zoom.factor)
-        let railY = drawerLayout?.railY ?? (34 + (presentation?.decision == nil ? 0 : 23)) * z
+        let railY = drawerLayout?.railY ?? 34 * z
         let railX = drawerLayout.map { 30 * z + $0.leadColumn } ?? 16 * z
         let railFrame = NSRect(x: railX, y: railY, width: max(0, bounds.width - 32 * z), height: optionRail.railHeight)
         if optionRail.frame != railFrame { optionRail.frame = railFrame }
@@ -247,27 +198,10 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
     }
     override func mouseDown(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        if let layout = drawerLayout {
-            if direction == .triage, let chip = chipFrames(layout).first(where: { $0.1.contains(point) }) {
-                if drawer?.collapsed == true {
-                    triageFilter = chip.0
-                    _ = accessibilityPerformPress()
-                } else {
-                    triageFilter = triageFilter == chip.0 ? .active : chip.0
-                }
-                refreshDrawer(); invalidateIntrinsicContentSize(); needsDisplay = true
-                return
-            }
-            if point.y <= headerHeight { _ = accessibilityPerformPress(); return }
-            for (i, row) in layout.rows.enumerated() {
-                if let owner = row.ownerAgent, drawerRowRect(i, in: layout).contains(point) { onRevealOwner?(owner); return }
-            }
-            return
-        }
-        if point.y <= CGFloat(zoom.scaled(32)) { _ = accessibilityPerformPress(); return }
-        guard let p = presentation, !p.collapsed else { return }
-        for (i, step) in p.steps.enumerated() where !step.isSection {
-            if let owner = step.ownerAgent, ownerRect(i).contains(point) { onRevealOwner?(owner); return }
+        guard let layout = drawerLayout else { return }
+        if point.y <= headerHeight { _ = accessibilityPerformPress(); return }
+        for (i, row) in layout.rows.enumerated() {
+            if let owner = row.ownerAgent, drawerRowRect(i, in: layout).contains(point) { onRevealOwner?(owner); return }
         }
     }
     override func accessibilityPerformPress() -> Bool {
@@ -276,75 +210,11 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         onToggle?()
         return true
     }
-    private func ink(_ state: LeadPlanPresentation.State) -> NSColor {
-        let token: AccentToken?
-        switch state {
-        case .running: token = .accentWorking
-        case .failed: token = .accentFailed
-        case .needsYou: token = .accentApproval
-        default: token = nil
-        }
-        return token?.color.nsColor(for: effectiveTokenTheme) ?? TextToken.textSecondary.color.nsColor(for: effectiveTokenTheme)
-    }
-    private func text(_ value: String, rect: NSRect, color: NSColor) {
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineBreakMode = .byTruncatingTail
-        (value as NSString).draw(in: rect, withAttributes: [
-            .font: NSFont.token(.label, zoom: zoom), .foregroundColor: color, .paragraphStyle: paragraph])
-    }
     override func draw(_ dirtyRect: NSRect) {
-        if let drawerLayout { drawDrawer(drawerLayout); return }
-        guard let p = presentation else { return }
-        let z = CGFloat(zoom.factor)
-        let inset = 16 * z, line = 20 * z
-        SurfaceToken.tileBody.color.nsColor(for: effectiveTokenTheme).setFill(); bounds.fill()
-        LineToken.separator.color.nsColor(for: effectiveTokenTheme).setFill()
-        NSRect(x: inset, y: 0, width: max(0, bounds.width - inset * 2), height: z).fill()
-        let secondary = TextToken.textSecondary.color.nsColor(for: effectiveTokenTheme)
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineBreakMode = .byTruncatingTail
-        let header = NSMutableAttributedString(string: p.header, attributes: [
-            .font: NSFont.token(.label, zoom: zoom), .foregroundColor: secondary, .paragraphStyle: paragraph])
-        if p.collapsed, let urgent = p.urgent {
-            let start = (p.summary as NSString).length
-            header.addAttribute(.foregroundColor, value: ink(urgent.state),
-                                range: NSRange(location: start, length: header.length - start))
-        }
-        header.draw(in: NSRect(x: inset, y: 8 * z, width: max(0, bounds.width - inset - 36 * z), height: line))
-        guard !p.collapsed else { return }
-        let stateX = self.stateX, ownerX = self.ownerX
-        let primary = TextToken.textPrimary.color.nsColor(for: effectiveTokenTheme)
-        if let decision = p.decision {
-            text("Needs you · " + decision, rect: NSRect(x: inset, y: 34 * z, width: max(0, bounds.width - inset * 2), height: line), color: ink(.needsYou))
-        }
-        var number = 0
-        for (i, step) in p.steps.enumerated() {
-            let y = rowRect(i).minY
-            if step.isSection {
-                text(step.title.uppercased(), rect: NSRect(x: inset, y: y, width: max(0, bounds.width - inset * 2), height: line),
-                     color: step.stale ? ink(.needsYou) : secondary)
-                continue
-            }
-            number += 1
-            text("\(number)  \(step.title)", rect: NSRect(x: inset, y: y, width: max(0, ownerX - inset - 10 * z), height: line),
-                 color: step.state == .done || step.stale ? secondary : primary)
-            var ox = ownerX
-            if step.liveDot {
-                let d = 7 * z
-                ink(step.state).setFill()
-                NSBezierPath(ovalIn: NSRect(x: ownerX, y: y + (23 * z - d) / 2 - z, width: d, height: d)).fill()
-                ox += 12 * z
-            }
-            text(step.owner, rect: NSRect(x: ox, y: y, width: max(0, stateX - ox - 10 * z), height: line), color: secondary)
-            let label = step.state.rawValue + (step.note.map { " · " + $0 } ?? "")
-            text(label, rect: NSRect(x: stateX, y: y, width: 138 * z, height: line), color: ink(step.state))
-        }
+        if let drawerLayout { drawDrawer(drawerLayout) }
     }
 
-    // MARK: - Redesign (behind `ARRAY_LEAD_PLAN_DRAWER`)
-
-    enum TriageFilter: String { case active, plan, idle, done, older }
-    private(set) var triageFilter: TriageFilter = .active
+    // MARK: Layout
 
     enum Ink: Equatable { case primary, secondary, accent(AccentToken) }
     enum Glyph: Equatable { case none, dot(AccentToken), ring(Bool) }
@@ -359,15 +229,12 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         var state: String? = nil
         var stateInk: Ink = .secondary
     }
-    struct DrawerChip: Equatable { var glyph: Glyph; var text: String; var ink: Ink; var filter: TriageFilter }
     struct DrawerHeader: Equatable {
-        /// Segmented progress, one cell per plan step (Track).
+        /// Segmented progress, one cell per plan step.
         var track: [LeadPlanDrawerModel.StepPhase] = []
         var text: [(String, Ink)] = []
-        var chips: [DrawerChip] = []
-        var trailing: [(String, Ink)] = []
         static func == (a: DrawerHeader, b: DrawerHeader) -> Bool {
-            a.track == b.track && a.chips == b.chips && a.text.map(\.0) == b.text.map(\.0) && a.trailing.map(\.0) == b.trailing.map(\.0)
+            a.track == b.track && a.text.map(\.0) == b.text.map(\.0)
         }
     }
     struct DrawerLayout: Equatable {
@@ -388,13 +255,8 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
     private var headerHeight: CGFloat { 32 * CGFloat(zoom.factor) }
     private var rowHeight: CGFloat { 22 * CGFloat(zoom.factor) }
 
-    private func refreshDrawer() {
-        guard !fixtureDrawer else { relayoutDrawer(); return }
-        drawer = direction == .shipped ? nil : presentation.map(LeadPlanDrawerModel.init(adapting:))
-        relayoutDrawer()
-    }
     private func relayoutDrawer() {
-        drawerLayout = drawer.map { Self.layout($0, direction: direction, filter: triageFilter, zoom: zoom) }
+        drawerLayout = drawer.map { Self.layout($0, zoom: zoom) }
     }
 
     func drawerRowRect(_ index: Int, in layout: DrawerLayout) -> NSRect {
@@ -404,7 +266,7 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         return NSRect(x: 0, y: y, width: bounds.width, height: 22 * z)
     }
 
-    // MARK: Pure layout per direction
+    // MARK: Pure layout
 
     private static func ageText(_ seconds: TimeInterval?) -> String? {
         guard let s = seconds, s >= 60 else { return nil }
@@ -444,7 +306,12 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         case .working: return ("Running", .accent(.accentWorking))
         case .idle: return ("Idle", .secondary)
         case .done: return (["Done", ageText(ended)].compactMap { $0 }.joined(separator: " · "), .secondary)
-        case .todo: return (nil, .secondary)
+        case .todo:
+            // Its only helpers failed long ago: say so, quietly.
+            if case .helpers(let hs) = step.owner, !hs.isEmpty, hs.allSatisfy({ $0.stale }) {
+                return (["Failed", ageText(ended)].compactMap { $0 }.joined(separator: " · "), .secondary)
+            }
+            return (nil, .secondary)
         }
     }
     private static func stepRow(_ m: LeadPlanDrawerModel, _ i: Int, lead: String?) -> DrawerRow {
@@ -508,7 +375,7 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         return out
     }
 
-    static func layout(_ m: LeadPlanDrawerModel, direction: LeadPlanDrawerDirection, filter: TriageFilter, zoom: AgentPageZoom) -> DrawerLayout {
+    static func layout(_ m: LeadPlanDrawerModel, zoom: AgentPageZoom) -> DrawerLayout {
         let z = CGFloat(zoom.factor)
         var header = DrawerHeader()
         var rows: [DrawerRow] = []
@@ -516,118 +383,28 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         let budget = drawerRowBudget
         let phases = m.steps.map { m.phase(of: $0) }
         let attention = attentionStrays(m)
-        func decisionRow() {
-            guard let d = m.decision else { return }
-            rows.append(DrawerRow(glyph: .dot(.accentApproval), title: d, owner: "Lead", state: "Needs you", stateInk: .accent(.accentApproval)))
-            if !m.options.isEmpty { railAfter = rows.count }
+        // The plan IS the list, numbered by plan position. What needs you sits
+        // above it; everything the plan does not name is one line.
+        header.text = headline(m)
+        if m.collapsed, !m.steps.isEmpty { header.track = phases; header.text[0].0 = "\(phases.filter { $0 == .done }.count) of \(m.steps.count) done" }
+        if m.collapsed, m.decision == nil, let c = current(m) {
+            let (word, ink) = stateWord(phases[c], step: m.steps[c])
+            header.text.append((" · " + (word.map { "\($0): " } ?? "Next: ") + m.steps[c].title,
+                                isAttention(phases[c]) ? ink : .secondary))
         }
-        var leadColumn: CGFloat = 0
-
-        switch direction {
-        case .shipped:
-            break
-        case .checklist:
-            // The plan IS the list, numbered by plan position. What needs you
-            // sits above it; everything the plan does not name is one line.
-            header.text = headline(m)
-            if m.collapsed, !m.steps.isEmpty { header.track = phases; header.text[0].0 = "\(phases.filter { $0 == .done }.count) of \(m.steps.count) done" }
-            if m.collapsed, m.decision == nil, let c = current(m) {
-                let (word, ink) = stateWord(phases[c], step: m.steps[c])
-                header.text.append((" · " + (word.map { "\($0): " } ?? "Next: ") + m.steps[c].title,
-                                    isAttention(phases[c]) ? ink : .secondary))
+        if !m.collapsed {
+            if let d = m.decision {
+                rows.append(DrawerRow(glyph: .dot(.accentApproval), title: d, owner: "Lead", state: "Needs you", stateInk: .accent(.accentApproval)))
+                if !m.options.isEmpty { railAfter = rows.count }
             }
-            guard !m.collapsed else { break }
-            decisionRow()
             for h in attention.prefix(2) { rows.append(strayRow(h)) }
             // Never fold the plan itself: `array_status` caps it at six steps.
             for i in m.steps.indices { rows.append(stepRow(m, i, lead: "\(i + 1)")) }
             for h in m.strays where h.phase == .working && rows.count < budget { rows.append(strayRow(h, lead: "")) }
             let folded = m.strays.filter { h in !attention.contains(h) && !rows.contains { $0.ownerAgent != nil && $0.ownerAgent == h.id } }
             if let fold = foldText(folded) { rows.append(DrawerRow(lead: "", title: fold, titleInk: .secondary)) }
-            leadColumn = 18
-        case .track:
-            // One segmented track for the whole plan; the list is Now / Next /
-            // Later, so the drawer is about the present, never the history.
-            header.track = phases
-            if let c = current(m) {
-                header.text = [("\(c + 1) of \(m.steps.count) · ", .secondary), (m.steps[c].title, .primary)]
-                let (word, ink) = stateWord(phases[c], step: m.steps[c])
-                header.trailing = [(owner(m.steps[c].owner).0, .secondary)] + (word.map { [("  " + $0, ink)] } ?? [])
-            } else if !m.steps.isEmpty {
-                header.text = [("All \(m.steps.count) steps done", .secondary)]
-            } else {
-                header.text = [("Helpers", .secondary)]
-            }
-            if attentionCount(m) > 0, m.collapsed {
-                let n = attentionCount(m)
-                header.trailing = [("\(n) need\(n == 1 ? "s" : "") you", .accent(.accentApproval))]
-            }
-            guard !m.collapsed else { break }
-            // Open, the Now row says it; the header keeps only the track and title.
-            header.trailing = []
-            decisionRow()
-            if !rows.isEmpty { rows[0].lead = "Now" }
-            var now = phases.indices.filter { isAttention(phases[$0]) || phases[$0] == .working || phases[$0] == .idle }
-            for h in attention.prefix(2) { rows.append(strayRow(h, lead: rows.isEmpty ? "Now" : "")) }
-            let nowRoom = max(1, budget - rows.count - 3)
-            if now.count > nowRoom { now = Array(now.prefix(nowRoom)) }
-            for i in now { rows.append(stepRow(m, i, lead: rows.isEmpty ? "Now" : "")) }
-            for h in m.strays where h.phase == .working && rows.count < budget - 3 { rows.append(strayRow(h, lead: rows.isEmpty ? "Now" : "")) }
-            let later = phases.indices.filter { phases[$0] == .todo && !now.contains($0) }
-            if let next = later.first { rows.append(stepRow(m, next, lead: "Next")) }
-            if later.count > 1 {
-                let owners = Set(later.dropFirst().map { owner(m.steps[$0].owner).0 })
-                rows.append(DrawerRow(lead: "Later", title: "\(later.count - 1) more step\(later.count == 2 ? "" : "s")" + (owners.count == 1 ? " · \(owners.first!)" : ""), titleInk: .secondary))
-            }
-            let done = phases.filter { $0 == .done }.count
-            let folded = m.strays.filter { !attention.contains($0) && $0.phase != .working }
-            let tail = [done > 0 ? "\(done) step\(done == 1 ? "" : "s") done" : nil, foldText(folded, prefix: nil)]
-                .compactMap { $0 }.filter { !$0.isEmpty }
-            if !tail.isEmpty { rows.append(DrawerRow(lead: "Also", title: tail.joined(separator: " · "), titleInk: .secondary)) }
-            leadColumn = 44
-        case .triage:
-            // The resting drawer is a row of counts; the list below is a filter
-            // over ONE list, defaulting to what is live.
-            let active = phases.indices.filter { isAttention(phases[$0]) || phases[$0] == .working }
-            let idle = phases.indices.filter { phases[$0] == .idle }
-            let idleStrays = m.strays.filter { $0.phase == .idle }
-            let doneSteps = phases.indices.filter { phases[$0] == .done }
-            let doneStrays = m.strays.filter { $0.phase == .done }
-            let stale = m.strays.filter(\.stale)
-            let doneCount = doneSteps.count
-            header.chips.append(DrawerChip(glyph: .none, text: m.steps.isEmpty ? "Helpers" : "Plan \(doneCount)/\(m.steps.count)", ink: .primary, filter: .plan))
-            let needs = active.filter { isAttention(phases[$0]) }.count + attention.count + (m.decision == nil ? 0 : 1)
-            if needs > 0 { header.chips.append(DrawerChip(glyph: .dot(.accentApproval), text: "\(needs) need\(needs == 1 ? "s" : "") you", ink: .accent(.accentApproval), filter: .active)) }
-            let running = active.filter { phases[$0] == .working }.count + m.strays.filter { $0.phase == .working }.count
-            if running > 0 { header.chips.append(DrawerChip(glyph: .dot(.accentWorking), text: "\(running) running", ink: .primary, filter: .active)) }
-            if idle.count + idleStrays.count > 0 { header.chips.append(DrawerChip(glyph: .ring(true), text: "\(idle.count + idleStrays.count) idle", ink: .secondary, filter: .idle)) }
-            if !doneStrays.isEmpty { header.chips.append(DrawerChip(glyph: .dot(.accentDone), text: "\(doneStrays.count) done", ink: .secondary, filter: .done)) }
-            if !stale.isEmpty { header.chips.append(DrawerChip(glyph: .none, text: "\(stale.count) old failures", ink: .secondary, filter: .older)) }
-            guard !m.collapsed else { break }
-            var candidate: [DrawerRow] = []
-            switch filter {
-            case .active:
-                decisionRow()
-                candidate = attention.map { strayRow($0) } + active.map { stepRow(m, $0, lead: "\($0 + 1)") }
-                    + m.strays.filter { $0.phase == .working }.map { strayRow($0) }
-                if let next = phases.indices.first(where: { phases[$0] == .todo || phases[$0] == .idle }), !active.contains(next) {
-                    candidate.append(stepRow(m, next, lead: "\(next + 1)"))
-                }
-            case .plan: candidate = m.steps.indices.map { stepRow(m, $0, lead: "\($0 + 1)") }
-            case .idle: candidate = idle.map { stepRow(m, $0, lead: "\($0 + 1)") } + idleStrays.map { strayRow($0) }
-            case .done: candidate = doneStrays.map { strayRow($0) }
-            case .older: candidate = stale.map { strayRow($0) }
-            }
-            let shownSteps = Set(candidate.compactMap { Int($0.lead ?? "") })
-            let hidden = m.steps.count - shownSteps.count
-            let room = budget - rows.count - (hidden > 0 && filter == .active ? 1 : 0)
-            defer { if hidden > 0, filter == .active, !m.collapsed { rows.append(DrawerRow(lead: "", title: "\(hidden) more step\(hidden == 1 ? "" : "s") in the plan", titleInk: .secondary)) } }
-            if candidate.count > room {
-                rows += candidate.prefix(room - 1)
-                rows.append(DrawerRow(lead: "", title: "\(candidate.count - room + 1) more", titleInk: .secondary))
-            } else { rows += candidate }
-            leadColumn = 18
         }
+        let leadColumn: CGFloat = 18
         let railHeight = railAfter == nil ? 0 : ComposerReplyOptionRailView.railHeight(zoom: zoom)
         let height = 32 * z + CGFloat(rows.count) * 22 * z + railHeight + (rows.isEmpty ? 0 : 6 * z)
         let railY = railAfter.map { 32 * z + CGFloat($0) * 22 * z }
@@ -690,16 +467,6 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
             path.stroke()
         }
     }
-    private func chipFrames(_ layout: DrawerLayout) -> [(TriageFilter, NSRect)] {
-        let z = CGFloat(zoom.factor)
-        var x = 16 * z
-        let h = 20 * z, y = (headerHeight - h) / 2
-        return layout.header.chips.map { chip in
-            let w = width(chip.text) + (chip.glyph == .none ? 16 : 26) * z
-            defer { x += w + 6 * z }
-            return (chip.filter, NSRect(x: x, y: y, width: w, height: h))
-        }
-    }
     private func drawDrawer(_ layout: DrawerLayout) {
         let z = CGFloat(zoom.factor)
         let theme = effectiveTokenTheme
@@ -728,24 +495,8 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
             }
             x += n * (cell + 2 * z) + 8 * z
         }
-        if !layout.header.chips.isEmpty {
-            for (chip, (_, r)) in zip(layout.header.chips, chipFrames(layout)) where r.maxX <= headerMax {
-                let selected = !(drawer?.collapsed ?? true) && chip.filter == triageFilter && chip.filter != .active
-                (selected ? AgentSurfaceRole.rowSelected : AgentSurfaceRole.artifact).color.nsColor(for: theme).setFill()
-                NSBezierPath(roundedRect: r, xRadius: r.height / 2, yRadius: r.height / 2).fill()
-                var tx = r.minX + 8 * z
-                if chip.glyph != .none { drawGlyph(chip.glyph, centerX: tx + 3 * z, midY: headerMid); tx += 10 * z }
-                line(chip.text, x: tx, midY: headerMid, maxX: r.maxX - 6 * z, ink: chip.ink)
-            }
-        }
-        var trailingX = headerMax
-        for (s, ink) in layout.header.trailing.reversed() {
-            let w = min(width(s), max(0, trailingX - x - 40 * z))
-            line(s, x: trailingX - w, midY: headerMid, maxX: trailingX, ink: ink)
-            trailingX -= w
-        }
         for (s, ink) in layout.header.text {
-            x += line(s, x: x, midY: headerMid, maxX: trailingX - 12 * z, ink: ink)
+            x += line(s, x: x, midY: headerMid, maxX: headerMax - 12 * z, ink: ink)
         }
 
         let glyphX = inset + 3 * z

@@ -113,10 +113,12 @@ enum ManagedLeadPlanChecks {
         try still("2-roster-live")
 
         // B. Clicking an owner reveals that helper, through the real event path.
-        let helperIndex = view.presentation!.steps.firstIndex { $0.ownerAgent == helper }!
+        guard let layout = view.drawerLayout, let helperIndex = layout.rows.firstIndex(where: { $0.ownerAgent == helper }) else {
+            throw WorkspaceAgentReportChecks.Failure(description: "lead-plan: no drawer row for the helper")
+        }
         guard let hostWindow = view.window else { throw WorkspaceAgentReportChecks.Failure(description: "lead-plan: drawer has no window") }
-        let ownerRect = view.ownerRect(helperIndex)
-        let owner = view.convert(NSPoint(x: ownerRect.midX, y: ownerRect.midY), to: nil)
+        let ownerRect = view.drawerRowRect(helperIndex, in: layout)
+        let owner = view.convert(NSPoint(x: ownerRect.maxX - 70, y: ownerRect.midY), to: nil)
         var revealed: [AgentID] = []
         let originalReveal = tile.onRevealAgent
         tile.onRevealAgent = { id, parent in revealed.append(id); originalReveal?(id, parent) }
@@ -130,7 +132,7 @@ enum ManagedLeadPlanChecks {
         hostWindow.orderFrontOffscreenForChecks()
         click(at: owner)
         try expect(revealed == [helper], "clicking the owner did not ask to reveal that helper: \(revealed); hit=\(String(describing: hostWindow.contentView?.hitTest(hostWindow.contentView!.convert(owner, from: nil))).prefix(120)) visible=\(hostWindow.isVisible) viewFrame=\(view.frame) inWin=\(owner) ownerRect=\(ownerRect) tile.onReveal=\(originalReveal != nil)")
-        let titleCell = view.convert(NSPoint(x: 40, y: view.rowRect(helperIndex).midY), to: nil)
+        let titleCell = view.convert(NSPoint(x: 40, y: view.drawerRowRect(helperIndex, in: layout).midY), to: nil)
         click(at: titleCell)
         try expect(revealed == [helper], "clicking a title must not reveal a helper")
         try expect(b.f.delegate.revealAgentFromInbox(helper.rawValue), "the app could not reveal that helper's tile")
@@ -400,7 +402,11 @@ enum ManagedLeadPlanChecks {
         // 4. A real change still lands, live: one helper finishing two minutes
         // ago moves to Done. The height grows once (a new section), the other
         // rows keep their order, and the owner column does not shift sideways.
-        let ownerBefore = view.ownerRect(view.presentation!.steps.firstIndex { $0.ownerAgent == helpers[0] }!)
+        func ownerCell(_ id: AgentID) -> NSRect {
+            guard let layout = view.drawerLayout, let i = layout.rows.firstIndex(where: { $0.ownerAgent == id }) else { return .zero }
+            return view.drawerRowRect(i, in: layout)
+        }
+        let ownerBefore = ownerCell(helpers[0])
         trace.removeAll(); heightChanges = 0
         let done = helpers[3], doneThread = AgentSupervisor.threadId(for: done)
         let ended = Date().addingTimeInterval(-120)
@@ -415,7 +421,7 @@ enum ManagedLeadPlanChecks {
         try expect(after.filter(\.isSection).map(\.title) == ["Working", "Done"], "sections after a finish: \(rows(view.presentation))\n\(dump())")
         try expect(after.compactMap(\.ownerAgent) == order.filter { $0 != done } + [done], "a finish reordered the others: \(rows(view.presentation))")
         try expect(heightChanges <= 1 && trace.count <= 2, "a finish took \(trace.count) changes / \(heightChanges) height changes\n\(dump())")
-        let ownerAfter = view.ownerRect(after.firstIndex { $0.ownerAgent == helpers[0] }!)
+        let ownerAfter = ownerCell(helpers[0])
         try expect(ownerAfter.minX == ownerBefore.minX && ownerAfter.width == ownerBefore.width,
                    "the owner column shifted when a row gained an age: \(ownerBefore) -> \(ownerAfter)")
         try expect(after.first { $0.ownerAgent == done }?.note == "2 min ago", "finished helper lost its age: \(rows(view.presentation))")
