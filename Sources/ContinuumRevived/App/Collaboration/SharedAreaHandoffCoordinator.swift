@@ -2,6 +2,17 @@ import AppKit
 import ContinuumRevivedCore
 import ContinuumRevivedCollaborationProtocol
 
+/// How often a host asks the relay for work. The relay cannot wake a host, so
+/// the host polls; a quiet host stretches the gap (to 3 s at most, which is the
+/// longest a guest's prompt can wait) and any activity snaps it back to 1 s.
+/// The area snapshot is re-read on every busy poll and every fifth quiet one.
+struct SharedAgentHostPollPacing {
+    private(set) var quietPolls = 0
+    var interval: Duration { quietPolls < 15 ? .seconds(1) : quietPolls < 45 ? .seconds(2) : .seconds(3) }
+    var refreshesState: Bool { quietPolls % 5 == 0 }
+    mutating func settled(busy: Bool) { quietPolls = busy ? 0 : quietPolls + 1 }
+}
+
 /// One area/account host pump. The app retains this independently of a canvas
 /// view. Closing a handoff dialog or area view never stops a provider process.
 @MainActor
@@ -22,12 +33,17 @@ final class SharedAreaHandoffCoordinator {
     private var installedScopes: Set<String> = []
     private let lifetime: Lifetime
     private var isPolling = false
+    private var pacing = SharedAgentHostPollPacing()
+    private var cachedState: Collaboration.State?
+    private let sleep: @Sendable (Duration) async throws -> Void
     /// Relay liveness of the host executing a shared agent, for the dialog's
     /// send-now warning. Supplied by the owning host session.
     var hostLiveness: (@MainActor (SharedArea.ID<SharedArea.Object>) -> Collaboration.HostLiveness?)?
 
     init(model: SharedAgentHandoffController, supervisor: AgentSupervisor,
-         bindings: @escaping @MainActor () -> [SharedAreaLocalSourceBinding]) throws {
+         bindings: @escaping @MainActor () -> [SharedAreaLocalSourceBinding],
+         sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) throws {
+        self.sleep = sleep
         self.model = model; self.supervisor = supervisor; self.bindings = bindings
         let lifetime = Lifetime()
         self.lifetime = lifetime
@@ -53,20 +69,30 @@ final class SharedAreaHandoffCoordinator {
         hostTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                await pollOnce()
-                do { try await Task.sleep(for: .seconds(1)) } catch { return }
+                let busy = await pollOnce(refreshState: pacing.refreshesState || cachedState == nil)
+                pacing.settled(busy: busy)
+                do { try await sleep(pacing.interval) } catch { return }
             }
         }
     }
-    func pollOnce() async {
+    func pollOnce() async { await pollOnce(refreshState: true) }
+    /// Returns whether anything was happening: a waiting command, an error, or
+    /// a changed document.
+    @discardableResult
+    private func pollOnce(refreshState: Bool) async -> Bool {
         let ticket = lifetime.generation
-        guard lifetime.admits(ticket), !isPolling else { return }
+        guard lifetime.admits(ticket), !isPolling else { return true }
         isPolling = true
         defer { isPolling = false }
         let snapshot: Collaboration.State
-        do { snapshot = try await model.transport.state() }
-        catch { return } // Existing gates remain fail-closed through disconnect.
-        guard lifetime.admits(ticket) else { return }
+        var changed = false
+        if refreshState || cachedState == nil {
+            do { snapshot = try await model.transport.state() }
+            catch { cachedState = nil; return true } // Existing gates remain fail-closed through disconnect.
+            changed = cachedState.map { $0.document.revision != snapshot.document.revision || $0.scope.epoch != snapshot.scope.epoch } ?? false
+            cachedState = snapshot
+        } else if let cachedState { snapshot = cachedState } else { return true }
+        guard lifetime.admits(ticket) else { return true }
         let owned = bindings().filter { binding in
             guard let supervisor, let agentID = binding.agentID, supervisor.adoptArchivedAgent(agentID),
                   let record = supervisor.records[agentID] else { return false }
@@ -118,16 +144,19 @@ final class SharedAreaHandoffCoordinator {
             })
             supervisor?.installSharedAgentControlGate(for: agentID, scope: scope, gate: gate)
         }
-        guard lifetime.admits(ticket) else { return }
+        guard lifetime.admits(ticket) else { return true }
         lifetime.dispatchGeneration = ticket
         defer { if lifetime.dispatchGeneration == ticket { lifetime.dispatchGeneration = nil } }
-        await dispatcher.pollOnce(bindings: owned)
-        guard lifetime.admits(ticket) else { return }
+        await dispatcher.pollOnce(bindings: owned, state: snapshot)
+        if dispatcher.lastError != nil { cachedState = nil }
+        let busy = changed || dispatcher.lastPendingCount > 0 || dispatcher.lastError != nil
+        guard lifetime.admits(ticket) else { return true }
         supervisor?.releaseHeldPrompts()
         if let dialog, !model.isBusy {
             await model.refresh(object: dialog.object)
-            guard lifetime.admits(ticket) else { return }
+            guard lifetime.admits(ticket) else { return true }
         }
+        return busy
     }
     func stopHosting() {
         lifetime.active = false; lifetime.generation = UUID(); lifetime.dispatchGeneration = nil

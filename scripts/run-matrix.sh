@@ -2348,6 +2348,7 @@ run_app_check .build/debug/Array --workspace-switch-check
 run_app_check .build/debug/Array --zone-tile-hydration-check
 run_app_check .build/debug/Array --collaboration-native-check
 run_app_check .build/debug/Array --collaboration-full-access-check
+run_app_check .build/debug/Array --shared-host-idle-check
 run_app_check .build/debug/Array --collaboration-cursor-motion-check
 run_app_check .build/debug/Array --shared-area-zone-check
 # Mode A (share one agent, .plans/105): the one-agent zone migration, a real

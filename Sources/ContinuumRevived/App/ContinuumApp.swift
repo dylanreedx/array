@@ -2545,6 +2545,28 @@ enum ContinuumApp {
             NSApp.run()
             return
         }
+        // An idle host polls the relay a bounded number of times.
+        if CommandLine.arguments.contains("--shared-host-idle-check") {
+            setbuf(stdout, nil)
+            setbuf(stderr, nil)
+            _ = NSApplication.shared
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(90))
+                fputs("FAIL: shared host idle exceeded its 90-second deadline\n", stderr)
+                Foundation.exit(1)
+            }
+            Task { @MainActor in
+                do {
+                    try await SharedAgentHostIdleChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+            return
+        }
         if CommandLine.arguments.contains("--agent-record-archive-check") {
             _ = NSApplication.shared
             Task { @MainActor in

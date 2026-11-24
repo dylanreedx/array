@@ -348,21 +348,25 @@ extension AppDelegate {
         // Who has access, re-read on a slow beat while anything is shared, so
         // the tab names someone who joined without the popover open.
         hostedAgentAccessTask = Task { [weak self] in
+            var wait = 15
             while !Task.isCancelled {
                 guard let self, let account = (try? collaborationAccountModel())?.activeAccount?.id,
                       hostedAgentShares?.entries(account: account).isEmpty == false else { break }
                 // An open popover reads access itself, every 2 s.
-                if !shareEntry.isPresented { await refreshHostedAgentPeople() }
-                try? await Task.sleep(for: .seconds(15))
+                // Nobody joining or leaving stretches the beat to a minute.
+                if !shareEntry.isPresented { wait = await refreshHostedAgentPeople() ? 15 : min(wait * 2, 60) }
+                else { wait = 15 }
+                try? await Task.sleep(for: .seconds(wait))
             }
             self?.hostedAgentAccessTask = nil
         }
     }
 
     /// Who has opened each shared agent, as the relay lists them now.
-    func refreshHostedAgentPeople() async {
+    @discardableResult
+    func refreshHostedAgentPeople() async -> Bool {
         guard let model = try? collaborationAccountModel(), let account = model.activeAccount?.id,
-              let entries = hostedAgentShares?.entries(account: account) else { return }
+              let entries = hostedAgentShares?.entries(account: account) else { return false }
         var changed = false
         for entry in entries {
             // Yield between areas when Share opens, and ignore a host revoked during the read.
@@ -375,6 +379,7 @@ extension AppDelegate {
             if hostedAgentPeople[entry.area] != names { hostedAgentPeople[entry.area] = names; changed = true }
         }
         if changed { refreshHostedAgentMarks() }
+        return changed
     }
 
     // MARK: - Migration from 0.7.37's one-agent zones

@@ -46,6 +46,9 @@ public final class SharedAgentHostDispatcher {
     private var registrations: [SharedArea.ID<SharedArea.Object>: (binding: SharedAreaLocalSourceBinding, epoch: Int64)] = [:]
     public private(set) var lastError: (any Error)?
     public private(set) var lastReceipts: [Collaboration.AgentDispatchReceipt] = []
+    /// How many commands the last poll found waiting for this host. Zero with
+    /// no error means the host was idle.
+    public private(set) var lastPendingCount = 0
 
     public init(identity: Collaboration.Identity, transport: any SharedAgentHandoffTransport, journal: SharedAgentHostJournal,
                 bootID: UUID? = nil, ready: @escaping Ready = { _ in true }, execute: @escaping Execute) {
@@ -55,11 +58,15 @@ public final class SharedAgentHostDispatcher {
 
     /// Only the original owning app supplies real local bindings and an actual
     /// supervisor adapter. A recipient's empty list creates no execution path.
-    public func pollOnce(bindings: [SharedAreaLocalSourceBinding]) async {
+    /// `state` is the area snapshot the caller just read; passing it spares the
+    /// relay a second identical read in the same tick.
+    public func pollOnce(bindings: [SharedAreaLocalSourceBinding], state: Collaboration.State? = nil) async {
         guard !isPolling, !bindings.isEmpty else { return }
         isPolling = true; defer { isPolling = false }
+        lastPendingCount = 0
         do {
-            let current = try await transport.state()
+            let current: Collaboration.State
+            if let state { current = state } else { current = try await transport.state() }
             var admitted: [SharedAreaLocalSourceBinding] = []
             for binding in bindings {
                 guard binding.agentID != nil,
@@ -80,7 +87,9 @@ public final class SharedAgentHostDispatcher {
                 // busy stays queued on the service, unclaimed, and every later
                 // prompt for that agent waits behind it until the turn ends.
                 var waiting: Set<SharedArea.ID<SharedArea.Object>> = []
-                for receipt in try await transport.pending(host: host.rawValue) {
+                let pending = try await transport.pending(host: host.rawValue)
+                lastPendingCount += pending.count
+                for receipt in pending {
                     guard let binding = admitted.first(where: { $0.object == receipt.command.object && $0.host == receipt.command.source.host && $0.binding == receipt.command.source.binding }) else { continue }
                     if receipt.phase == .queued, waiting.contains(binding.object) || (receipt.command.mode == .send && !ready(binding)) {
                         waiting.insert(binding.object); continue
