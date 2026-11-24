@@ -554,6 +554,26 @@ enum WorkspaceAPIChecks {
         let own = try result(open(f, ["relativePath": "notes.md", "presentation": ["camera": "preserve"]]), "own open")
         try expect(uuid(own["tileId"]) == f.fileTileB && prompts.isEmpty, "an in-grant open prompts nobody")
 
+        // A deferred open still lands BESIDE the calling agent's tile, in its zone,
+        // and says plainly that the camera did not follow.
+        let beside = try result(open(f, ["relativePath": "other.md", "presentation": ["camera": "preserve"]]), "open beside the agent")
+        guard let besideTile = uuid(beside["tileId"]),
+              let agentFrame = f.canvas.navigationTileSnapshot(for: f.agentTileB)?.worldFrame,
+              let rect = beside["actualWorldRect"]?.object else {
+            throw Failure(message: "the open returned no tile or the agent tile has no frame: \(beside)")
+        }
+        let gap = TileSpawner.anchoredFileGap
+        let tileX = (rect["x"]?.double ?? -1), tileY = (rect["y"]?.double ?? -1)
+        let tileW = (rect["width"]?.double ?? 0), tileH = (rect["height"]?.double ?? 0)
+        let dx = max(0, max(agentFrame.x - (tileX + tileW), tileX - (agentFrame.x + agentFrame.width)))
+        let dy = max(0, max(agentFrame.y - (tileY + tileH), tileY - (agentFrame.y + agentFrame.height)))
+        try expect(beside["presentation"]?.string == "deferred" && uuid(beside["actualZoneId"]) == f.zoneB
+                   && (dx > 0 || dy > 0) && max(dx, dy) <= 2 * gap + 1,
+                   "a deferred open lands adjacent to the agent tile in its zone: dx=\(dx) dy=\(dy) gap=\(gap) tile=\(besideTile) zone=\(String(describing: beside["actualZoneId"])) rect=\(rect)")
+        let hint = beside["presentationHint"]?.string ?? ""
+        try expect(hint.contains("Placed beside you") && hint.contains("not revealed"),
+                   "a deferred open tells the agent where the tile is and that it was not revealed: \(hint.debugDescription)")
+
         // W27 — explicit Pa overrides the Pb default; approval once; Pa's SENTINEL.
         let fileTilesBefore = fileTileCount(f)
         decisions = [.allowOnce]
@@ -700,6 +720,8 @@ enum WorkspaceAPIChecks {
         try expect(deferred["presentationEffects"]?.object?["camera"]?.string == "deferred" && deferred["presentation"]?.string == "deferred",
                    "a newer user interaction defers the reveal: \(deferred["presentationEffects"] as Any)")
         try expect(f.canvas.qaViewportApplyCount == appliesBeforeDeferred, "a deferred reveal does not move the camera")
+        try expect(deferred["presentationHint"]?.string?.contains("working elsewhere") == true,
+                   "a reveal deferred by the user's own activity says so: \(deferred["presentationHint"] as Any)")
         try expect(f.runtime.interactionGeneration == before.generation + 1, "the user's click bumped the generation exactly once")
         // (e) a stale expected generation supplied by the caller also defers.
         let stale = try result(open(f, ["relativePath": "notes.md", "checkoutHandle": f.paHandle.rawValue,

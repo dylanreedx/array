@@ -1041,6 +1041,10 @@ final class WorkspaceAPIService {
             } else {
                 result.presentation = .unavailable
             }
+            result.presentationHint = Self.presentationHint(
+                presentation: result.presentation, effects: result.presentationEffects,
+                placedBesideAgent: anchor != nil && anchor == record.tileId,
+                alreadyOpen: result.document == .existing)
         }
 
         remember(agentId: agentId, WorkspaceRecentOperation(
@@ -1054,6 +1058,24 @@ final class WorkspaceAPIService {
     }
 
     // MARK: - Presentation (§16)
+
+    /// What the agent should tell the user when the tile did not come into view.
+    /// 48 of 58 opens in one user's sessions were deferred while the agent said
+    /// "opened", and the user asked where it was.
+    static func presentationHint(
+        presentation: ArtifactOpenResult.Presentation, effects: WorkspacePresentationEffects,
+        placedBesideAgent: Bool, alreadyOpen: Bool
+    ) -> String? {
+        guard presentation != .navigated else { return nil }
+        let where_ = alreadyOpen ? "Already open on the canvas" : (placedBesideAgent ? "Placed beside you" : "Placed in your zone")
+        let why: String
+        switch effects.camera {
+        case .deferred: why = "not revealed because the user was working elsewhere"
+        case .unavailable: why = "not revealed because that would have moved the user's armed zone"
+        default: why = "not revealed because the camera was asked to stay where it is"
+        }
+        return "\(where_); \(why). Say where it is instead of saying it is in view."
+    }
 
     func present(
         tileId: UUID, policy: WorkspacePresentationPolicy, generationAtDispatch: UInt64,
@@ -1360,6 +1382,7 @@ struct AnyHashableJSON: Equatable, CustomStringConvertible {
     var string: String? { value as? String }
     var bool: Bool? { value as? Bool }
     var int: Int? { (value as? NSNumber)?.intValue }
+    var double: Double? { (value as? NSNumber)?.doubleValue }
     var object: [String: AnyHashableJSON]? { (value as? [String: Any])?.mapValues(AnyHashableJSON.init(any:)) }
     var array: [AnyHashableJSON]? { (value as? [Any])?.map(AnyHashableJSON.init(any:)) }
 }

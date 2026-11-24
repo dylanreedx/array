@@ -530,6 +530,9 @@ public struct ArtifactOpenResult: Codable, Equatable, Sendable {
     /// Any step failed after another committed. Retry only the failed step.
     public var partial: Bool
     public var failureMessage: String?
+    /// One plain sentence for the agent to relay when the tile is NOT on screen:
+    /// where it is and why the camera did not follow. Nil when it was revealed.
+    public var presentationHint: String?
 
     public init(
         operationId: String,
