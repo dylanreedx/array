@@ -38,6 +38,9 @@ hard rules are the same file — `CLAUDE.md` symlinks to it.
   compact helper styling when a scoped list omits its lead
 - [Notification paths](./internals/notification-paths.md) — maintained trigger,
   policy, delivery and action map; all notification changes update this contract
+- [macOS permissions](./internals/permissions.md) — every TCC permission Array
+  can touch, when it asks, denial recovery, relaunch needs, and why programs in
+  tiles are charged to Array
 - [Tile selection and group transforms](./internals/tile-multiselect.md) — interaction
   contract, gesture ownership, performance and release verification
 - Workspace API v1 (CX-01) — the frozen contracts are the header of

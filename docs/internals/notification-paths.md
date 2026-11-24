@@ -690,6 +690,12 @@ deduplicated per agent/request/category; they cannot establish a fresh task.
 
 These do not pass through Fly or the phone classifier.
 
+Authorization for MAC-01 and MAC-02 is requested on the first banner Array
+tries to deliver, never at launch. A denial is quiet: the banner is skipped
+with a stderr line, and the Dock badge and in-app awareness (MAC-03..08),
+which need no permission, carry on. The full permission inventory is in
+[macOS permissions](permissions.md).
+
 | ID | Trigger | Policy → surface | Suppression / resolution |
 | --- | --- | --- | --- |
 | MAC-01 | Attention count changes during agent-surface push | Always update Dock badge; if notify=true, app inactive and count 0→positive, local needs-attention banner with count and default sound | Active app, notify=false, unchanged-positive/increasing-positive count: no banner; fixed request ID; OS permission and real bundle required |
