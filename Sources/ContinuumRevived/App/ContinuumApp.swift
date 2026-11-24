@@ -5797,6 +5797,18 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--sidebar-lead-tally-live-check") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    print(try SidebarLeadTallyLiveChecks.run())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: sidebar-lead-tally-live: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
         if CommandLine.arguments.contains("--sidebar-hover-card-overlay-check") {
             _ = NSApplication.shared
             MainActor.assumeIsolated {

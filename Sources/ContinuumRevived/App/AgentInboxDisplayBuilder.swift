@@ -220,7 +220,9 @@ nonisolated enum InboxDisplayBuilder {
         let visibleIDs = Set(visible.map(\.id))
         updateSidebarCore(
             &model, input: input,
-            liveRows: sorted.filter { $0.lifecycle == .active }, shownIDs: visibleIDs)
+            liveRows: sorted.filter { $0.lifecycle == .active }, familyRows: sorted.filter {
+                $0.lifecycle == .active || [.working, .approval, .input].contains($0.state)
+            }, shownIDs: visibleIDs)
         // A fold can remove the model's original after-row without removing the
         // ancestor remainder it anchored. Re-anchor each still-visible parent's
         // affordance to the last row that remains visible in that parent's bounded
@@ -337,14 +339,16 @@ nonisolated enum InboxDisplayBuilder {
     /// Recompute the shared core over the rows the list is drawing.
     private static func updateSidebarCore(
         _ model: inout InboxDisplayModel, input: InboxDisplayInputs,
-        liveRows: [AgentInboxRow], shownIDs: Set<UUID>
+        liveRows: [AgentInboxRow], familyRows: [AgentInboxRow], shownIDs: Set<UUID>
     ) {
         model.sidebarClearIDs = SidebarClear.eligibleIDs(rows: liveRows, standing: input.standingLeadIDs)
         model.sidebarIncidents = SidebarIncidentDismissals.visible(
             SidebarIncidents.build(rows: liveRows), dismissed: input.dismissedIncidents, rows: liveRows)
         var tallies: [UUID: SidebarLeadTally] = [:]
         for lead in liveRows where lead.depth == 0 && model.parentsWithChildren.contains(lead.id) {
-            tallies[lead.id] = SidebarLeadTally.tally(leadId: lead.id, rows: liveRows, shownIDs: shownIDs)
+            // A helper that is running, or waiting on you, is counted by its own
+            // state whatever its lifecycle says; settled finished ones stay out.
+            tallies[lead.id] = SidebarLeadTally.tally(leadId: lead.id, rows: familyRows, shownIDs: shownIDs)
         }
         model.sidebarTallies = tallies
         model.sidebarFamilyChips = input.sidebarLayout == .quietInbox
