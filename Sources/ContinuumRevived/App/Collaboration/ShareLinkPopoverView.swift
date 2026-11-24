@@ -194,9 +194,11 @@ final class ShareLinkPopoverView: NSView, NSTextFieldDelegate {
             messageLabel.stringValue = live.isEmpty
                 ? "Already shared. No link is live; New link makes one."
                 : "Already shared. Live: \(live.joined(separator: ", ")). Its secret stays with whoever copied it; New link makes another."
+        } else if case .used = phase, let person = session.people.first {
+            messageLabel.stringValue = "The link was used, so it no longer works. \(person.label) keeps full access until you remove them."
         } else if case .used = phase {
-            let name = session.people.first?.label ?? "The person who opened it"
-            messageLabel.stringValue = "The link was used, so it no longer works. \(name) keeps full access until you remove them."
+            // Whoever opened it has been removed (or has left): say so.
+            messageLabel.stringValue = "The link was used, so it no longer works. Nobody has access now; New link makes another."
         } else {
             messageLabel.stringValue = ""
         }

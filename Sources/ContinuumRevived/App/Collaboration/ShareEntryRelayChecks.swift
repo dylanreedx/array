@@ -435,13 +435,48 @@ enum ShareEntryRelayChecks {
             "without reopening, the popover lists Sam with Remove and offers Revoke everyone's access")
         try await eventually("T's tab names Sam") { canvas.tileView(for: agentA)?.qaOwnershipTabText == "Yours · shared with Sam" }
         try expect(true, "once Sam has joined, T's tab reads \"Yours · shared with Sam\"")
-        try ShareEntryChecks.click(existing.copyButton)
-        try await eventually("New link on the shared area") { !existing.session.isWorking && existing.session.link != nil }
-        let fresh = existing.session.link
+        // 5a. Remove Sam. The popover, its copy and T's tab agree he is gone,
+        //     and stay so once the popover is closed and the slow access
+        //     poll reads the relay (the walk saw the tab name him again).
+        try ShareEntryChecks.click(existing.removeButtons[0])
+        try await eventually("Sam is removed") { !existing.session.isWorking && existing.session.people.isEmpty }
+        existing.layoutSubtreeIfNeeded()
+        try expect(existing.session.failure == nil && !existing.qaMessageText.contains("keeps full access"),
+            "with the only person removed, the popover no longer says they keep access (\(existing.qaMessageText))")
+        try await eventually("T's tab drops Sam") { canvas.tileView(for: agentA)?.qaOwnershipTabText == "Yours · shared" }
+        app.shareEntry.dismiss()
+        await app.refreshHostedAgentPeople()
+        try expect(canvas.tileView(for: agentA)?.qaOwnershipTabText == "Yours · shared",
+            "after Remove, the closed popover's access poll keeps T's tab at \"Yours · shared\" (\(canvas.tileView(for: agentA)?.qaOwnershipTabText ?? "none"))")
+        let again = try share(agentA)
+        try await eventually("the reopened popover reads access") { !again.session.isWorking && again.session.area == areaA }
+        try ShareEntryChecks.click(again.copyButton)
+        try await eventually("New link on the shared area") { !again.session.isWorking && again.session.link != nil }
+        let fresh = again.session.link
         try expect(fresh?.area.rawValue == areaA && fresh?.id != linkA.id && pasteboard.string(forType: .string) == linkA.url.absoluteString,
-            "New link mints a second link on the same area (\(existing.session.failure ?? ""))")
-        try ShareEntryChecks.click(existing.currentRevokeButton)
-        try await eventually("revoke everyone") { !existing.session.isWorking && existing.session.phase == .revoked(area: areaA) }
+            "New link mints a second link on the same area (\(again.session.failure ?? ""))")
+        // 5b. The walk's case: the popover's own link is used, so it reads
+        //     "The link was used…"; then its only person is removed. The copy
+        //     must stop saying they keep access.
+        if let fresh {
+            let used = try await open(fresh.url, as: "Priya", insecureLoopback: true)
+            try expect(used == .opened(area: areaA), "the second link admits Priya")
+            try await eventually("the popover sees its link used by Priya") {
+                if case .used = again.session.phase { return again.session.people.map(\.label).contains("Priya") }
+                return false
+            }
+            again.layoutSubtreeIfNeeded()
+            try expect(again.qaMessageText.contains("Priya keeps full access"),
+                "a used link's popover names who holds access (\(again.qaMessageText))")
+            for button in again.removeButtons { try ShareEntryChecks.click(button)
+                try await eventually("a person is removed") { !again.session.isWorking } }
+            try await eventually("everyone is removed") { !again.session.isWorking && again.session.people.isEmpty }
+            again.layoutSubtreeIfNeeded()
+            try expect(!again.qaMessageText.contains("keeps full access") && !again.qaMessageText.contains("The person who opened it"),
+                "once the only person is removed, the used link's popover no longer says anyone keeps access (\(again.qaMessageText))")
+        }
+        try ShareEntryChecks.click(again.currentRevokeButton)
+        try await eventually("revoke everyone") { !again.session.isWorking && again.session.phase == .revoked(area: areaA) }
         var afterRevoke: [Collaboration.ShareLinkAccess] = []
         try await eventually("the relay ends every link on the area") {
             app.pendingShareRevocations?.contains(area: areaA) == false
