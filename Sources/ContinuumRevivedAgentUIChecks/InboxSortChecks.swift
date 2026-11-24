@@ -1144,7 +1144,7 @@ private func runInboxFanoutCheck() {
     expect(remainder.hiddenWorking == 0 && remainder.hiddenNeedsYou == 0 && remainder.hiddenFailed == 1,
            "hidden subtree state tallies are separate from the parent's own state — got working \(remainder.hiddenWorking), needs \(remainder.hiddenNeedsYou), failed \(remainder.hiddenFailed)")
     let aged = InboxSort.boundedForInbox(rows: sorted, now: now.addingTimeInterval(31 * 60))
-    expect(aged.rows.map(\.id) == [parentID, childIDs[1], childIDs[0], childIDs[4], grandchildID, childIDs[3]]
+    expect(aged.rows.map(\.id) == [parentID, childIDs[0], childIDs[1], childIDs[4], grandchildID, childIDs[3]]
            && aged.remainders.first?.title == "6 more · 1 failed",
            "31 minutes on, the finished children fold — got \(aged.rows.map(\.id)), \(aged.remainders.first?.title ?? "nil")")
     expect(bounded.accountedIDs(for: sorted) == Set(sorted.map(\.id)),
@@ -1167,7 +1167,7 @@ private func runInboxFanoutCheck() {
     let uncappedInput = [inputRows.last!] + Array(inputRows.prefix(4))
     let uncappedSorted = InboxSort.sortForInbox(rows: uncappedInput)
     let uncapped = InboxSort.boundedForInbox(rows: uncappedSorted, now: now)
-    expect(uncapped.rows.map(\.id) == [parentID, childIDs[1], childIDs[0], childIDs[3]]
+    expect(uncapped.rows.map(\.id) == [parentID, childIDs[0], childIDs[1], childIDs[3]]
            && uncapped.remainders.first?.hiddenChildIDs == [childIDs[2]],
            "an uncapped group shows needs you then working, and folds the opened failure — got \(uncapped.rows.map(\.id))")
     let unopenedFailure = AgentInboxRow(
@@ -1177,7 +1177,7 @@ private func runInboxFanoutCheck() {
         terminalIsUnread: true)
     let unopenedSorted = InboxSort.sortForInbox(rows: uncappedInput.map { $0.id == childIDs[2] ? unopenedFailure : $0 })
     expect(InboxSort.boundedForInbox(rows: unopenedSorted, now: now).rows.map(\.id)
-           == [parentID, childIDs[1], childIDs[0], childIDs[3], childIDs[2]]
+           == [parentID, childIDs[0], childIDs[1], childIDs[3], childIDs[2]]
            && InboxSort.rollups(in: unopenedSorted)[parentID]?.unopenedFailed == 1,
            "a failure you have not opened shows once, after the live children, and its parent counts it")
 
