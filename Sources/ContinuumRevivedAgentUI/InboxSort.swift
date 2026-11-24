@@ -431,6 +431,13 @@ public enum InboxSort {
         }
     }
 
+    /// The order of a lead's need-you helpers, oldest first, ties by id. The lead
+    /// tile's Helpers section and the sidebar both sort by this one function, so
+    /// the two lists name the same helpers in the same order.
+    public static func needsYouOrder(_ lhs: (createdAt: Date, id: UUID), _ rhs: (createdAt: Date, id: UUID)) -> Bool {
+        (lhs.createdAt, lhs.id.uuidString) < (rhs.createdAt, rhs.id.uuidString)
+    }
+
     /// What a lead's card shows. Each parent's children, in this order: those
     /// that need you, then those working (both in the frozen spawn order), then
     /// those that finished within `recentSubagentWindow`, newest first, at most
@@ -524,6 +531,10 @@ public enum InboxSort {
             }
             let shown = ranked.filter { !folds($0) }.sorted {
                 if $0.standing.rank != $1.standing.rank { return $0.standing.rank < $1.standing.rank }
+                // The need-you group reads in the lead tile's order, from the one comparator.
+                if $0.standing.rank == 0 {
+                    return needsYouOrder(($0.row.createdAt, $0.row.id), ($1.row.createdAt, $1.row.id))
+                }
                 if $0.standing.rank == 2, $0.standing.at != $1.standing.at {
                     return $0.standing.at > $1.standing.at
                 }

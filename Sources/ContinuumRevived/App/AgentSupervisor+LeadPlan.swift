@@ -1,3 +1,4 @@
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
 
@@ -129,7 +130,7 @@ extension AgentSupervisor {
                 if recent, now.timeIntervalSince(helper.latestTerminalEvent?.endedAt ?? helper.lastActivityAt) > Self.leadPlanDoneWindow { continue }
                 found.append((helper, live))
             }
-            found.sort { ($0.0.createdAt, $0.0.id.rawValue.uuidString) < ($1.0.createdAt, $1.0.id.rawValue.uuidString) }
+            found.sort { InboxSort.needsYouOrder(($0.0.createdAt, $0.0.id.rawValue), ($1.0.createdAt, $1.0.id.rawValue)) }
             let room = max(0, min(limit, Self.leadPlanRosterLimit - roster.filter { !$0.isSection }.count))
             guard room > 0, !found.isEmpty else { return }
             roster.append(.init(title: group, owner: "", state: .waiting, isSection: true))

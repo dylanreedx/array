@@ -17,7 +17,7 @@ enum SidebarLeadTallyLiveChecks {
         let now = SidebarHelperHoverChecks.now
         func uuid(_ n: Int) -> UUID { SidebarHelperHoverChecks.uuid(0x900 + n) }
         func row(_ n: Int, _ state: InboxState, lifecycle: InboxLifecycle, parent: Int?,
-                 selfReport: InboxSelfReport? = nil) -> AgentInboxRow {
+                 selfReport: InboxSelfReport? = nil, spawned: Date? = nil) -> AgentInboxRow {
             let at = now.addingTimeInterval(-Double(60 * (n + 1)))
             return AgentInboxRow(
                 id: uuid(n), title: parent == nil ? "Lead" : "h\(n)", projectName: "array-scratch",
@@ -25,7 +25,7 @@ enum SidebarLeadTallyLiveChecks {
                 state: state, lifecycle: lifecycle, model: "claude-opus-5-5", branch: nil,
                 elapsed: state == .working ? 30 : nil,
                 elapsedStartedAt: state == .working ? now.addingTimeInterval(-30) : nil,
-                lastActiveAt: at, depth: parent == nil ? 0 : 1, createdAt: at.addingTimeInterval(-300),
+                lastActiveAt: at, depth: parent == nil ? 0 : 1, createdAt: spawned ?? at.addingTimeInterval(-300),
                 parentId: parent.map(uuid), harness: "Claude Code",
                 terminalEvent: state == .ready
                     ? AgentTerminalEvent(sequence: 1, turnID: nil, outcome: .succeeded, endedAt: at) : nil,
@@ -57,8 +57,12 @@ enum SidebarLeadTallyLiveChecks {
         // "3 need you", as the helper drawer does, never "All 9 helpers done".
         var failedRows = [row(0, .ready, lifecycle: .active, parent: nil)]
         for n in 1...6 { failedRows.append(row(n, .ready, lifecycle: .active, parent: 0)) }
+        // Spawned out of recency order: h8 first, then h9, then h7. The lead tile lists
+        // its NEEDS YOU group oldest-spawned first, so the sidebar must read h8 h9 h7.
+        let spawnedAgo: [Int: Double] = [7: 3_000, 8: 9_000, 9: 6_000]
         for n in 7...9 {
-            failedRows.append(row(n, .ready, lifecycle: .active, parent: 0, selfReport: built))
+            failedRows.append(row(n, .ready, lifecycle: .active, parent: 0, selfReport: built,
+                                  spawned: now.addingTimeInterval(-spawnedAgo[n]!)))
         }
 
         for dark in [false, true] {
@@ -82,15 +86,15 @@ enum SidebarLeadTallyLiveChecks {
                        "\(tag): the line must say 3 working, it says \"\(tally.liveLine)\"")
             f.inbox.reload(rows: failedRows)
             f.inbox.layoutForQA()
-            // The three rows "3 need you" counts are drawn first, in spawn order,
+            // The three rows "3 need you" counts are drawn first, oldest-spawned first like the tile,
             // each with a red "Failed" pill, and stay on screen while the lead's
             // other helpers fold under "N more".
-            let failedIDs = (7...9).map(uuid)
+            let failedIDs = [8, 9, 7].map(uuid)
             let drawn = f.inbox.rowIdsForQA
             let leadIndex = drawn.firstIndex(of: uuid(0)) ?? 0
             let firstThree = Array(drawn.dropFirst(leadIndex + 1).prefix(3))
             try expect(firstThree == failedIDs,
-                       "\(tag): the first three helper rows must be the failed helpers h7 h8 h9, in spawn order")
+                       "\(tag): the first three helper rows must be the failed helpers h8 h9 h7, the tile's order")
             for id in failedIDs {
                 try expect(f.inbox.cellForQA(id: id)?.reportPillForQA == "Failed",
                            "\(tag): a failed helper's pill must read \"Failed\"")
