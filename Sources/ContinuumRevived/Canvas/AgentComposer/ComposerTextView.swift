@@ -75,6 +75,9 @@ final class ComposerTextView: NSTextView, NSTextViewDelegate, AgentPageZoomScala
         importsGraphics = false
         allowsUndo = true
         isAutomaticSpellingCorrectionEnabled = false
+        isAutomaticDashSubstitutionEnabled = false
+        isAutomaticQuoteSubstitutionEnabled = false
+        isAutomaticTextReplacementEnabled = false
         isContinuousSpellCheckingEnabled = true
         drawsBackground = false
         isHorizontallyResizable = false
@@ -133,6 +136,21 @@ final class ComposerTextView: NSTextView, NSTextViewDelegate, AgentPageZoomScala
         applyEditorMetrics()
         invalidateIntrinsicContentSize()
         needsLayout = true
+    }
+
+    // A prompt is code-like text ("--out 'x'"); these substitutions rewrite it.
+    // Pinned off so the Edit > Substitutions menu cannot turn them back on.
+    override var isAutomaticDashSubstitutionEnabled: Bool {
+        get { false }
+        set { super.isAutomaticDashSubstitutionEnabled = false }
+    }
+    override var isAutomaticQuoteSubstitutionEnabled: Bool {
+        get { false }
+        set { super.isAutomaticQuoteSubstitutionEnabled = false }
+    }
+    override var isAutomaticTextReplacementEnabled: Bool {
+        get { false }
+        set { super.isAutomaticTextReplacementEnabled = false }
     }
 
     override func becomeFirstResponder() -> Bool {

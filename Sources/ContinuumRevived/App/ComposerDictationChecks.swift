@@ -434,6 +434,23 @@ extension AppDelegate {
         try expect(try !engine.isCapturing, "a closing tile must release the microphone")
         try expect(!text.contains("closing"), "a closing tile must not keep a hypothesis")
 
-        return "15 scenarios, \(engines.count) sessions, draft writes \(publishes - baseline)"
+        // 16. Prompts are code-like: no smart dashes, quotes or replacements,
+        //     typed through the real event path, even after the Edit menu
+        //     toggles are flipped on.
+        let tv = composer.textView
+        //     (The Edit menu flips these same properties; the check process does
+        //     not substitute typed text, so the flags are what we can assert.)
+        tv.isAutomaticDashSubstitutionEnabled = true
+        tv.isAutomaticQuoteSubstitutionEnabled = true
+        tv.isAutomaticTextReplacementEnabled = true
+        try expect(!tv.isAutomaticDashSubstitutionEnabled && !tv.isAutomaticQuoteSubstitutionEnabled
+                   && !tv.isAutomaticTextReplacementEnabled, "the Substitutions menu must not re-enable rewriting")
+        window.makeFirstResponder(tv)
+        tv.string = ""
+        for ch in "--out 'x'" { try key(String(ch), keyCode: 0) }
+        spin()
+        try expect(text == "--out 'x'", "typed flag must stay literal, got \(text.debugDescription)")
+
+        return "16 scenarios,\(engines.count) sessions, draft writes \(publishes - baseline)"
     }
 }
