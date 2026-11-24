@@ -51,9 +51,17 @@ extension AppDelegate {
             engines.append(engine)
             return engine
         }
+        var permissionGranted = false
+        var openedSettings: [URL] = []
+        let livePermission = ComposerDictationController.permissionIsGranted
+        let liveOpener = ComposerDictationController.openSystemSettings
+        ComposerDictationController.permissionIsGranted = { _ in permissionGranted }
+        ComposerDictationController.openSystemSettings = { openedSettings.append($0) }
         defer {
             ComposerDictationController.qaEngineFactory = nil
             ComposerDictationController.defaults = .standard
+            ComposerDictationController.permissionIsGranted = livePermission
+            ComposerDictationController.openSystemSettings = liveOpener
         }
         var engine: FakeDictationEngine {
             get throws {
@@ -359,6 +367,28 @@ extension AppDelegate {
         try expect(button.toolTip == DictationFailure.microphonePermissionDenied.composerMessage, "the button must say what to fix")
         try expect(composer.qaKeyHint == DictationFailure.microphonePermissionDenied.composerMessage, "the hint row must say what to fix")
         nextPrepare = .succeeds
+
+        // 12b. macOS never asks twice. While the microphone is still off, the
+        // button opens the Microphone pane instead of failing again; once the
+        // user turns it on, the next click dictates with no relaunch.
+        let enginesBeforeDenied = engines.count
+        _ = settlePill()
+        try click(button)
+        spin()
+        try expect(openedSettings == [URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!],
+                    "a denied mic click must open the Microphone pane, got \(openedSettings)")
+        try expect(engines.count == enginesBeforeDenied, "a denied mic click must not start another session")
+        try expect(composer.dictationState == .error(.microphonePermissionDenied), "the hint must stay until it is fixed")
+        permissionGranted = true
+        _ = settlePill()
+        try click(button)
+        spin()
+        try expect(openedSettings.count == 1, "a granted mic click must not open Settings again")
+        try expect(engines.count == enginesBeforeDenied + 1 && composer.dictationState.isActive,
+                    "after the grant the mic must start dictating, got \(composer.dictationState)")
+        try key("\u{1b}", keyCode: 53)
+        spin()
+        try expect(composer.dictationState == .idle, "Esc must end the recovered session")
 
         // 13. Settings off: no button, and the chord is the text system's again.
         defaults.set(false, forKey: DictationConfig.enabledKey)

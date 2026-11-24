@@ -1,3 +1,4 @@
+import AVFoundation
 import AppKit
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
@@ -45,6 +46,16 @@ final class ComposerDictationController {
     /// Where the Settings toggle is read. Checks point this at a suite: they
     /// must never touch the real defaults domain.
     static var defaults: UserDefaults = .standard
+    /// Whether the failed permission has been granted since. Read live: a
+    /// microphone grant takes effect without relaunching Array. Checks swap it.
+    static var permissionIsGranted: @MainActor (DictationFailure) -> Bool = { failure in
+        switch failure {
+        case .microphonePermissionDenied: AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        default: true
+        }
+    }
+    /// Opens a System Settings pane. Checks swap it so no window opens.
+    static var openSystemSettings: @MainActor (URL) -> Void = { NSWorkspace.shared.open($0) }
 
     /// Offered on this Mac and turned on in Settings.
     static var isOffered: Bool { isAvailable && DictationConfig.isEnabled(defaults: defaults) }
@@ -99,6 +110,10 @@ final class ComposerDictationController {
     /// not started listening yet.
     func toggle() {
         switch state {
+        case let .error(failure) where failure.systemSettingsURL != nil && !Self.permissionIsGranted(failure):
+            // macOS asks only once. After a denial, starting again fails the
+            // same way with no prompt, so take the user to the switch instead.
+            if let url = failure.systemSettingsURL { Self.openSystemSettings(url) }
         case .idle, .error: start()
         case .listening: finish()
         case .preparing: cancel()
@@ -356,6 +371,18 @@ final class ComposerDictationController {
 }
 
 extension DictationFailure {
+    /// The Privacy & Security pane that holds the switch, for the failures a
+    /// user fixes in System Settings.
+    var systemSettingsURL: URL? {
+        switch self {
+        case .microphonePermissionDenied:
+            URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
+        case .speechPermissionDenied:
+            URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition")
+        default: nil
+        }
+    }
+
     /// What the composer says when a session cannot run. Names the fix, never
     /// the engine's own error text (DI-01).
     var composerMessage: String {
