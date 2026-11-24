@@ -2061,6 +2061,7 @@ run_app_check .build/debug/Array --header-click-focus-check
 run_app_check .build/debug/Array --composer-dictation-check
 run_app_check .build/debug/Array --palette-jump-check
 run_app_check .build/debug/Array --palette-zone-check
+run_app_check .build/debug/Array --palette-open-file-check
 # Launch polish: hold-⌥ Quick Jump over text input, ⌥+arrow dock in the
 # mounted scene, leader recovery with no focused surface, per-harness ⌘K
 # agents, reveal in Finder, spawn-then-settle saves, and slide-between.
