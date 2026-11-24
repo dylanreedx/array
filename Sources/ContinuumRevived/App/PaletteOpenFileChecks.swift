@@ -9,6 +9,18 @@ import ContinuumRevivedCore
 enum PaletteOpenFileChecks {
     struct Failure: Error, CustomStringConvertible { let description: String }
 
+    /// Real key events through the window, the path a keyboard takes into the field editor.
+    private static func typeThroughEvents(_ text: String, in window: NSWindow) throws {
+        for ch in text {
+            let s = String(ch)
+            guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                                               windowNumber: window.windowNumber, context: nil, characters: s, charactersIgnoringModifiers: s,
+                                               isARepeat: false, keyCode: 0) else { throw Failure(description: "could not build a key event") }
+            window.sendEvent(event)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+        }
+    }
+
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
         if !condition() { throw Failure(description: message) }
     }
@@ -69,6 +81,18 @@ enum PaletteOpenFileChecks {
         try expect(palette.isChoosingFileForQA, "Return on Open File must enter the file step, not an open panel")
         try expect(palette.footerTextForQA.contains("⌘Return Reveal in Finder") && palette.footerTextForQA.contains("⌥Return Copy file"),
                    "the step's footer must name its keys, got \(palette.footerTextForQA)")
+
+        // Typing through the real event path (window.sendEvent into the field editor) must
+        // leave the caret collapsed: typed text is never drawn on a selection box.
+        try typeThroughEvents("han", in: window)
+        guard let editor = window.fieldEditor(false, for: nil) as? NSTextView, editor.string == "han" else {
+            throw Failure(description: "typing through window.sendEvent did not reach the search field, editor = \(String(describing: (window.firstResponder as? NSTextView)?.string)), responder = \(String(describing: window.firstResponder))")
+        }
+        try expect(editor.selectedRange().length == 0, "typed text must not be selected, got \(editor.selectedRange())")
+        try expect(editor.selectedRange().location == 3, "caret must sit after the typed text, got \(editor.selectedRange())")
+        try typeThroughEvents("dbook", in: window)
+        try expect(editor.string == "handbook" && editor.selectedRange().length == 0, "continued typing must append, got \(editor.string) \(editor.selectedRange())")
+        palette.typeForQA("")
 
         // Empty query: files agents made lead, with the agent's identity and an age.
         try expect(palette.sectionTitlesForQA.first == "Made by agents", "the first section must be Made by agents, got \(palette.sectionTitlesForQA)")
