@@ -7118,6 +7118,7 @@ final class TileSpawner {
     }
 
     func openFileInPreferredEditor(path: String) {
+        ExternalOpenAudit.count += 1
         if launchPreferredEditor(path: path) {
             return
         }

@@ -46,6 +46,8 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     var qaRetiredRendererAlive: Bool { lastRetiredRenderer != nil }
     private var contentLoad: FileContentLoad?
     private var richKind: FileContentKind?
+    /// Checks only: the tile is drawing its content itself (not offering to hand it to another app).
+    var qaRendersInArray: Bool { if case .external = richKind { return false }; return true }
     private var richSuspended = false
     private var delimiterOverride: UInt8?
     private var sourceModeOverride = false
@@ -2014,6 +2016,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     @objc private func openRichExternally() {
         guard let filePath else { return }
         let url = URL(fileURLWithPath: filePath)
+        ExternalOpenAudit.count += 1
         if let onOpenExternally { onOpenExternally(url) } else { NSWorkspace.shared.open(url) }
     }
     @objc private func reloadRichContent() { loadFile() }
@@ -2493,3 +2496,8 @@ extension Notification.Name {
     static let arrayProjectFileMoved = Notification.Name("ArrayProjectFileMoved")
     static let arrayProjectFileTrashed = Notification.Name("ArrayProjectFileTrashed")
 }
+
+/// Counts the times Array hands a file to another app. Opening a file from the
+/// transcript must never move it: `--file-preview-open-check` asserts it stays 0.
+@MainActor
+enum ExternalOpenAudit { static var count = 0 }

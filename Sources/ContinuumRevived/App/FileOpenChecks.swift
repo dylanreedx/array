@@ -2442,11 +2442,11 @@ enum FileOpenChecks {
             fileTile: { [weak canvas = harness.canvas] tileId in canvas?.tileView(for: tileId) as? FileTileNSView })
         var results: [AgentLocalFileOpener.Result] = []
 
-        let strip = AgentFileStripView(frame: NSRect(x: 0, y: 0, width: 560, height: 120))
+        let strip = AgentFileStripView(frame: NSRect(x: 0, y: 0, width: 1_100, height: 120))
         let host = NSView(frame: strip.frame); host.addSubview(strip)
         let stripWindow = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         stripWindow.contentView = host
-        let files = [md, png, html].map {
+        let files = [md, png, html, swift, pdf].map {
             AgentDiffFileSummary(displayName: $0.lastPathComponent, action: .add, fileURL: $0)
         }
         strip.apply(files: files, tokens: .transcript, theme: .dark, zoom: .default, perform: { action in
@@ -2457,9 +2457,9 @@ enum FileOpenChecks {
         let settle = Date().addingTimeInterval(15)
         while strip.qaPlaceholderCount > 0 && Date() < settle { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
         strip.layoutSubtreeIfNeeded()
-        try expect(strip.qaThumbCount == 3 && strip.qaPlaceholderCount == 0, "the strip must show a thumbnail for each previewed file")
+        try expect(strip.qaThumbCount == 5 && strip.qaPlaceholderCount == 0, "the strip must show a thumbnail for each previewed file")
         let frames = strip.qaThumbFrames
-        try expect(frames.allSatisfy { $0.width >= 96 && $0.height > 0 } && frames[0].maxX < frames[1].minX && frames[1].maxX < frames[2].minX,
+        try expect(frames.allSatisfy { $0.width >= 96 && $0.height > 0 } && zip(frames, frames.dropFirst()).allSatisfy { $0.maxX < $1.minX },
                    "thumbnails must sit in one row without overlapping: \(frames)")
 
         func click(_ index: Int) {
@@ -2491,18 +2491,38 @@ enum FileOpenChecks {
             }
         }
 
+        // Every kind opens IN Array, as a tile beside the agent, and nothing is ever
+        // handed to another app (Preview, a browser, an editor).
+        ExternalOpenAudit.count = 0
         click(0)
         try expect(fileTiles().count == 1, "clicking a thumbnail must open exactly one file tile, got \(fileTiles().count)")
         guard case .opened(let firstTile, _) = results.last else { throw Failure(message: "first click: expected .opened, got \(String(describing: results.last))") }
         try assertBesideAndClear("first click")
-        click(1)
-        try expect(fileTiles().count == 2, "a different thumbnail must open its own tile")
-        try assertBesideAndClear("second file")
+        for index in 1..<5 { click(index) }
+        let all = harness.canvas.allTilesInWorldFrames()
+        try expect(all.filter { $0.kind == .file }.count == 4 && all.filter { $0.kind == .browser }.count == 1,
+                   "md, png, swift and pdf open as file tiles and html as a browser tile; got \(all.map(\.kind))")
+        try expect(!results.contains { if case .refused = $0 { return true } else { return false } }, "no kind may be refused: \(results)")
+        for tile in all where tile.kind == .file {
+            guard let view = harness.canvas.tileView(for: tile.id) as? FileTileNSView else { throw Failure(message: "\(tile.title) has no file tile view") }
+            try expect(view.qaRendersInArray, "\(tile.title) must render in Array, not offer to open elsewhere")
+        }
+        if let browser = all.first(where: { $0.kind == .browser }) {
+            try expect(browser.metadata.url == html.absoluteString || browser.metadata.url == URL(fileURLWithPath: html.path).standardizedFileURL.resolvingSymlinksInPath().absoluteString,
+                       "the html opens in a browser tile on its own file URL, got \(String(describing: browser.metadata.url))")
+        }
+        try expect(ExternalOpenAudit.count == 0, "a thumbnail click must never hand a file to another app (\(ExternalOpenAudit.count) external opens)")
+        try assertBesideAndClear("all five")
+        let before = harness.canvas.allTilesInWorldFrames().count
         click(0)
         guard case .revealed(let again, _) = results.last, again == firstTile else {
             throw Failure(message: "clicking an open file again must reveal its tile, got \(String(describing: results.last))")
         }
-        try expect(fileTiles().count == 2, "revealing an open file must not make a second tile")
+        try expect(harness.canvas.allTilesInWorldFrames().count == before, "revealing an open file must not make a second tile")
+        click(2)
+        guard case .revealed = results.last else { throw Failure(message: "clicking an open page again must reveal its browser tile, got \(String(describing: results.last))") }
+        try expect(harness.canvas.allTilesInWorldFrames().count == before, "revealing an open page must not make a second tile")
+        try expect(ExternalOpenAudit.count == 0, "revealing must not open externally either")
 
         // 3. Hover removes the fade and blur from the hovered thumbnail only, over
         //    the transcript's own emphasis duration.
