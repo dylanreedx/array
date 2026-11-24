@@ -3407,8 +3407,8 @@ final class TileSpawner {
         }
 
         let sections = SettingsSchema.sections()
-        guard let browserSectionIndex = sections.firstIndex(where: { $0.id == "browser" }) else {
-            throw CheckError.failed("Settings surface is missing Browser section")
+        guard let browserSectionIndex = sections.firstIndex(where: { $0.id == "advanced" }) else {
+            throw CheckError.failed("Settings surface is missing Advanced section")
         }
         // Bound to the exact key the policy reads; the wording is the schema's to own.
         let inspectorField = sections[browserSectionIndex].fields.first { field in
@@ -3418,18 +3418,18 @@ final class TileSpawner {
             return false
         }
         try expect(inspectorField != nil, "Settings surface is missing Safari Web Inspector toggle")
-        // The real modal, in an offscreen window: the Browser pane must draw the row,
+        // The real modal, in an offscreen window: the Advanced pane must draw the row (its last switch),
         // and the row's write must reach the key the policy reads.
         let settingsModel = SettingsModel(sections: sections, defaults: defaults, navKeymap: .default)
         // Off before Settings opens, so the switch renders off and one click turns it on.
         defaults.set(false, forKey: BrowserInspectionPolicy.userDefaultsKey)
         let settings = SettingsFixtureWindow(model: settingsModel)
-        settings.show(paneID: "browser")
+        settings.show(paneID: "advanced")
         let settingsSurfaceRendered = settingsModel.renderedAnchors["field.\(BrowserWebInspectorConfig.userDefaultsKey)"] != nil
-        guard let inspectorField, let webInspectorSwitch = settings.descendants(NSSwitch.self).first,
+        guard let inspectorField, let webInspectorSwitch = settings.descendants(NSSwitch.self).last,
               webInspectorSwitch.state == .off else {
             settings.tearDown()
-            throw CheckError.failed("Settings Browser pane did not render the inspector switch")
+            throw CheckError.failed("Settings Advanced pane did not render the inspector switch")
         }
         settings.settle()
         webInspectorSwitch.performClick(nil)
@@ -3437,7 +3437,7 @@ final class TileSpawner {
         let settingsToggleRoundTrips = defaults.bool(forKey: BrowserInspectionPolicy.userDefaultsKey) == true
             && inspectorField.currentValue(in: defaults) == .bool(true)
         settings.tearDown()
-        try expect(settingsSurfaceRendered, "Settings Browser pane did not render the inspector row")
+        try expect(settingsSurfaceRendered, "Settings Advanced pane did not render the inspector row")
         try expect(settingsToggleRoundTrips, "Settings Web Inspector toggle did not round-trip through UserDefaults")
 
         // Keep the target=_blank check deliberately asymmetric: defaults are false

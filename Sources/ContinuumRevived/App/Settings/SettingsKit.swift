@@ -260,12 +260,22 @@ struct SliderRow: View {
             let binding = model.binding(for: row.field)
             LabeledContent {
                 HStack(spacing: 10) {
-                    Slider(value: Binding(get: { binding.double }, set: { binding.set(.double($0)) }), in: range)
-                        .frame(minWidth: 160, maxWidth: 240)
+                    // A count (pages, zones) moves a whole step at a time.
+                    if case .number(0, _) = format {
+                        // Driven over 0...1 and mapped back: a slider over a whole-number
+                        // range draws a tick for every step.
+                        let span = range.upperBound - range.lowerBound
+                        Slider(value: Binding(get: { (binding.double - range.lowerBound) / span },
+                                              set: { binding.set(.double((range.lowerBound + $0 * span).rounded())) }), in: 0...1)
+                            .frame(minWidth: 160, maxWidth: 240)
+                    } else {
+                        Slider(value: Binding(get: { binding.double }, set: { binding.set(.double($0)) }), in: range)
+                            .frame(minWidth: 160, maxWidth: 240)
+                    }
                     Text(format.string(for: binding.double))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
-                        .frame(width: 52, alignment: .trailing)
+                        .frame(width: 72, alignment: .trailing)
                 }
             } label: {
                 SettingsRowLabel(title: label, help: row.help)

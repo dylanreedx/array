@@ -287,6 +287,16 @@ private struct SettingsPaneForm: View {
                         }
                     } else if group.rows.count == 1, case .custom("usage", _) = group.rows[0].field {
                         SettingsUsageSections(settings: model, field: group.rows[0].field)
+                    } else if group.id == SettingsSchema.usageRecordingGroupID {
+                        // Drawn by the Usage sections, under the report it feeds.
+                        EmptyView()
+                    } else if group.id == SettingsModel.phoneNotificationsGroupID, model.hiddenGroupIDs.contains(group.id) {
+                        let _ = model.revision
+                        Section {
+                            InfoRow(text: "Pair an iPhone to choose its notifications.")
+                        } header: {
+                            if let title = group.title { Text(title) }
+                        }
                     } else if group.rows.count == 1, case .custom("agentCharacters", _) = group.rows[0].field {
                         AgentCharacterSections(model: model.agentCharacters, settings: model, field: group.rows[0].field)
                     } else {
@@ -428,6 +438,8 @@ struct SettingsFieldRow: View {
         case let .custom(id, label):
             if let make = model.customViews[id] {
                 EmbeddedAppKitView(make: make)
+            } else if id == "companion" {
+                InfoRow(text: "Not paired")
             } else {
                 InfoRow(text: "\(label) is not available here.")
             }
@@ -842,63 +854,10 @@ private struct SettingsSoundRows: View {
     var body: some View {
         let _ = model.revision
         Toggle(isOn: Binding(get: { model.soundsEnabled }, set: { model.soundsEnabled = $0 })) {
-            SettingsRowLabel(title: "Play agent sounds", help: "Each sound below plays only when this is on.")
+            SettingsRowLabel(title: "Play agent sounds", help: nil)
         }
         .toggleStyle(.switch)
         .settingsAnchor("sounds.master", model: model)
-
-        LabeledContent {
-            HStack(spacing: 10) {
-                Slider(value: Binding(get: { model.soundVolume }, set: { model.soundVolume = $0 }), in: 0...1) { editing in
-                    if !editing { model.playSample() }
-                }
-                .frame(minWidth: 160, maxWidth: 240)
-                Text(SettingsValueFormat.percent.string(for: model.soundVolume))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .frame(width: 44, alignment: .trailing)
-            }
-        } label: {
-            SettingsRowLabel(title: "Volume", help: nil)
-        }
-        .disabled(!model.soundsEnabled)
-        .settingsAnchor("sounds.volume", model: model)
-
-        ForEach(AgentSignalKind.allCases.sorted(by: { $0.priority > $1.priority }), id: \.self) { kind in
-            soundRuleRow(kind)
-                .settingsAnchor("sounds.kind.\(kind.rawValue)", model: model)
-        }
-
-        Toggle(isOn: Binding(get: { model.characterSoundsEnabled }, set: { model.characterSoundsEnabled = $0 })) {
-            SettingsRowLabel(title: AgentCharacterCopy.sounds,
-                             help: "While \(AgentCharacterCopy.many) show, they quack when an agent hands back to you, chirp when it needs you and honk when it fails, or use their pack's own voices. A sound turned on above for the same moment plays instead.")
-        }
-        .toggleStyle(.switch)
-        .disabled(!model.soundsEnabled)
-        .accessibilityIdentifier("ArraySettingsCharacterSounds")
-        .settingsAnchor("sounds.characters", model: model)
-
-        LabeledContent {
-            HStack {
-                Button("Import…") { model.importSounds() }
-            }
-        } label: {
-            VStack(alignment: .leading, spacing: 4) {
-                SettingsRowLabel(title: "Custom sounds", help: model.importedSounds.isEmpty ? "Add your own audio files to choose them above." : nil)
-                ForEach(model.importedSounds) { entry in
-                    HStack(spacing: 8) {
-                        Text(entry.name)
-                        Spacer(minLength: 8)
-                        Button("Rename…") { renameTarget = entry; renameText = entry.name }
-                            .buttonStyle(.link)
-                        Button("Remove") { model.removeSound(entry.id) }
-                            .buttonStyle(.link)
-                    }
-                    .font(.callout)
-                }
-            }
-        }
-        .settingsAnchor("sounds.library", model: model)
         .alert("Rename sound", isPresented: Binding(get: { renameTarget != nil }, set: { if !$0 { renameTarget = nil } })) {
             TextField("Name", text: $renameText)
             Button("Rename") {
@@ -907,35 +866,106 @@ private struct SettingsSoundRows: View {
             }
             Button("Cancel", role: .cancel) { renameTarget = nil }
         }
+
+        if model.soundsEnabled {
+            LabeledContent {
+                HStack(spacing: 10) {
+                    Slider(value: Binding(get: { model.soundVolume }, set: { model.soundVolume = $0 }), in: 0...1) { editing in
+                        if !editing { model.playSample() }
+                    }
+                    .frame(minWidth: 160, maxWidth: 240)
+                    Text(SettingsValueFormat.percent.string(for: model.soundVolume))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .frame(width: 44, alignment: .trailing)
+                }
+            } label: {
+                SettingsRowLabel(title: "Volume", help: nil)
+            }
+            .settingsAnchor("sounds.volume", model: model)
+
+            ForEach(AgentSignalKind.allCases.sorted(by: { $0.priority > $1.priority }), id: \.self) { kind in
+                soundRuleRow(kind)
+                    .settingsAnchor("sounds.kind.\(kind.rawValue)", model: model)
+            }
+
+            Toggle(isOn: Binding(get: { model.characterSoundsEnabled }, set: { model.characterSoundsEnabled = $0 })) {
+                SettingsRowLabel(title: AgentCharacterCopy.sounds,
+                                 help: "Agent icons make their own sounds instead of the ones above.")
+            }
+            .toggleStyle(.switch)
+            .accessibilityIdentifier("ArraySettingsCharacterSounds")
+            .settingsAnchor("sounds.characters", model: model)
+
+            LabeledContent {
+                HStack {
+                    Button("Import…") { model.importSounds() }
+                }
+            } label: {
+                VStack(alignment: .leading, spacing: 4) {
+                    SettingsRowLabel(title: "Custom sounds", help: model.importedSounds.isEmpty ? "Add your own audio files to choose them above." : nil)
+                    ForEach(model.importedSounds) { entry in
+                        HStack(spacing: 8) {
+                            Text(entry.name)
+                            Spacer(minLength: 8)
+                            Button("Rename…") { renameTarget = entry; renameText = entry.name }
+                                .buttonStyle(.link)
+                            Button("Remove") { model.removeSound(entry.id) }
+                                .buttonStyle(.link)
+                        }
+                        .font(.callout)
+                    }
+                }
+            }
+            .settingsAnchor("sounds.library", model: model)
+        }
     }
 
     private func soundRuleRow(_ kind: AgentSignalKind) -> some View {
         let rule = model.soundRule(kind)
         return LabeledContent {
             HStack(spacing: 8) {
-                Picker("", selection: Binding(get: { rule.sound.rawValue }, set: { model.setSound(AgentSoundReference(rawValue: $0), for: kind) })) {
-                    ForEach(model.soundEntries) { entry in
-                        Text(entry.name).tag(entry.id.rawValue)
-                    }
-                }
-                .labelsHidden()
-                .frame(maxWidth: 160)
+                SoundChoice(model: model, kind: kind)
+                    .frame(width: 140, height: 28)
+                    .disabled(!rule.enabled)
+                    .opacity(rule.enabled ? 1 : 0.5)
                 Button {
                     model.playSample(rule.sound)
                 } label: {
                     Image(systemName: "play.fill")
                 }
                 .buttonStyle(.borderless)
-                .accessibilityLabel("Play \(kind.displayName) sound")
+                .disabled(!rule.enabled)
+                .accessibilityLabel("Play \(kind.settingsTitle) sound")
                 Toggle("", isOn: Binding(get: { rule.enabled }, set: { model.setSoundEnabled($0, for: kind) }))
                     .toggleStyle(.switch)
                     .labelsHidden()
-                    .accessibilityLabel("Play a sound when \(kind.displayName.lowercased())")
+                    .accessibilityLabel("Play a sound when \(kind.settingsTitle.lowercased())")
             }
         } label: {
-            SettingsRowLabel(title: kind.displayName, help: nil)
+            SettingsRowLabel(title: kind.settingsTitle, help: kind.settingsHelp)
         }
-        .disabled(!model.soundsEnabled)
+    }
+}
+
+/// An event's sound, chosen in the app's own choice popover rather than a stock
+/// pop-up button.
+private struct SoundChoice: NSViewRepresentable {
+    let model: SettingsModel
+    let kind: AgentSignalKind
+
+    func makeNSView(context: Context) -> ChoiceButton {
+        let button = ChoiceButton(title: "")
+        button.setAccessibilityLabel("\(kind.settingsTitle) sound")
+        return button
+    }
+
+    func updateNSView(_ button: ChoiceButton, context: Context) {
+        let kind = kind
+        let model = model
+        button.items = model.soundEntries.map { ChoiceItem(id: $0.id.rawValue, title: $0.name) }
+        button.selectedID = model.soundRule(kind).sound.rawValue
+        button.onSelection = { item in model.setSound(AgentSoundReference(rawValue: item.id), for: kind) }
     }
 }
 

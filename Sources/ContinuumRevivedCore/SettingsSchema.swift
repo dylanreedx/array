@@ -10,12 +10,15 @@ import Foundation
 public enum SettingsSchema {
     /// The sidebar heading drawn above the tile panes.
     public static let tilesHeading = "Tiles"
+    /// The sidebar heading drawn above the panes after the tiles: how Array tells
+    /// you things, and the rest.
+    public static let moreHeading = "More"
 
     public static func sections() -> [SettingsSection] {
         [
             general(), appearance(), sidebar(), agentCharacters(), canvas(),
             agents(), editor(), terminal(), browser(),
-            notificationsAndSounds(), keyboard(), iPhone(), usage(), advanced(),
+            notificationsAndSounds(), iPhone(), keyboard(), usage(), advanced(),
         ]
     }
 
@@ -396,13 +399,6 @@ public enum SettingsSchema {
                             help: "Keeps the commands agents run on this Mac so transcript rows can show them. Never synced.",
                             keywords: ["privacy", "shell", "command", "bash", "history", "transcript"]),
             ]),
-            SettingsGroup(id: "agents.tokenTelemetry", title: "Usage recording",
-                          footer: "Kept on this Mac only. Never uploaded or synced.", rows: [
-                SettingsRow(.toggle(key: AgentTokenTelemetryConfig.enabledKey, label: "Record token usage and command timing",
-                                    default: AgentTokenTelemetryConfig.defaultEnabled),
-                            help: "Counts task tokens by agent, model and type, and host-observed command timing when available. Turning it off stops new token and timing records and deletes nothing.",
-                            keywords: ["usage", "tokens", "telemetry", "cost", "cache", "privacy"]),
-            ]),
         ])
     }
 
@@ -484,16 +480,13 @@ public enum SettingsSchema {
                 SettingsRow(.url(key: DefaultBrowserURL.userDefaultsKey, label: "New browser tiles open", default: DefaultBrowserURL.fallback),
                             help: "The page a new browser tile starts on.",
                             keywords: ["home page", "default url", "start page"]),
-                SettingsRow(.toggle(key: BrowserWebInspectorConfig.userDefaultsKey, label: "Allow Safari Web Inspector", default: BrowserWebInspectorConfig.defaultEnabled),
-                            help: "Lets you inspect browser tiles from Safari's Develop menu.",
-                            keywords: ["devtools", "developer", "inspect", "debug"]),
             ]),
         ])
     }
 
     private static func notificationsAndSounds() -> SettingsSection {
         SettingsSection(id: "activityAndNotifications", title: "Notifications & Sounds", iconSystemName: "bell.badge",
-                        keywords: ["alerts", "audio"], groups: [
+                        sidebarHeading: moreHeading, keywords: ["alerts", "audio"], groups: [
             SettingsGroup(id: "sounds", title: "Agent sounds", rows: [
                 SettingsRow(.agentSounds(label: "Agent sounds")),
             ]),
@@ -501,7 +494,7 @@ public enum SettingsSchema {
     }
 
     private static func keyboard() -> SettingsSection {
-        SettingsSection(id: "keybindings", title: "Keyboard", iconSystemName: "keyboard",
+        SettingsSection(id: "keybindings", title: "Keyboard", iconSystemName: "keyboard", sidebarHeading: moreHeading,
                         keywords: ["keys", "hotkeys", "keybindings"], groups: [
             SettingsGroup(id: "keyboard.navigation", title: "Navigation", rows: [
                 SettingsRow(.choice(key: NavKeymap.leaderHoldDefaultsKey, label: "Hold to navigate", options: NavKeymap.leaderHoldModifierOptions, default: NavKeymap.modifierToken(NavKeymap.default.leaderHoldModifier),
@@ -523,57 +516,84 @@ public enum SettingsSchema {
 
     private static func iPhone() -> SettingsSection {
         let categories: [(PushCategory, String)] = [
-            (.approvalRequested, "Approval requests"),
-            (.agentWaitingForInput, "Waiting for input"),
-            (.agentFinished, "Agent finished"),
-            (.agentFailed, "Agent failed"),
-            (.stillWorkingDigest, "Still-working digest"),
-            (.desktopConnectionChanged, "Mac connection changes"),
-            (.sessionReapedOrRevived, "Sessions closed or revived"),
+            (.approvalRequested, "Needs your approval"),
+            (.agentWaitingForInput, "Needs your reply"),
+            (.agentFinished, "Finished"),
+            (.agentFailed, "Failed"),
+            (.stillWorkingDigest, "Still working"),
+            (.desktopConnectionChanged, "Mac offline or back"),
+            (.sessionReapedOrRevived, "Agents closed or restarted"),
         ]
-        return SettingsSection(id: "companion", title: "iPhone", iconSystemName: "iphone",
+        let help: [PushCategory: String] = [
+            .approvalRequested: "An agent is asking for your approval.",
+            .agentWaitingForInput: "An agent has asked a question and is waiting.",
+            .agentFinished: "An agent finished its task.",
+            .agentFailed: "An agent stopped on an error.",
+            .stillWorkingDigest: "A quiet summary when an agent has been busy for a while.",
+            .desktopConnectionChanged: "Your Mac went offline or came back.",
+            .sessionReapedOrRevived: "Array closed an idle agent or brought one back.",
+        ]
+        return SettingsSection(id: "companion", title: "iPhone", iconSystemName: "iphone", sidebarHeading: moreHeading,
                                keywords: ["companion", "phone", "mobile", "ios"], groups: [
             SettingsGroup(id: "iphone.pairing", title: "Pairing", rows: [
                 SettingsRow(.custom(id: "companion", label: "iPhone pairing")),
             ]),
             SettingsGroup(id: "iphone.notifications", title: "Notifications",
-                          footer: "Choose which agent events reach your iPhone. Security alerts always do.",
+                          footer: "Security alerts always reach a paired iPhone.",
                           rows: categories.map { category, title in
                 SettingsRow(.toggle(key: PersistedPushCategoryPreferences.key(for: category), label: title, default: category.defaultEnabled),
+                            help: help[category],
                             keywords: ["push", "notify", "alert"])
             }),
         ])
     }
 
-    /// `.plans/116` part 21: how Array did the work on this Mac, read from the
-    /// run ledger. One bespoke group; the page records nothing.
+    /// `.plans/116` part 21: how Array did the work on this Mac. One bespoke
+    /// report group, and the recording switch that feeds it. The switch is
+    /// declared here once; `SettingsUsagePane` draws it under the report.
+    /// The Usage pane's recording group, which the pane draws itself.
+    public static let usageRecordingGroupID = "usage.recording"
+
     private static func usage() -> SettingsSection {
-        SettingsSection(id: "usage", title: "Usage", iconSystemName: "chart.bar",
+        SettingsSection(id: "usage", title: "Usage", iconSystemName: "chart.bar", sidebarHeading: moreHeading,
                         keywords: ["usage", "tokens", "metrics", "tasks", "helpers", "time"], groups: [
             SettingsGroup(id: "usage.report", title: nil, rows: [
                 SettingsRow(.custom(id: "usage", label: "Usage on this Mac"),
                             keywords: ["tokens", "cache", "tasks", "helpers", "time", "metrics"]),
             ]),
+            SettingsGroup(id: usageRecordingGroupID, title: "Recording",
+                          footer: "Kept on this Mac only. Never uploaded or synced. Account limits (5-hour and weekly) are in each agent's status row.", rows: [
+                SettingsRow(.toggle(key: AgentTokenTelemetryConfig.enabledKey, label: "Record token usage and command timing",
+                                    default: AgentTokenTelemetryConfig.defaultEnabled),
+                            help: "Counts each finished task's tokens and command time. Turning it off stops new records; existing ones stay.",
+                            keywords: ["usage", "tokens", "telemetry", "cost", "spend", "cache", "privacy"]),
+            ]),
         ])
     }
 
     private static func advanced() -> SettingsSection {
-        SettingsSection(id: "advanced", title: "Advanced", iconSystemName: "wrench.and.screwdriver",
-                        keywords: ["performance", "memory"], groups: [
-            SettingsGroup(id: "advanced.limits", title: "Memory limits",
-                          footer: "Lower limits use less memory; tiles beyond them reload when you return.", rows: [
-                SettingsRow(.number(key: BrowserRuntimeBudget.defaultsKey, label: "Live web pages", range: 1...128, default: Double(BrowserRuntimeBudget.defaultMaxLive), unit: "pages", step: 1),
-                            help: "How many browser tiles keep their page loaded at once.",
-                            keywords: ["browser", "webview", "budget", "max"]),
-                SettingsRow(.number(key: ZoneHydrationBudgetConfig.maxLiveZonesKey, label: "Live zones", range: 1...64, default: Double(ZoneHydrationBudgetConfig.defaultMaxLiveZones), unit: "zones", step: 1),
-                            help: "How many zones keep their tiles running at once. Tiles in other zones reload when you return.",
-                            keywords: ["hydration", "budget", "max"]),
-                SettingsRow(.toggle(key: ZoneRuntimeBudgetConfig.closeOnZeroKey, label: "Close a project's terminals and pages when it has no zones", default: ZoneRuntimeBudgetConfig.defaultCloseOnZero),
-                            help: "Frees the terminals and web pages of a project with no zone on the canvas. Off keeps them warm, so coming back is faster but uses more memory.",
-                            keywords: ["memory", "unused"]),
+        SettingsSection(id: "advanced", title: "Advanced", iconSystemName: "wrench.and.screwdriver", sidebarHeading: moreHeading,
+                        keywords: ["performance", "memory", "developer"], groups: [
+            SettingsGroup(id: "advanced.limits", title: "Memory", rows: [
+                SettingsRow(.slider(key: BrowserRuntimeBudget.defaultsKey, label: "Web pages kept loaded", range: 1...128, default: Double(BrowserRuntimeBudget.defaultMaxLive),
+                                    format: .number(decimals: 0, unit: "pages")),
+                            help: "Browser tiles beyond this reload when you return to them.",
+                            keywords: ["live", "browser", "webview", "budget", "max", "memory"]),
+                SettingsRow(.slider(key: ZoneHydrationBudgetConfig.maxLiveZonesKey, label: "Zones kept running", range: 1...64, default: Double(ZoneHydrationBudgetConfig.defaultMaxLiveZones),
+                                    format: .number(decimals: 0, unit: "zones")),
+                            help: "Tiles in other zones reload when you return to them.",
+                            keywords: ["live", "hydration", "budget", "max", "memory"]),
+                SettingsRow(.toggle(key: ZoneRuntimeBudgetConfig.closeOnZeroKey, label: "Free memory from projects with no zones", default: ZoneRuntimeBudgetConfig.defaultCloseOnZero),
+                            help: "Off keeps their terminals and pages warm: faster to return, more memory.",
+                            keywords: ["close", "terminals", "pages", "unused", "memory"]),
                 SettingsRow(.toggle(key: IOSPreviewReclaimConfig.enabledKey, label: "Shut down simulators no preview is showing", default: IOSPreviewReclaimConfig.defaultEnabled),
-                            help: "Only simulators Array started. Each one holds 2–3 GB. After 2 minutes with its preview off screen or closed, Array shuts it down, and starts it again when the preview comes back.",
+                            help: "Each holds 2–3 GB. Array closes only the ones it started, after 2 minutes off screen.",
                             keywords: ["ios", "simulator", "memory", "shutdown", "preview"]),
+            ]),
+            SettingsGroup(id: "advanced.developer", title: "Developer", rows: [
+                SettingsRow(.toggle(key: BrowserWebInspectorConfig.userDefaultsKey, label: "Allow Safari Web Inspector", default: BrowserWebInspectorConfig.defaultEnabled),
+                            help: "Lets Safari's Develop menu inspect browser tiles. Array's own inspector needs no setting.",
+                            keywords: ["devtools", "developer", "inspect", "debug", "browser"]),
             ]),
         ])
     }
@@ -629,7 +649,7 @@ public enum SettingsSchema {
                 CustomEntry(anchor: "sounds.master", label: "Play agent sounds", keywords: sound + ["mute"]),
                 CustomEntry(anchor: "sounds.volume", label: "Volume", keywords: sound),
             ] + AgentSignalKind.allCases.sorted(by: { $0.priority > $1.priority }).map { kind in
-                CustomEntry(anchor: "sounds.kind.\(kind.rawValue)", label: "\(kind.displayName) sound", keywords: sound)
+                CustomEntry(anchor: "sounds.kind.\(kind.rawValue)", label: "\(kind.settingsTitle) sound", keywords: sound)
             } + [
                 CustomEntry(anchor: "sounds.characters", label: AgentCharacterCopy.sounds,
                             keywords: sound + ["icons", "characters", "ducks", "quack", "voices", "duckherd"]),

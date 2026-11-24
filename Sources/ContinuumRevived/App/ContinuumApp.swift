@@ -16142,7 +16142,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             }
             view.update(
                 connection: relayStatus,
-                notification: devices.isEmpty ? "Notifications become available after pairing." : "Notification registration is managed by each paired iPhone.",
+                notification: devices.isEmpty ? "Notifications can be chosen after an iPhone pairs." : "Notification registration is managed by each paired iPhone.",
                 devices: devices,
                 pairingEnabled: hostedIdentity != nil
             )
@@ -16719,7 +16719,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         model.customViews = [
             "companion": { [weak self] in
                 guard let self, !self.qaStubsCompanionSettingsView else { return NSView() }
-                return self.makeCompanionSettingsView()
+                let view = self.makeCompanionSettingsView()
+                // The notification switches below it show once a phone is paired.
+                view.onDeviceCountChanged = { [weak model] count in model?.pairedPhoneCount = count }
+                let known = view.deviceCount
+                DispatchQueue.main.async { [weak model] in model?.pairedPhoneCount = known }
+                return view
             },
         ]
         model.canvasBackground = makeCanvasBackgroundEditor()

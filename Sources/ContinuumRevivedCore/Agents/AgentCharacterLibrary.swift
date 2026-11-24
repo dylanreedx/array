@@ -161,7 +161,7 @@ public enum AgentCharacterCopy {
     public static let aPack = "an agent icon pack"
     public static let packs = "agent icon packs"
     public static let size = "Icon size"
-    public static let sounds = "Icon sounds"
+    public static let sounds = "Sounds from agent icons"
 
     public static func count(_ count: Int) -> String { "\(count) \(count == 1 ? one : many)" }
 }

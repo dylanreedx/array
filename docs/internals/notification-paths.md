@@ -1,6 +1,6 @@
 # Notification paths
 
-Maintained contract and source inventory. Last audited: 2026-11-18 (usage pauses: MAC-15, helper delivery; earlier: character sounds MAC-10…13).
+Maintained contract and source inventory. Last audited: 2026-11-23 (Mac sound defaults and Settings pane, MAC-03…06; earlier: usage pauses MAC-15, helper delivery, character sounds MAC-10…13).
 
 Every Array-owned agent notification needs a stable path ID and an explicit
 trigger → policy → recipient → delivery surface → tap/action → outcome chain.
@@ -708,8 +708,8 @@ These do not pass through Fly or the phone classifier.
 | MAC-14 | Workspace API result tile fully outside the canvas | Local canvas edge indicator, silent; click or Return visits via `revealTileForWork` | Visible tiles stay quiet; indicator clears on visibility or visit. Missing/unmounted tile has no indicator. No push, retry, sound or startup presentation. Behavioral leg: `--workspace-api-agent-camera-check` |
 | MAC-15 | A sidebar row's semantic status changes during a row push, including a lazily loaded usage cause and a usage pause opening or ending | `AgentInboxView.updateStatusSnapshots` → the row's single status owner → `NSAccessibility.announcementRequested`, recipient is local assistive technology. Message is agent title + status. Usage-resume (2026-11-18): a row reads “Paused · usage” in both layouts only while ITS OWN agent holds a usage pause (`AgentSupervisor.usagePauses`, stamped by `SidebarUsageLive.stamp(_:pausedAgents:)` in `AppDelegate`), never from the account in use's live reading or an old failure's words. The pause opens when a turn ends on the CLI's usage stop (Claude's “You've hit your 5-hour/weekly/session limit · resets …”, a rejected `rate_limit_event`, Codex's `usage_limit_exceeded`) and ends at the stated reset, at a later success on the same account, at a reading of that account under 99%, or on Stop; every change calls `AgentSupervisor.onUsagePausesChanged` → `reloadWorkspaceSidebar`. Entry announces “Paused · usage”; the resume announces the working status. A usage pause is NOT blocking: it is never a Needs-you line, and its only sidebar action is “Open” (reveals the agent); the sidebar has no “Switch & resume…” (account switching lives in the agent tile). An unconfirmed row retains “Unconfirmed…last known status” | Initial snapshot/new identity is quiet; elapsed-only and repeated semantic status are quiet; removed identities are pruned. A quota reading changes no row by itself. No phone push, app banner, sound, tap action or retry for a usage pause (the stop is delivered as an interrupted turn, so MAC-03, MAC-11 and MAC-12 stay quiet). Framework delivery has no acknowledgement. `--agent-usage-resume-check` witnesses the pause opening per agent, delivered interrupted with no failed terminal, and ending by success/reset/reading/Stop through the production supervisor; `--sidebar-quiet-inbox-check` witnesses the real supervisor row-update path and captured announcement; `--sidebar-dogfood-check` witnesses entry and recovery on the mounted sidebar; `--sidebar-ux-check` covers status-owner/quiet behavior. Actual VoiceOver audio is not witnessed |
 
-Character sounds (MAC-10…13) are Settings › Notifications & Sounds › Character
-sounds, off by default, under the same master switch and volume, through the same
+Character sounds (MAC-10…13) are Settings › Notifications & Sounds › Sounds from agent icons
+(formerly Icon sounds), off by default, under the same master switch and volume, through the same
 `AgentSoundPlayer` (AVAudioPlayer, never a subprocess) at priorities below every
 alert. They are fed from `recordManagedActivity` beside the alert sounds, for
 agents with a tile on this Mac. Precedence: when Array's alert sound for the same
@@ -730,8 +730,22 @@ agent sound here, macOS Focus does not gate them: Focus filters notifications,
 and these are in-app audio. Witness: `--character-sounds-check` (recording sink,
 no real audio), reported by the matrix next to the character legs.
 
-Agent sound master defaults on, individual events opt in; fresh install remains
-silent. Per-tile overrides and volume apply. Current audio player stops/replaces
+Agent sound master defaults on. Individual events (MAC-03…06) default by
+whether their key was ever written: never written reads ON for Finished
+(completed), Failed and Needs you (actionRequired), and OFF for Pushed and
+Merged, so a new install plays those three (changed 2026-11-23; before, every
+event was opt-in and a fresh install was silent). A saved choice, on or off, is
+never overridden, so an existing user's explicit settings are unchanged. In
+Settings › Notifications & Sounds the volume, event rows, icon sounds and custom
+sounds are drawn only while "Play agent sounds" is on; with it off every event
+is quiet (master gates `AgentSoundConfig.resolvedSound`). Per-tile overrides and
+volume apply. Settings words: Needs you, Failed, Finished, Merged, Pushed (the
+tile badge keeps Completed / Action required). The iPhone pane shows its
+push-category switches only once a phone is paired; hiding a switch changes no
+stored choice and no delivery (a paired phone's categories keep their saved or
+default value). Witnesses: `--agent-awareness-check` (a new install plays exactly
+finished, failed and needs-you through the production `AgentSignalCenter`; saved
+choices override the defaults; an explicit master off is silent). Current audio player stops/replaces
 sounds by priority. These controls do not govern APNs sound or MAC-01 default
 notification sound. A single runtime event can currently generate independent
 Mac awareness, a Mac banner and a phone alert: cross-surface dedupe is absent.

@@ -478,8 +478,19 @@ final class SettingsModel {
     /// The registry for the panes shown right now; both search and the drift guard
     /// read this, and the renderer draws from the same schema rows.
     func entries() -> [SettingsEntry] {
-        SettingsRegistry.entries(sections: sections, defaults: defaults, paneIDs: Set(visiblePanes.map(\.id)))
+        SettingsRegistry.entries(sections: sections, defaults: defaults, paneIDs: Set(visiblePanes.map(\.id)),
+                                 hiddenGroupIDs: hiddenGroupIDs)
     }
+
+    /// Paired iPhones, as the pairing card last counted them. The notification
+    /// switches are drawn only once there is one.
+    var pairedPhoneCount = 0 {
+        didSet { if pairedPhoneCount != oldValue { revision += 1 } }
+    }
+
+    /// Groups the panes do not draw right now.
+    var hiddenGroupIDs: Set<String> { pairedPhoneCount > 0 ? [] : [Self.phoneNotificationsGroupID] }
+    static let phoneNotificationsGroupID = "iphone.notifications"
 
     private func recomputeSearch() {
         // Stored in DISPLAY order (grouped by pane), so ↑/↓ walk what is on screen.

@@ -14,10 +14,13 @@ final class CompanionSettingsView: NSView {
     var onCreatePairing: (() -> Void)?
     var onCancelPairing: (() -> Void)?
     var onRefresh: (() -> Void)?
+    /// How many iPhones are paired, whenever the list is drawn.
+    var onDeviceCountChanged: ((Int) -> Void)?
+    private(set) var deviceCount = 0
     var onRevoke: ((UUID) -> Void)?
 
     private let connectionLabel = NSTextField(labelWithString: "Checking relay…")
-    private let notificationLabel = NSTextField(labelWithString: "Notifications are configured after an iPhone pairs.")
+    private let notificationLabel = NSTextField(labelWithString: "Notifications can be chosen after an iPhone pairs.")
     private let inviteField = NSTextField()
     private let pairButton = NSButton(title: "Create iPhone Invitation", target: nil, action: nil)
     private let qrImageView = NSImageView()
@@ -43,6 +46,8 @@ final class CompanionSettingsView: NSView {
             expiryLabel.stringValue = "Connect this Mac with an alpha invite before pairing an iPhone."
         }
         renderDevices(devices)
+        deviceCount = devices.count
+        onDeviceCountChanged?(devices.count)
     }
 
     func showPairing(image: NSImage, expiresAt: Date) {
@@ -132,7 +137,7 @@ final class CompanionSettingsView: NSView {
             $0.removeFromSuperview()
         }
         guard !devices.isEmpty else {
-            devicesStack.addArrangedSubview(copy("No iPhones are paired.", size: 11, color: .secondaryLabelColor))
+            devicesStack.addArrangedSubview(copy("Not paired", size: 11, color: .secondaryLabelColor))
             return
         }
         for device in devices {

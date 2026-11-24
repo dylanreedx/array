@@ -165,7 +165,7 @@ struct SettingsUsageSections: View {
             .settingsAnchor(SettingsRegistry.anchor(for: field) ?? field.label, model: settings)
             .onAppear { usage.appear() }
             .onDisappear { usage.disappear() }
-            InfoRow(text: "\(AppChannel.liveApplicationSupportDirectoryName) on this Mac only, read from its own run ledger. Nothing here is uploaded.")
+            InfoRow(text: "This Mac only. Nothing here is uploaded.")
             if !AgentTokenTelemetryConfig.enabled(defaults: settings.defaults) {
                 let text = "Recording is off. New task tokens and command timing are not recorded. What is already on this Mac is still shown."
                 Label(text, systemImage: "pause.circle")
@@ -190,9 +190,13 @@ struct SettingsUsageSections: View {
                 UsageReportSections(report: report, usage: usage, settings: settings)
             }
         }
-        if let group = settings.sections.flatMap(\.groups).first(where: { $0.id == "agents.tokenTelemetry" }) {
+        if let group = settings.sections.flatMap(\.groups).first(where: { $0.id == SettingsSchema.usageRecordingGroupID }) {
             Section {
-                ForEach(Array(group.rows.enumerated()), id: \.offset) { _, row in ToggleRow(row: row, model: settings) }
+                ForEach(Array(group.rows.enumerated()), id: \.offset) { _, row in
+                    ToggleRow(row: row, model: settings)
+                        .settingsAnchor(SettingsRegistry.anchor(for: row.field) ?? row.field.label, model: settings)
+                        .settingsResettable(row.field, model: settings)
+                }
                 if case .ready(_, let tasks) = usage.phase, tasks > 0 {
                     ButtonRow(title: "Export these figures", buttonTitle: "Export…",
                               help: "Saves the period's figures as a file, with ids only: no names, prompts or paths.",
@@ -201,19 +205,20 @@ struct SettingsUsageSections: View {
                         UsageDeleteChoice(usage: usage, task: nil).frame(width: 160, height: 28)
                     } label: {
                         SettingsRowLabel(title: "Delete usage records",
-                                         help: "Removes this Mac's task records from Array's own run ledger. It cannot be undone.")
+                                         help: "Removes this Mac's task records. It cannot be undone.")
                     }
                 }
                 if let notice = usage.deleteNotice {
                     InfoRow(text: notice).settingsRenderedText("usage.deleted", notice, model: settings)
                 }
             } header: {
-                Text("Recording")
+                Text(group.title ?? "Recording")
             } footer: {
-                Text([group.footer, "Account limits (5-hour and weekly) stay in each agent tile's status row."]
-                    .compactMap { $0 }.joined(separator: " "))
+                Text(group.footer ?? "")
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
@@ -229,8 +234,8 @@ private struct UsageReportSections: View {
         Section {
             figure("usage.closed", "Tasks closed", UsageWords.count(report.closed))
             if report.closed > 0 {
-                figure("usage.fullyCounted", "Fully counted", "\(UsageWords.count(report.fullyCounted)) of \(UsageWords.count(report.closed))",
-                       help: "Every turn's tokens were recorded, in every kind its harness reports.")
+                figure("usage.fullyCounted", "Complete records", "\(UsageWords.count(report.fullyCounted)) of \(UsageWords.count(report.closed))",
+                       help: "Tasks where every token was recorded.")
                 figure("usage.split", "How the work was split",
                        "\(UsageWords.count(report.solo)) solo · \(UsageWords.count(report.oneHelper)) with one helper · \(UsageWords.count(report.twoOrMoreHelpers)) with two or more",
                        help: "A helper is any agent working under the lead, at any depth.")
@@ -527,11 +532,11 @@ enum UsageWords {
     static func detail(_ line: UsageReport.TaskLine) -> String {
         let models = line.models.map { model -> String in
             let source = model.source == "record" ? ", from its settings" : ""
-            return "\(model.role == .lead ? "Lead" : "Helper") \(model.harness ?? "unknown harness") (\(model.model ?? "model unknown")\(source))"
+            return "\(model.role == .lead ? "Lead" : "Helper") \(model.harness ?? "unknown agent") (\(model.model ?? "model unknown")\(source))"
         }
         let mode = line.mode == "free" ? ["Free"] : line.mode == "managed" ? ["Managed"] : []
         let opened = line.state == .closed ? [] : ["Opened \(line.opened.map { when($0) } ?? "unknown")"]
-        return (mode + opened + ["Active \(duration(line.activeTime))", commandTime(line)] + (models.isEmpty ? ["harness and model unknown"] : models)).joined(separator: " · ")
+        return (mode + opened + ["Active \(duration(line.activeTime))", commandTime(line)] + (models.isEmpty ? ["agent and model unknown"] : models)).joined(separator: " · ")
     }
 
     static func commandTime(_ line: UsageReport.TaskLine) -> String {
@@ -553,7 +558,7 @@ enum UsageWords {
 
     /// What a delete did, said plainly; the quiet outcomes included.
     static func deleted(_ what: ManagedRunLedger.Deletion, _ result: ManagedRunLedger.DeleteResult) -> String {
-        if result.failed { return "Could not delete: the run ledger could not be rewritten. Nothing was changed." }
+        if result.failed { return "Could not delete: the records could not be rewritten. Nothing was changed." }
         switch what {
         case .task:
             if result.keptRunning > 0 { return "That task is still running, so its records were kept." }

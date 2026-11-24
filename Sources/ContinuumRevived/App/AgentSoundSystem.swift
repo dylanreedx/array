@@ -411,8 +411,8 @@ enum AgentAwarenessSelfCheck {
         _ = AgentSoundSettingsView(defaults: defaults, library: library)
 
         // Sound on by default (decisions pass): the master switch reads ON when
-        // nobody has set it, an explicit OFF stays off, and because every event
-        // is still opt-in a fresh install hears nothing until one is enabled.
+        // nobody has set it, an explicit OFF stays off, and and a new install (event keys never written) plays the three events that
+        // matter; saved choices, on or off, are never overridden.
         final class RecordingPlayer: AgentSoundPlaying {
             var played: [AgentSoundReference] = []
             func play(_ reference: AgentSoundReference, priority: Int, volume: Double, library: AgentSoundLibrary) {
@@ -443,13 +443,16 @@ enum AgentAwarenessSelfCheck {
                    "an unset master switch must read ON in Settings — read \(unsetModel.soundsEnabled)")
         let freshPlayer = RecordingPlayer()
         everyEvent(AgentSignalCenter(defaults: unset, library: library, player: freshPlayer))
-        try expect(freshPlayer.played.isEmpty,
-                   "a fresh install with no event enabled must play NOTHING — played \(freshPlayer.played.map(\.rawValue))")
-        unset.set(true, forKey: AgentSoundConfig.enabledKey(for: .completed))
-        let oneEventPlayer = RecordingPlayer()
-        everyEvent(AgentSignalCenter(defaults: unset, library: library, player: oneEventPlayer))
-        try expect(oneEventPlayer.played == [AgentSoundReference(rawValue: "bloom")],
-                   "turning on ONE event with the master untouched must just work — played \(oneEventPlayer.played.map(\.rawValue))")
+        try expect(Set(freshPlayer.played.map(\.rawValue)) == ["bloom", "radar", "beacon"],
+                   "a new install (no event key written) must play finished, failed and needs-you, and not push or merge — played \(freshPlayer.played.map(\.rawValue))")
+        // A saved choice always wins over the new default: an existing user who
+        // turned finished off, and one who turned merged on, hear exactly that.
+        unset.set(false, forKey: AgentSoundConfig.enabledKey(for: .completed))
+        unset.set(true, forKey: AgentSoundConfig.enabledKey(for: .gitMergeSucceeded))
+        let savedPlayer = RecordingPlayer()
+        everyEvent(AgentSignalCenter(defaults: unset, library: library, player: savedPlayer))
+        try expect(Set(savedPlayer.played.map(\.rawValue)) == ["radar", "beacon", "prism"],
+                   "saved event choices must override the new-install defaults — played \(savedPlayer.played.map(\.rawValue))")
 
         let (off, offName) = try freshSuite("off")
         defer { off.removePersistentDomain(forName: offName) }
@@ -461,7 +464,7 @@ enum AgentAwarenessSelfCheck {
         everyEvent(AgentSignalCenter(defaults: off, library: library, player: offPlayer))
         try expect(offPlayer.played.isEmpty,
                    "an explicit OFF master switch must silence an enabled event — played \(offPlayer.played.map(\.rawValue))")
-        print("Agent awareness checks passed: 20 assets, import lifecycle, accessible visuals, deduped completion, master sound ON when unset and OFF when set off, a fresh install silent until one event is enabled")
+        print("Agent awareness checks passed: 20 assets, import lifecycle, accessible visuals, deduped completion, master sound ON when unset and OFF when set off, a new install hears finished, failed and needs-you while saved choices win")
     }
 }
 
@@ -506,7 +509,7 @@ final class AgentSoundSettingsView: NSStackView {
         for kind in AgentSignalKind.allCases.sorted(by: { $0.priority > $1.priority }) {
             let enabled = NSButton(checkboxWithTitle: kind.displayName, target: self, action: #selector(ruleEnabledChanged(_:)))
             enabled.identifier = NSUserInterfaceItemIdentifier(kind.rawValue)
-            enabled.state = defaults.bool(forKey: AgentSoundConfig.enabledKey(for: kind)) ? .on : .off
+            enabled.state = AgentSoundConfig.resolvedRules(defaults: defaults).rules[kind]?.enabled == true ? .on : .off
             enabled.widthAnchor.constraint(equalToConstant: 140).isActive = true
             let popup = NSPopUpButton()
             popup.identifier = NSUserInterfaceItemIdentifier(kind.rawValue)

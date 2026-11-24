@@ -42,6 +42,29 @@ public enum AgentSignalKind: String, Codable, CaseIterable, Equatable, Hashable,
         }
     }
 
+    /// The words Settings uses for this moment, shared with the iPhone pane's
+    /// notification switches. The tile badge keeps `displayName`.
+    public var settingsTitle: String {
+        switch self {
+        case .completed: return "Finished"
+        case .failed: return "Failed"
+        case .actionRequired: return "Needs you"
+        case .gitPushSucceeded: return "Pushed"
+        case .gitMergeSucceeded: return "Merged"
+        }
+    }
+
+    /// One plain line saying when it plays.
+    public var settingsHelp: String {
+        switch self {
+        case .completed: return "An agent finished its task."
+        case .failed: return "An agent stopped on an error."
+        case .actionRequired: return "An agent is asking for approval or an answer."
+        case .gitPushSucceeded: return "An agent pushed its branch."
+        case .gitMergeSucceeded: return "An agent merged its branch."
+        }
+    }
+
     public var symbolName: String {
         switch self {
         case .completed: return "checkmark.circle.fill"
@@ -227,10 +250,20 @@ public struct AgentSoundManifestEntry: Codable, Equatable, Identifiable, Sendabl
 
 public enum AgentSoundConfig {
     public static let masterEnabledKey = "continuum.agentSounds.enabled"
-    /// ON when nobody has set it (decisions pass). Every event rule stays opt-in
-    /// (`AgentSoundRules.defaults`), so a fresh install still hears nothing until
-    /// an event is turned on, and turning one on then just works.
+    /// ON when nobody has set it (decisions pass). The events a person has to act
+    /// on or learn of (`defaultEnabled(for:)`) are ON until someone saves a
+    /// choice for them, so turning sounds on makes sound; a saved choice, on or
+    /// off, is never overridden.
     public static let defaultMasterEnabled = true
+
+    /// What an event's switch reads when its key was never written: the three
+    /// moments that matter (needs you, failed, finished) on, git events off.
+    public static func defaultEnabled(for kind: AgentSignalKind) -> Bool {
+        switch kind {
+        case .actionRequired, .failed, .completed: return true
+        case .gitPushSucceeded, .gitMergeSucceeded: return false
+        }
+    }
     public static let volumeKey = "continuum.agentSounds.volume"
     public static let defaultVolume = 0.72
 
@@ -247,7 +280,7 @@ public enum AgentSoundConfig {
         for kind in AgentSignalKind.allCases {
             guard let suggested = values[kind] else { continue }
             let enabled = defaults.object(forKey: enabledKey(for: kind)) == nil
-                ? false : defaults.bool(forKey: enabledKey(for: kind))
+                ? defaultEnabled(for: kind) : defaults.bool(forKey: enabledKey(for: kind))
             let sound = AgentSoundReference(rawValue: defaults.string(forKey: soundKey(for: kind)) ?? suggested.sound.rawValue)
             values[kind] = AgentSoundRule(enabled: enabled, sound: sound)
         }

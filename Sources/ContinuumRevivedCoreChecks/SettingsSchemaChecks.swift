@@ -15,7 +15,7 @@ func runSettingsSchemaChecks() {
     expect(
         sections.map(\.title) == [
             "General", "Appearance", "Sidebar", "Agent Icons", "Canvas", "Agents", "Editor", "Terminal", "Browser",
-            "Notifications & Sounds", "Keyboard", "iPhone", "Usage", "Advanced",
+            "Notifications & Sounds", "iPhone", "Keyboard", "Usage", "Advanced",
         ],
         "settings exposes the fourteen product panes in stable order, got \(sections.map(\.title))"
     )
@@ -23,7 +23,7 @@ func runSettingsSchemaChecks() {
     expect(
         sections.map(\.id) == [
             "general", "appearance", "sidebar", "agentCharacters", "canvasAndZones", "agents", "editor", "terminal", "browser",
-            "activityAndNotifications", "keybindings", "companion", "usage", "advanced",
+            "activityAndNotifications", "companion", "keybindings", "usage", "advanced",
         ],
         "settings pane ids must be stable and ordered, got \(sections.map(\.id))"
     )
@@ -34,6 +34,17 @@ func runSettingsSchemaChecks() {
         ],
         "the Tiles sidebar heading must cover exactly Agents, Editor, Terminal and Browser"
     )
+    // The bottom block is headed, so it is not a nameless tail after Browser.
+    expect(
+        sections.map { $0.sidebarHeading == SettingsSchema.moreHeading } == [
+            false, false, false, false, false, false, false, false, false, true, true, true, true, true,
+        ],
+        "the More sidebar heading must sit over Notifications & Sounds, iPhone, Keyboard, Usage and Advanced"
+    )
+    // One home for the recording switch (Usage) and for the Safari inspector (Advanced).
+    func home(_ key: String) -> [String] { sections.filter { $0.fields.contains { $0.key == key } }.map(\.id) }
+    expect(home(AgentTokenTelemetryConfig.enabledKey) == ["usage"], "the usage recording switch is declared once, in Usage — got \(home(AgentTokenTelemetryConfig.enabledKey))")
+    expect(home(BrowserWebInspectorConfig.userDefaultsKey) == ["advanced"], "the Safari inspector switch is declared once, in Advanced")
     let renderedKeys = Set(sections.flatMap(\.fields).compactMap(\.key))
     for field in tuningFields {
         expect(!renderedKeys.contains(field.key ?? ""), "tuning knob \(field.key ?? field.label) left the UI and must not render")
@@ -258,6 +269,9 @@ private func runSettingsPlainWordsChecks(sections: [SettingsSection]) {
     func isPlainWords(_ value: String) -> Bool {
         // A leading key glyph ("⌥ Option") is words; a leading digit is a value.
         let trimmed = value.unicodeScalars.drop { CharacterSet.symbols.contains($0) || CharacterSet.whitespaces.contains($0) }
+        // A size with its unit ("100k tokens") is words; a bare number is a value.
+        if let first = trimmed.first, CharacterSet.decimalDigits.contains(first),
+           value.contains(" "), value.split(separator: " ").last?.allSatisfy(\.isLetter) == true { return true }
         guard let first = trimmed.first, CharacterSet.uppercaseLetters.contains(first) else { return false }
         // A lower-to-upper hump inside a word is an identifier ("inheritFocus").
         var previousWasLower = false
@@ -335,6 +349,23 @@ private func runSettingsRegistrySearchChecks(sections: [SettingsSection]) {
     expect(has("background") { $0.anchor == "canvasBackground.scope" }, "'background' must find the canvas background")
     expect(has("wallpaper") { $0.anchor == "canvasBackground.scope" }, "'wallpaper' must find the canvas background")
     expect(search("continuum").isEmpty && search("autoLayout").isEmpty, "raw defaults keys must never be searchable")
+    // What a person types when something is wrong finds the row that fixes it.
+    for word in ["slow", "lag", "ram"] {
+        expect(has(word) { $0.id == "pane.advanced" } && has(word) { $0.field?.key == BrowserRuntimeBudget.defaultsKey },
+               "'\(word)' must find the Advanced memory rows")
+    }
+    for word in ["quiet", "silence", "mute"] {
+        expect(has(word) { $0.anchor == "sounds.master" }, "'\(word)' must find the sounds")
+    }
+    for word in ["alerts", "push"] {
+        expect(has(word) { $0.id == "pane.activityAndNotifications" } || has(word) { $0.id == "pane.companion" },
+               "'\(word)' must find a notifications pane")
+    }
+    for word in ["spend", "cost", "price"] {
+        expect(has(word) { $0.id == "pane.usage" }, "'\(word)' must find Usage")
+    }
+    expect(has("scroll") { $0.field?.key == SessionResumeConfig.scrollbackEnabledKey }, "'scroll' must find the terminal scrollback rows")
+    expect(has("trackpad") { $0.paneID == "terminal" || $0.paneID == "general" }, "'trackpad' must find something that exists")
 
     // "on" matches words STARTING with "on" only. The old substring search matched
     // nearly every row ("Notifications", "Opacity" via "continuum.…").

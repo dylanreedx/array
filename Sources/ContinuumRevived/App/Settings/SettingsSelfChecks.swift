@@ -536,6 +536,45 @@ enum SettingsSelfChecks {
                        "shortcut group '\(group.title)' shows a stored identifier")
         }
 
+        // 6b. A switch's dependants are HIDDEN, not dimmed: with sounds off only the
+        // switch is drawn (and search stops pointing at the rest); the iPhone
+        // notification switches wait for a paired phone; each recording / inspector
+        // switch has exactly one home.
+        fixture.select("activityAndNotifications")
+        fixture.settle()
+        let soundDependants = ["sounds.volume", "sounds.kind.completed", "sounds.kind.failed", "sounds.kind.actionRequired",
+                               "sounds.kind.gitPushSucceeded", "sounds.kind.gitMergeSucceeded", "sounds.characters", "sounds.library"]
+        try expect(model.renderedAnchors["sounds.master"] != nil && soundDependants.allSatisfy { model.renderedAnchors[$0] != nil },
+                   "with sounds on, the volume, every event row, icon sounds and custom sounds must be drawn")
+        model.soundsEnabled = false
+        fixture.settle()
+        try expect(model.renderedAnchors["sounds.master"] != nil && soundDependants.allSatisfy { model.renderedAnchors[$0] == nil },
+                   "with sounds off, everything under the switch must be hidden, not dimmed — still drawn: \(soundDependants.filter { model.renderedAnchors[$0] != nil })")
+        try expect(!model.entries().contains { $0.anchor.map(soundDependants.contains) == true },
+                   "search must not list sound rows that are hidden")
+        model.soundsEnabled = true
+        fixture.settle()
+        fixture.select("companion")
+        fixture.settle()
+        let phoneAnchors = sections.first { $0.id == "companion" }!.fields.compactMap(\.key).map { "field.\($0)" }
+        try expect(phoneAnchors.allSatisfy { model.renderedAnchors[$0] == nil },
+                   "before a phone is paired, no notification switch may be drawn")
+        try expect(!model.entries().contains { $0.anchor.map(phoneAnchors.contains) == true },
+                   "search must not list phone notification switches before a phone is paired")
+        model.pairedPhoneCount = 1
+        fixture.settle()
+        try expect(phoneAnchors.allSatisfy { model.renderedAnchors[$0] != nil },
+                   "with a phone paired, every notification switch must be drawn")
+        model.pairedPhoneCount = 0
+        fixture.settle()
+        for (key, pane) in [(AgentTokenTelemetryConfig.enabledKey, "usage"), (BrowserWebInspectorConfig.userDefaultsKey, "advanced")] {
+            fixture.select(pane)
+            fixture.settle()
+            try expect(model.renderedAnchors["field.\(key)"] != nil, "\(pane) must draw the \(key) switch")
+            let homes = model.entries().filter { $0.anchor == "field.\(key)" }.map(\.paneID)
+            try expect(homes == [pane], "\(key) must have one search home, \(pane) — found \(homes)")
+        }
+
         // 7. The modal renders (grey-screen guard), with artifacts for review.
         let timestamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "")
         let artifactDir = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
@@ -560,6 +599,42 @@ enum SettingsSelfChecks {
                 && !String(describing: type(of: $0)).hasPrefix("TUI")
         }
         try expect(stray.isEmpty, "Settings created windows: \(stray.map { "\(type(of: $0))" })")
+        if let dir = ProcessInfo.processInfo.environment["CONTINUUM_SETTINGS_STILLS_DIR"] {
+            try renderStills(to: URL(fileURLWithPath: dir))
+        }
+    }
+
+    /// Offscreen stills of the notifications-to-advanced panes in both
+    /// appearances, for review. Only when `CONTINUUM_SETTINGS_STILLS_DIR` is set.
+    private static func renderStills(to directory: URL) throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let states: [(name: String, pane: String, paired: Int, soundsOff: Bool)] = [
+            ("sounds-on", "activityAndNotifications", 0, false), ("sounds-off", "activityAndNotifications", 0, true),
+            ("iphone-not-paired", "companion", 0, false), ("iphone-paired", "companion", 1, false),
+            ("keyboard", "keybindings", 0, false), ("usage", "usage", 0, false), ("advanced", "advanced", 0, false),
+        ]
+        for (look, appearanceName) in [("light", NSAppearance.Name.aqua), ("dark", NSAppearance.Name.darkAqua)] {
+            for state in states {
+                let suite = "continuum.settingsStills.\(UUID().uuidString)"
+                guard let defaults = QAIsolatedDefaults(isolatedSuiteName: suite) else {
+                    throw Failure(message: "could not create the isolated defaults suite")
+                }
+                defer { defaults.removePersistentDomain(forName: suite) }
+                if state.soundsOff { defaults.set(false, forKey: AgentSoundConfig.masterEnabledKey) }
+                let model = SettingsModel(sections: SettingsSchema.sections(), defaults: defaults,
+                                          navKeymap: .resolve(defaults: defaults, warn: { _ in }))
+                model.pairedPhoneCount = state.paired
+                let fixture = SettingsFixtureWindow(model: model, appearance: NSAppearance(named: appearanceName))
+                defer { fixture.tearDown() }
+                fixture.show(paneID: state.pane)
+                fixture.settle(0.5)
+                guard let rep = fixture.snapshot(),
+                      let png = rep.representation(using: .png, properties: [:]) else {
+                    throw Failure(message: "could not render \(state.name) (\(look))")
+                }
+                try png.write(to: directory.appendingPathComponent("\(state.name)-\(look).png"))
+            }
+        }
     }
 
     // MARK: - `--keybind-edit-check`

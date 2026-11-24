@@ -46,11 +46,13 @@ public enum SettingsRegistry {
 
     /// Every entry, in sidebar-then-schema order. `defaults` decides conditional
     /// rows (a slider that only exists for one choice); `paneIDs` limits the set to
-    /// the panes actually shown (the iPhone pane is conditional).
+    /// the panes actually shown; `hiddenGroupIDs` are groups not drawn right now
+    /// (the iPhone notification switches before a phone is paired).
     public static func entries(
         sections: [SettingsSection] = SettingsSchema.sections(),
         defaults: UserDefaults,
-        paneIDs: Set<String>? = nil
+        paneIDs: Set<String>? = nil,
+        hiddenGroupIDs: Set<String> = []
     ) -> [SettingsEntry] {
         var result: [SettingsEntry] = []
         for section in sections where paneIDs?.contains(section.id) ?? true {
@@ -58,10 +60,15 @@ public enum SettingsRegistry {
                 id: "pane.\(section.id)", paneID: section.id, paneTitle: section.title,
                 groupID: nil, groupTitle: nil, label: section.title, keywords: section.keywords,
                 optionTitles: [], reveal: .pane, field: nil))
-            for group in section.groups {
+            for group in section.groups where !hiddenGroupIDs.contains(group.id) {
                 for row in group.rows where row.isVisible(in: defaults) {
                     let field = row.field
-                    let custom = SettingsSchema.customEntries(for: field)
+                    var custom = SettingsSchema.customEntries(for: field)
+                    // With sounds off only the switch is drawn; the rows under it
+                    // are not on screen, so search must not point at them.
+                    if case .agentSounds = field, !AgentSoundConfig.isMasterEnabled(defaults: defaults) {
+                        custom = custom.filter { $0.anchor == "sounds.master" }
+                    }
                     if !custom.isEmpty {
                         for (index, entry) in custom.enumerated() {
                             result.append(SettingsEntry(
@@ -106,6 +113,23 @@ public enum SettingsSearch {
         "hotkey": ["shortcut"],
         "keybinding": ["shortcut"],
         "phone": ["iphone"],
+        // What a person types when something is wrong, to the word the row uses.
+        "slow": ["memory"],
+        "lag": ["memory"],
+        "laggy": ["memory"],
+        "ram": ["memory"],
+        "quiet": ["sound"],
+        "silence": ["sound"],
+        "silent": ["sound"],
+        "mute": ["sound"],
+        "alert": ["notification"],
+        "alerts": ["notification"],
+        "push": ["notification"],
+        "spend": ["usage"],
+        "cost": ["usage"],
+        "price": ["usage"],
+        "scroll": ["scrollback"],
+        "trackpad": ["scrollback", "zoom"],
     ]
 
     public struct Result: Equatable, Sendable {
