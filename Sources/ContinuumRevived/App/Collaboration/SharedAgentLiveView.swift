@@ -280,6 +280,7 @@ final class SharedAgentLiveView: NSView {
         do {
             let value = try await readTranscript(selected, request)
             guard generation == ticket else { return false }
+            refreshAuthors()
             transcriptView.receive(value)
             helpers.update(transcriptView.mirror.helpers)
             onRead?()
@@ -586,7 +587,14 @@ final class SharedAgentLiveView: NSView {
         if window == nil { stopChromeTick() } else { renderChrome() }
     }
 
+    /// The names the transcript reads its prompts by: this viewer's own, and
+    /// the owner's. Names can arrive after the first read, so every render asks.
+    private func refreshAuthors() {
+        transcriptView.authors = .init(me: name(controller.identity.person), host: source.flatMap { name($0.owner) })
+    }
+
     private func render() {
+        refreshAuthors()
         if showsChrome { renderChrome(); return }
         let role = controller.scope?.role ?? .viewer
         guard let state = replica.state else {

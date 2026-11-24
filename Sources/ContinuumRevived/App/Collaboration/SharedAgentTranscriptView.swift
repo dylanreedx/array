@@ -38,6 +38,18 @@ final class SharedAgentTranscriptView: NSView {
     var onOpenWebLink: ((URL, AgentLinkOpenTarget) -> Void)?
     /// The host's chrome or one of its character sets arrived (agent-chrome).
     var onChromeChange: (() -> Void)?
+    /// Who wrote the prompts, as this viewer reads them. The host's document
+    /// draws its owner's prompts plainly and a teammate's as a named card; on a
+    /// teammate's Mac that is backwards, so `present` swaps them.
+    struct Authors: Equatable {
+        /// This viewer's own name, as the host stamped it on their prompts.
+        var me: String?
+        /// The owner's name, for the prompts they typed on their own tile.
+        var host: String?
+    }
+    var authors = Authors() {
+        didSet { if authors != oldValue, !mirror.document.entries.isEmpty { present(.init(ids: [], structural: true)) } }
+    }
     override var isFlipped: Bool { true }
 
     override init(frame frameRect: NSRect) {
@@ -162,13 +174,66 @@ final class SharedAgentTranscriptView: NSView {
             let entries = mirror.document.entries.map { entry in
                 var copy = entry
                 copy.blocks = entry.blocks.map(presented)
-                return copy
+                return Self.authored(copy, authors)
             }
             try feed.present(entries, touched: touched.ids, structural: touched.structural, final: true, to: surface)
             renderError = nil
             refreshRenderContext()
         } catch {
             renderError = error
+        }
+    }
+
+    /// One user entry as this viewer reads it. Their own prompt, which the host
+    /// recorded as a teammate's card, draws as a plain prompt, the way the owner
+    /// sees their own. The owner's plain prompt draws as a card with the owner's
+    /// name. Anything else, another agent's message included, is untouched.
+    static func authored(_ entry: AgentEntry, _ authors: Authors) -> AgentEntry {
+        guard entry.role == .user else { return entry }
+        func same(_ a: String, _ b: String?) -> Bool {
+            guard let b else { return false }
+            func key(_ s: String) -> String { s.split(whereSeparator: \.isWhitespace).joined(separator: " ").lowercased() }
+            return !key(a).isEmpty && key(a) == key(b)
+        }
+        var copy = entry
+        if entry.blocks.contains(where: { if case .agentMessage = $0.payload { return true }; return false }) {
+            copy.blocks = entry.blocks.flatMap { block -> [AgentBlock] in
+                guard case let .agentMessage(message) = block.payload, message.origin == .teammate,
+                      same(message.senderName, authors.me) else { return [block] }
+                return paragraphs(message.text, id: block.id, revision: block.revision)
+            }
+            return copy
+        }
+        guard let host = authors.host?.trimmingCharacters(in: .whitespacesAndNewlines), !host.isEmpty,
+              !entry.blocks.isEmpty,
+              entry.blocks.allSatisfy({ if case .paragraph = $0.payload { return true }; return false }) else { return entry }
+        let text = entry.blocks.compactMap { block -> String? in
+            guard case let .paragraph(inlines) = block.payload else { return nil }
+            return inlines.map { inline in
+                switch inline {
+                case .softBreak, .hardBreak: return "\n"
+                default: return inline.plainText
+                }
+            }.joined()
+        }.joined(separator: "\n\n")
+        guard let first = entry.blocks.first else { return entry }
+        copy.blocks = [AgentBlock(id: first.id, revision: entry.blocks.map(\.revision).max() ?? 0, kind: .agentMessage,
+                                  payload: .agentMessage(AgentMessagePayload(origin: .teammate, senderName: host, text: text)))]
+        return copy
+    }
+
+    /// Typed text as the paragraphs a prompt draws: blank lines split them,
+    /// single line breaks stay breaks.
+    private static func paragraphs(_ text: String, id: AgentNodeID, revision: UInt64) -> [AgentBlock] {
+        let parts = text.components(separatedBy: "\n\n").filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        return parts.enumerated().map { index, part in
+            var inlines: [AgentInline] = []
+            for (n, line) in part.components(separatedBy: "\n").enumerated() {
+                if n > 0 { inlines.append(.hardBreak) }
+                inlines.append(.text(line))
+            }
+            return AgentBlock(id: index == 0 ? id : (AgentNodeID(rawValue: id.rawValue + "-\(index)") ?? id), revision: revision,
+                              kind: .paragraph, payload: .paragraph(inlines))
         }
     }
 

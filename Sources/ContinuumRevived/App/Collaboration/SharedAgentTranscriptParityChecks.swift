@@ -650,6 +650,49 @@ enum SharedAgentTranscriptParityChecks {
         detailRevision += 1
         await stablePublisher.tick()
         try expect(detailReads == 2, "a detail revision triggers a fresh read without a document change")
+
+        // Authorship as the guest reads it (sharing walk, item 4). The host's
+        // document draws the owner's prompts plainly and Sam's as a "Sam ·
+        // Teammate" card. On Sam's Mac that is backwards: Sam's own prompt
+        // must read as theirs, and the owner's must carry the owner's name.
+        deliver(.turnCompleted(threadId: thread, turnId: "fold-transition", outcome: .completed, errorMessage: nil))
+        try await settleHost()
+        guest.personName = { person in person == me.person ? "Sam" : person == owner.person ? "Dylan" : nil }
+        let samTyped = "Which state handles a refund?"
+        try expect(supervisor.send(AgentPrompt("From Sam\n\n---\n" + samTyped), to: agent), "Sam's prompt starts a turn on the host")
+        deliver(.turnStarted(threadId: thread, turnId: "sam-turn"))
+        deliver(.contentDelta(threadId: thread, turnId: "sam-turn", streamKind: .assistant, delta: "Refunds return to Paid."))
+        deliver(.turnCompleted(threadId: thread, turnId: "sam-turn", outcome: .completed, errorMessage: nil))
+        try await settleHost(); await publisher.tick()
+        _ = await guest.pollTranscript(object, ticket: guest.qaTicket, waitMilliseconds: 0)
+        let rendered = guest.transcriptView.qaRenderedDocument.entries.filter { $0.role == .user }
+        func cards(_ entries: [AgentEntry]) -> [String] {
+            entries.flatMap(\.blocks).compactMap { block in
+                guard case let .agentMessage(message) = block.payload else { return nil }
+                return message.senderName + ": " + message.text
+            }
+        }
+        func plain(_ entries: [AgentEntry]) -> [String] {
+            entries.compactMap { entry in
+                let text = entry.blocks.compactMap { block -> String? in
+                    guard case let .paragraph(inlines) = block.payload else { return nil }
+                    return inlines.map(\.plainText).joined()
+                }.joined(separator: "\n\n")
+                return text.isEmpty ? nil : text
+            }
+        }
+        try expect(!cards(rendered).contains("Sam: " + samTyped) && plain(rendered).contains(samTyped),
+                   "Sam's own prompt reads as Sam's plain prompt on Sam's Mac, not a \"Sam · Teammate\" card (cards \(cards(rendered)), plain \(plain(rendered)))")
+        try expect(cards(rendered).contains("Dylan: Map every state the checkout can be in, and the events that move it."),
+                   "the owner's prompt carries the owner's name on Sam's Mac (cards \(cards(rendered)))")
+        try expect(cards(supervisor.transcriptDocument(for: agent)?.entries ?? []).contains("Sam: " + samTyped),
+                   "the owner's own document still holds Sam's prompt as Sam's card")
+        let replies = guest.transcriptView.qaRenderedDocument.entries.filter { $0.role == .assistant }.flatMap(\.blocks)
+            .compactMap { block -> String? in
+                guard case let .paragraph(inlines) = block.payload else { return nil }
+                return inlines.map(\.plainText).joined()
+            }
+        try expect(replies.contains("Refunds return to Paid."), "the host's reply to Sam's prompt reaches Sam (\(replies))")
         projectionHost.stop()
     }
 
