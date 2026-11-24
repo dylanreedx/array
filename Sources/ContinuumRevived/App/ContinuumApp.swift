@@ -3346,7 +3346,7 @@ enum ContinuumApp {
         #endif
 
         #if ARRAY_CHECKS
-        if CommandLine.arguments.contains("--file-preview-open-check") {
+        if CommandLine.arguments.contains("--file-preview-open-check") || CommandLine.arguments.contains("--transcript-file-strip-check") {
             do {
                 _ = NSApplication.shared
                 try FileOpenChecks.runFilePreviewOpenCheck()
