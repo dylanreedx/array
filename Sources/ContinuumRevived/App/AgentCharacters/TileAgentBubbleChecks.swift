@@ -1040,7 +1040,7 @@ enum TileAgentBubbleChecks {
         }
     }
 
-    /// Settings › Agent Icons › Tile icon is Array's ChoiceButton, and choosing
+    /// Settings › Agent Icons › Badge style is Array's ChoiceButton, and choosing
     /// there moves every tile's icon, live.
     private static func checkSettingsChoice(defaults: UserDefaults, views: [ManagedAgentTileNSView], canvas: CanvasNSView) throws {
         let model = SettingsModel(defaults: defaults, navKeymap: .resolve(defaults: defaults, warn: { _ in }),
@@ -1052,21 +1052,21 @@ enum TileAgentBubbleChecks {
             model.reveal(entry)
             fixture.settle()
         }
-        guard let button = fixture.descendants(ChoiceButton.self).first(where: { $0.accessibilityLabel() == "Tile icon" }) else {
-            throw Failure(description: "Agent Icons has no Tile icon ChoiceButton")
+        guard let button = fixture.descendants(ChoiceButton.self).first(where: { $0.accessibilityLabel() == "Badge style" }) else {
+            throw Failure(description: "Agent Icons has no Badge style ChoiceButton")
         }
         button.presentsOffscreenForQA = true
         try expect(button.items.map(\.id) == Style.allCases.map(\.rawValue),
-                   "Tile icon offers \(Style.allCases.map(\.title)), got \(button.items.map(\.title))")
+                   "Badge style offers \(Style.allCases.map(\.title)), got \(button.items.map(\.title))")
         try expect(button.selectedID == AgentCharacterConfig.bubbleStyle(defaults).rawValue,
-                   "Tile icon shows the stored style (\(String(describing: button.selectedID)))")
+                   "Badge style shows the stored style (\(String(describing: button.selectedID)))")
         for style in [Style.inline, .orb, .squircle, .inline] where style != AgentCharacterConfig.bubbleStyle(defaults) || style == .inline {
             button.scrollToVisible(button.bounds.insetBy(dx: 0, dy: -80))
             fixture.settle(0.2)
             try click(button)
             fixture.settle()
             guard let list = button.qaPresentedList, let row = list.rowView(id: style.rawValue) else {
-                throw Failure(description: "the Tile icon choice did not offer \(style.title); presented=\(button.qaIsPopoverPresented)")
+                throw Failure(description: "the Badge style choice did not offer \(style.title); presented=\(button.qaIsPopoverPresented)")
             }
             button.qaPresentedPanel?.makeKey()
             try click(row)
@@ -1076,29 +1076,31 @@ enum TileAgentBubbleChecks {
             try expect(pump(until: { showsStyle(style, views, canvas) }),
                        "choosing \(style.title) in Settings moves every tile's icon live")
         }
-        // The icon size row: a real ChoiceButton, Small / Default / Large, live.
-        setSetting(defaults, AgentCharacterConfig.bubbleStyleKey, Style.orb.rawValue)
+        // The badge size row: a real segmented control, Small / Default / Large, live.
+        // Badge size is hidden while the badge is Inline, so choose Orb through the
+        // Settings model (as the Badge style choice does) and let the row appear.
+        guard let styleField = model.entries().first(where: { $0.field?.key == AgentCharacterConfig.bubbleStyleKey })?.field else {
+            throw Failure(description: "Agent Icons has no Badge style field")
+        }
+        try expect(!fixture.descendants(NSSegmentedControl.self).contains { $0.accessibilityIdentifier() == SegmentedChoiceRow.identifier(forKey: AgentCharacterConfig.iconScaleKey) },
+                   "Badge size must be hidden while the badge is Inline")
+        model.write(.string(Style.orb.rawValue), to: styleField)
         try expect(pump(until: { showsStyle(.orb, views, canvas) }), "Orb for the size row")
-        guard let sizeButton = fixture.descendants(ChoiceButton.self).first(where: { $0.accessibilityLabel() == "Tile icon size" }) else {
-            throw Failure(description: "Agent Icons has no Tile icon size ChoiceButton")
-        }
-        sizeButton.presentsOffscreenForQA = true
-        try expect(sizeButton.items.map(\.title) == ["Small", "Default", "Large"], "Tile icon size offers \(sizeButton.items.map(\.title))")
-        try expect(sizeButton.selectedID == "standard", "Tile icon size starts at Default")
-        let before = views[0].agentBubbleFrame?.width ?? 0
-        sizeButton.scrollToVisible(sizeButton.bounds.insetBy(dx: 0, dy: -80))
-        fixture.settle(0.2)
-        try click(sizeButton)
         fixture.settle()
-        guard let sizeList = sizeButton.qaPresentedList, let large = sizeList.rowView(id: "large") else {
-            throw Failure(description: "the Tile icon size choice did not offer Large")
+        let sizeID = SegmentedChoiceRow.identifier(forKey: AgentCharacterConfig.iconScaleKey)
+        guard let sizeControl = fixture.descendants(NSSegmentedControl.self).first(where: { $0.accessibilityIdentifier() == sizeID }) else {
+            throw Failure(description: "Agent Icons has no Badge size segmented control while the badge hangs")
         }
-        sizeButton.qaPresentedPanel?.makeKey()
-        try click(large)
+        try expect((0..<sizeControl.segmentCount).map { sizeControl.label(forSegment: $0) } == ["Small", "Default", "Large"],
+                   "Badge size offers Small / Default / Large")
+        try expect(sizeControl.selectedSegment == 1, "Badge size starts at Default")
+        let before = views[0].agentBubbleFrame?.width ?? 0
+        sizeControl.selectedSegment = 2
+        sizeControl.sendAction(sizeControl.action, to: sizeControl.target)
         fixture.settle()
         try expect(defaults.string(forKey: AgentCharacterConfig.iconScaleKey) == "large", "choosing Large stores it")
         try expect(pump(until: { canvas.layoutSubtreeIfNeeded(); return (views[0].agentBubbleFrame?.width ?? 0) > before * 1.1 }),
-                   "choosing Large in Settings grows every tile's icon live (\(before) -> \(views[0].agentBubbleFrame?.width ?? 0))")
+                   "choosing Large in Settings grows every tile's badge live (\(before) -> \(views[0].agentBubbleFrame?.width ?? 0))")
         setSetting(defaults, AgentCharacterConfig.iconScaleKey, "standard")
         setSetting(defaults, AgentCharacterConfig.bubbleStyleKey, Style.inline.rawValue)
     }

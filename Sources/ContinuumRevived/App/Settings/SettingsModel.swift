@@ -383,7 +383,7 @@ final class SettingsModel {
         switch layer {
         case .global: return "Everywhere"
         case .navMode: return "Navigation mode"
-        case .inbox: return "Activity Dock"
+        case .inbox: return "Sidebar"
         case .tile(let kind): return "\(words(kind.rawValue)) tiles"
         }
     }

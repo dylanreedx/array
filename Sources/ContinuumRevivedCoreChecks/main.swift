@@ -6865,7 +6865,7 @@ do {
         expect(false, "ShortcutCatalog: missing global.toggleWorkspaceSidebar entry")
         fatalError("unreachable")
     }
-    expect(sidebarToggleEntry.label == "Show Activity Dock", "ShortcutCatalog: sidebar toggle label")
+    expect(sidebarToggleEntry.label == "Show Sidebar", "ShortcutCatalog: sidebar toggle label")
     expect(sidebarToggleEntry.chordDisplay == KeyChord(keyCode: 1, modifiers: [.command, .shift]).displayString,
            "ShortcutCatalog: sidebar toggle chord display")
     expect(sidebarToggleEntry.configurable, "ShortcutCatalog: sidebar toggle is configurable")

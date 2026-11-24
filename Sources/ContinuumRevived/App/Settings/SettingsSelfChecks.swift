@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
 
@@ -99,6 +100,57 @@ enum SettingsSelfChecks {
         if !condition() { throw Failure(message: message) }
     }
 
+    /// Evidence, not a witness: the cleaned panes (and the states that hide rows),
+    /// rendered offscreen in light and dark. Runs only when
+    /// `CONTINUUM_SETTINGS_STILLS_DIR` names a directory.
+    static func renderStills(to directory: URL) throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let panes = ["general", "appearance", "sidebar", "agentCharacters", "canvasAndZones", "keybindings"]
+        let variants: [(name: String, pane: String, set: [(String, Any)], reveal: String?)] = panes.map { ($0, $0, [], nil) } + [
+            ("sidebar-off", "sidebar", [(WorkspaceSidebarConfig.visibleKey, false)], nil),
+            ("appearance-outline-off", "appearance", [(FocusBorderConfig.enabledKey, false)], nil),
+            ("agentCharacters-on", "agentCharacters", [(AgentCharacterConfig.enabledKey, true), (AgentCharacterConfig.bubbleStyleKey, "orb")], nil),
+            ("agentCharacters-off", "agentCharacters", [(AgentCharacterConfig.enabledKey, false)], nil),
+            ("canvasAndZones-off", "canvasAndZones", [(CanvasAutoLayoutConfig.enabledKey, false), (FloatingToolbarConfig.visibleKey, false)], nil),
+            ("general-no-confirm", "general", [(DeleteConfirmPolicy.userDefaultsKey, "never")], nil),
+            ("canvasAndZones-bottom", "canvasAndZones", [], "end"),
+            ("appearance-bottom", "appearance", [], "end"),
+            ("appearance-outline-off-bottom", "appearance", [(FocusBorderConfig.enabledKey, false)], "end"),
+        ]
+        for (look, appearanceName) in [("light", NSAppearance.Name.aqua), ("dark", NSAppearance.Name.darkAqua)] {
+            for variant in variants {
+                let suite = "continuum.settingsStills.\(UUID().uuidString)"
+                guard let defaults = QAIsolatedDefaults(isolatedSuiteName: suite) else {
+                    throw Failure(message: "could not create the isolated defaults suite")
+                }
+                defer { defaults.removePersistentDomain(forName: suite) }
+                for (key, value) in variant.set { defaults.set(value, forKey: key) }
+                let model = SettingsModel(sections: SettingsSchema.sections(), defaults: defaults,
+                                          navKeymap: .resolve(defaults: defaults, warn: { _ in }))
+                let fixture = SettingsFixtureWindow(model: model, size: NSSize(width: 1_100, height: 1_500),
+                                                    appearance: NSAppearance(named: appearanceName))
+                defer { fixture.tearDown() }
+                fixture.show(paneID: variant.pane)
+                fixture.settle(0.4)
+                if variant.reveal != nil {
+                    // Scroll the pane (the tallest scroll view) to its end.
+                    let scroller = fixture.descendants(NSScrollView.self)
+                        .max { ($0.documentView?.frame.height ?? 0) < ($1.documentView?.frame.height ?? 0) }
+                    if let scroller, let document = scroller.documentView {
+                        let y = document.isFlipped ? max(0, document.frame.height - scroller.contentView.bounds.height) : 0
+                        document.scroll(NSPoint(x: 0, y: y))
+                        scroller.reflectScrolledClipView(scroller.contentView)
+                    }
+                    fixture.settle(0.4)
+                }
+                guard let png = fixture.snapshot()?.representation(using: .png, properties: [:]) else {
+                    throw Failure(message: "still \(variant.name)-\(look): no render")
+                }
+                try png.write(to: directory.appendingPathComponent("\(variant.name)-\(look).png"))
+            }
+        }
+    }
+
     // MARK: - `--settings-panel-check`
 
     /// Every pane renders a row for every registry entry, rows write through the
@@ -106,6 +158,9 @@ enum SettingsSelfChecks {
     /// picker follows the live catalogue, and the modal renders and tears down
     /// without creating a window.
     static func runPanelCheck() throws {
+        if let directory = ProcessInfo.processInfo.environment["CONTINUUM_SETTINGS_STILLS_DIR"] {
+            try renderStills(to: URL(fileURLWithPath: directory, isDirectory: true))
+        }
         let suite = "continuum.settingsPanel.selfcheck.\(UUID().uuidString)"
         guard let defaults = QAIsolatedDefaults(isolatedSuiteName: suite) else {
             throw Failure(message: "could not create the isolated defaults suite")
@@ -177,8 +232,8 @@ enum SettingsSelfChecks {
         fixture.select("sidebar")
         let dockField = SettingsField.toggle(key: WorkspaceSidebarConfig.visibleKey, label: "", default: WorkspaceSidebarConfig.defaultVisible)
         let switches = fixture.descendants(NSSwitch.self)
-        // Sidebar draws only the Activity Dock switch.
-        try expect(switches.count == 1, "Sidebar must draw one switch (Activity Dock), drew \(switches.count)")
+        // Sidebar draws only the sidebar switch.
+        try expect(switches.count == 1, "Sidebar must draw one switch (Show the sidebar), drew \(switches.count)")
         final class Counts: @unchecked Sendable { var exact = 0; var unrelated = 0 }
         let counts = Counts()
         let exact = NotificationCenter.default.addObserver(
@@ -196,7 +251,7 @@ enum SettingsSelfChecks {
         switches[0].performClick(nil)
         fixture.settle()
         try expect(dockField.currentValue(in: defaults) == .bool(before != .bool(true)),
-                   "clicking the Activity Dock switch must write \(WorkspaceSidebarConfig.visibleKey)")
+                   "clicking the sidebar switch must write \(WorkspaceSidebarConfig.visibleKey)")
         try expect(counts.exact == 1 && counts.unrelated == 0,
                    "a write must post its own setting event once: exact=\(counts.exact) unrelated=\(counts.unrelated)")
         try expect(fixture.descendants(NSSwitch.self).first?.state == (before == .bool(true) ? .off : .on),
@@ -219,6 +274,79 @@ enum SettingsSelfChecks {
         model.binding(for: glassField).set(.string(CommandCenterGlassiness.frosted.rawValue))
         fixture.settle()
         try expect(model.renderedAnchors[opacityAnchor] == nil, "custom opacity must hide again after leaving Custom")
+
+        // 4b. Hide-when-off: each dependant row is gone (not dimmed) while its parent
+        // is off, and back when it is on. Stored keys are the existing ones.
+        func field(_ key: String) -> SettingsField { sections.flatMap(\.fields).first { $0.key == key }! }
+        let hideCases: [(pane: String, key: String, off: SettingsValue, on: SettingsValue, hidden: [String])] = [
+            ("sidebar", WorkspaceSidebarConfig.visibleKey, .bool(false), .bool(true),
+             [WorkspaceSidebarConfig.widthKey, SidebarLayout.defaultsKey, SidebarActiveIndicatorScope.defaultsKey,
+              SidebarActiveIndicatorStyle.defaultsKey, SidebarHeaderBackground.defaultsKey].map { "field.\($0)" }),
+            ("appearance", FocusBorderConfig.enabledKey, .bool(false), .bool(true),
+             [FocusBorderConfig.colorKey, FocusBorderConfig.gapKey].map { "field.\($0)" }),
+            ("agentCharacters", AgentCharacterConfig.enabledKey, .bool(false), .bool(true),
+             [AgentCharacterConfig.motionKey, AgentCharacterConfig.sizeKey].map { "field.\($0)" } + ["custom.agentCharacters"]),
+            ("agentCharacters", AgentCharacterConfig.bubbleStyleKey, .string("inline"), .string("orb"),
+             ["field.\(AgentCharacterConfig.iconScaleKey)"]),
+            ("canvasAndZones", CanvasAutoLayoutConfig.enabledKey, .bool(false), .bool(true),
+             [CanvasAutoLayoutConfig.activationKey, CanvasAutoLayoutConfig.growthKey].map { "field.\($0)" }),
+            ("canvasAndZones", FloatingToolbarConfig.visibleKey, .bool(false), .bool(true),
+             ["custom.toolbarButtons", "action.resetToolbarPosition"]),
+        ]
+        for item in hideCases {
+            fixture.select(item.pane)
+            model.write(item.on, to: field(item.key)); fixture.settle()
+            for anchor in item.hidden {
+                try expect(model.renderedAnchors[anchor] != nil, "\(item.pane): \(anchor) must show while \(item.key) is on")
+            }
+            model.write(item.off, to: field(item.key)); fixture.settle()
+            for anchor in item.hidden {
+                try expect(model.renderedAnchors[anchor] == nil, "\(item.pane): \(anchor) must be hidden while \(item.key) is off")
+            }
+            try expect(model.renderedAnchors["field.\(item.key)"] != nil, "\(item.pane): the parent \(item.key) must stay visible")
+            model.write(item.on, to: field(item.key)); fixture.settle()
+            model.reset(field(item.key))
+        }
+        // The new controls drive the existing keys and values.
+        fixture.select("general")
+        let closeKey = DeleteConfirmPolicy.userDefaultsKey
+        model.write(.string(DeleteConfirmPolicy.never.rawValue), to: field(closeKey)); fixture.settle()
+        try expect(!fixture.descendants(NSSegmentedControl.self).contains { $0.accessibilityIdentifier() == CloseConfirmRow.scopeIdentifier },
+                   "the close-prompt scope must be hidden while the prompt is off")
+        model.write(.string(DeleteConfirmPolicy.runtimes.rawValue), to: field(closeKey)); fixture.settle()
+        guard let scope = fixture.descendants(NSSegmentedControl.self).first(where: { $0.accessibilityIdentifier() == CloseConfirmRow.scopeIdentifier }) else {
+            throw Failure(message: "the close-prompt scope must show while the prompt is on")
+        }
+        scope.selectedSegment = 1
+        scope.sendAction(scope.action, to: scope.target)
+        try expect(defaults.string(forKey: closeKey) == DeleteConfirmPolicy.always.rawValue, "the scope's second segment must store the old `always`")
+        model.reset(field(closeKey))
+        guard let channel = fixture.descendants(NSSegmentedControl.self).first(where: { $0.accessibilityIdentifier() == SegmentedChoiceRow.identifier(forKey: "array.updateChannel") }) else {
+            throw Failure(message: "General must draw the update channel as a segmented choice")
+        }
+        try expect((0..<channel.segmentCount).map { channel.label(forSegment: $0) } == ["Stable", "Early access"], "the channel offers Stable / Early access")
+        channel.selectedSegment = 1
+        channel.sendAction(channel.action, to: channel.target)
+        try expect(defaults.string(forKey: "array.updateChannel") == "Tip", "Early access must store the old value Tip")
+        model.reset(field("array.updateChannel"))
+        // Hold for: a stored 2000 ms still loads and shows, and drawing it rewrites nothing.
+        fixture.select("keybindings")
+        defaults.set(2000, forKey: NavKeymap.leaderDwellDefaultsKey); fixture.settle()
+        try expect(model.value(of: field(NavKeymap.leaderDwellDefaultsKey)) == .double(2000), "a stored Hold for of 2000 ms must still load")
+        try expect(defaults.integer(forKey: NavKeymap.leaderDwellDefaultsKey) == 2000, "drawing the slider must not rewrite a stored 2000 ms")
+        model.reset(field(NavKeymap.leaderDwellDefaultsKey))
+        // Toolbar buttons: one checklist whose picks write each button's own key.
+        fixture.select("canvasAndZones")
+        guard let checklist = fixture.descendants(ChoiceButton.self).first(where: { $0.accessibilityIdentifier() == ToolbarButtonsRow.identifier }),
+              let first = checklist.items.first, let entry = ToolbarButtonsRow.buttons().first(where: { $0.id == first.id }) else {
+            throw Failure(message: "Canvas must draw the toolbar buttons checklist")
+        }
+        try expect(checklist.items.count == ToolbarButtonsRow.buttons().count && checklist.items.allSatisfy { $0.keepsOpen && $0.check != nil },
+                   "the checklist must list every toolbar button with a box")
+        let wasOn = model.binding(for: entry.field).bool
+        checklist.onSelection?(first)
+        try expect(defaults.object(forKey: entry.field.key!) as? Bool == !wasOn, "picking a checklist row must write that button's own key")
+        model.reset(entry.field)
 
         // 5. The model picker: ids verbatim from the live catalogue of the selected
         // CLI; a CLI switch keeps an incompatible saved model as an explicit invalid

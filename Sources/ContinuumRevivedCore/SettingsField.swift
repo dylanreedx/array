@@ -158,6 +158,7 @@ public enum SettingsField: Equatable, Sendable {
     }
 
     public func isVisible(in defaults: UserDefaults) -> Bool {
+        guard SettingsDependencies.isOpen(self, in: defaults) else { return false }
         // The compaction size only matters while compacting is on.
         if case .choice(AgentContextAutoCompactionPolicy.compactAtKey, _, _, _, _) = self {
             return defaults.string(forKey: AgentContextAutoCompactionPolicy.modeKey) != AgentContextCompactionMode.never.rawValue

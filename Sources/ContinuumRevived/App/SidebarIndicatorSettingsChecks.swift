@@ -57,8 +57,8 @@ enum SidebarIndicatorSettingsChecks {
                 fixture.settle()
             }
             func control() throws -> ChoiceButton {
-                guard let button = fixture.descendants(ChoiceButton.self).first(where: { $0.accessibilityLabel() == "Active agent" }) else {
-                    throw Failure(description: "Sidebar is missing the real Active agent ChoiceButton")
+                guard let button = fixture.descendants(ChoiceButton.self).first(where: { $0.accessibilityLabel() == "Highlight style" }) else {
+                    throw Failure(description: "Sidebar is missing the real Highlight style ChoiceButton")
                 }
                 button.presentsOffscreenForQA = true
                 return button

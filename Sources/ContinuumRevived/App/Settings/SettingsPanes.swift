@@ -273,7 +273,10 @@ private struct SettingsPaneForm: View {
     var body: some View {
         ScrollViewReader { proxy in
             Form {
-                ForEach(pane.groups, id: \.id) { group in
+                ForEach(pane.groups.filter { group in
+                    let _ = model.revision
+                    return group.rows.contains { $0.field.isVisible(in: model.defaults) }
+                }, id: \.id) { group in
                     if group.rows.count == 1, case .shortcuts = group.rows[0].field {
                         SettingsShortcutSections(model: model)
                     } else if group.rows.count == 1, case .custom("canvasBackground", _) = group.rows[0].field {
@@ -353,6 +356,13 @@ struct SettingsFieldRow: View {
         }
     }
 
+    /// Short choices drawn side by side instead of as a menu.
+    private static let segmentedKeys: Set<String> = [
+        "array.updateChannel", SidebarLayout.defaultsKey, SidebarActiveIndicatorScope.defaultsKey,
+        CanvasAutoLayoutConfig.activationKey, CanvasAutoLayoutConfig.growthKey,
+        AgentCharacterConfig.iconScaleKey, AgentCharacterConfig.sizeKey, NavKeymap.leaderHoldDefaultsKey,
+    ]
+
     @ViewBuilder
     private func rowContent(_ field: SettingsField) -> some View {
         switch field {
@@ -372,24 +382,28 @@ struct SettingsFieldRow: View {
             CompactionModeRow(row: row, model: model)
         case let .choice(key, _, _, _, _) where key == AgentContextAutoCompactionPolicy.compactAtKey:
             CompactionSizeRow(row: row, model: model)
+        case let .choice(key, _, _, _, _) where key == DeleteConfirmPolicy.userDefaultsKey:
+            CloseConfirmRow(row: row, model: model)
+        case let .choice(key, _, _, _, _) where key == AgentCharacterConfig.motionKey:
+            MotionSwitchRow(row: row, model: model)
+        case let .choice(key, _, _, _, _) where Self.segmentedKeys.contains(key):
+            SegmentedChoiceRow(row: row, model: model)
+        case let .number(key, _, _, _, _, _) where NumberSliderRow.tracks.keys.contains(key):
+            NumberSliderRow(row: row, model: model)
+        case .custom("toolbarButtons", _):
+            ToolbarButtonsRow(row: row, model: model)
         case let .choice(key, _, _, _, _) where key == AgentModelConfig.modelKey:
             SettingsModelPickerRow(model: model, row: row)
         case let .choice(key, _, _, _, _) where key == AppTheme.defaultsKey:
             NeutralThemePickerRow(model: model, row: row)
         case let .choice(key, _, _, _, _) where key == SidebarHeaderBackground.defaultsKey:
             SidebarHeaderBackgroundSettingsRow(model: model, row: row)
-        case let .choice(key, _, _, _, _) where key == SidebarActiveIndicatorStyle.defaultsKey || key == SidebarActiveIndicatorScope.defaultsKey || key == SidebarLayout.defaultsKey:
+        case let .choice(key, _, _, _, _) where key == SidebarActiveIndicatorStyle.defaultsKey:
             SidebarActiveIndicatorSettingsRow(model: model, row: row)
-        case let .choice(key, _, _, _, _) where key == AgentCharacterConfig.bubbleStyleKey || key == AgentCharacterConfig.iconScaleKey:
+        case let .choice(key, _, _, _, _) where key == AgentCharacterConfig.bubbleStyleKey:
             TileAgentIconSettingsRow(model: model, row: row)
         case let .choice(key, _, _, _, _) where key == CornerStyle.defaultsKey:
             PickerRow(row: row, model: model, segmented: true)
-        case let .choice(key, _, _, _, _) where key == "array.updateChannel":
-            HStack {
-                SettingsRowLabel(title: row.field.label, help: row.help)
-                Spacer()
-                UpdateChannelChoice(row: row, model: model).frame(width: 160, height: 28)
-            }
         case .choice:
             PickerRow(row: row, model: model)
         case .slider:
@@ -1001,20 +1015,4 @@ private struct ChordCaptureRepresentable: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: ChordCaptureView, context: Context) {}
-}
-
-private struct UpdateChannelChoice: NSViewRepresentable {
-    let row: SettingsRow
-    let model: SettingsModel
-    func makeNSView(context: Context) -> ChoiceButton {
-        let button = ChoiceButton(title: "Stable")
-        button.setAccessibilityLabel("Update channel")
-        return button
-    }
-    func updateNSView(_ button: ChoiceButton, context: Context) {
-        let binding = model.binding(for: row.field)
-        button.items = [ChoiceItem(id: "Stable", title: "Stable"), ChoiceItem(id: "Tip", title: "Tip")]
-        button.selectedID = binding.string
-        button.onSelection = { item in binding.set(.string(item.id)) }
-    }
 }

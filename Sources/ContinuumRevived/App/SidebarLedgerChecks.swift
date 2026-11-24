@@ -897,19 +897,14 @@ extension SidebarLedgerChecks {
             }
             let renderCount = inbox.sidebarLayoutRenderCountForQA
             for next in [layout == .ledger ? SidebarLayout.quietInbox : .ledger, layout] {
-                guard let button = settings.descendants(ChoiceButton.self).first(where: { $0.accessibilityIdentifier() == "settings.sidebarLayout" }) else {
+                guard let control = settings.descendants(NSSegmentedControl.self).first(where: { $0.accessibilityIdentifier() == SegmentedChoiceRow.identifier(forKey: SidebarLayout.defaultsKey) }) else {
                     throw Failure(description: "Settings has no Layout choice")
                 }
-                button.presentsOffscreenForQA = true
-                button.scrollToVisible(button.bounds.insetBy(dx: 0, dy: -80))
-                settings.settle()
-                try QuickHideChecks.click(button)
-                settings.settle()
-                guard let option = button.qaPresentedList?.rowView(id: next.rawValue) else {
+                guard let index = SidebarLayout.allCases.firstIndex(of: next) else {
                     throw Failure(description: "Layout choice has no \(next.title)")
                 }
-                button.qaPresentedPanel?.makeKey()
-                try QuickHideChecks.click(option)
+                control.selectedSegment = index
+                control.sendAction(control.action, to: control.target)
                 settings.settle()
                 inbox.layoutForQA()
                 try expect(inbox.sidebarLayout == next, "real Settings choice did not reach the live list")

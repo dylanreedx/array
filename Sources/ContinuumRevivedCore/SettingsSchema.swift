@@ -23,18 +23,18 @@ public enum SettingsSchema {
 
     private static func general() -> SettingsSection {
         SettingsSection(id: "general", title: "General", iconSystemName: "gearshape", groups: [
-            SettingsGroup(id: "general.closing", title: "Closing tiles", rows: [
+            SettingsGroup(id: "general.closing", title: nil, rows: [
                 SettingsRow(
-                    .choice(key: DeleteConfirmPolicy.userDefaultsKey, label: "Ask before closing a tile",
+                    .choice(key: DeleteConfirmPolicy.userDefaultsKey, label: "Confirm before closing a tile",
                             options: [DeleteConfirmPolicy.never.rawValue, DeleteConfirmPolicy.runtimes.rawValue, DeleteConfirmPolicy.always.rawValue],
                             default: DeleteConfirmPolicy.runtimes.rawValue,
                             titles: [
                                 DeleteConfirmPolicy.never.rawValue: "Never",
                                 DeleteConfirmPolicy.runtimes.rawValue: "Terminals and browsers",
-                                DeleteConfirmPolicy.always.rawValue: "Always",
+                                DeleteConfirmPolicy.always.rawValue: "Every tile",
                             ]),
                     help: "Notes and files close straight away; their contents are saved on disk.",
-                    keywords: ["delete", "confirm", "close", "warning"]),
+                    keywords: ["delete", "confirm", "close", "warning", "ask", "switch", "off", "never"]),
             ]),
             SettingsGroup(id: "general.navigation", title: "Jumping and focusing", rows: [
                 SettingsRow(.toggle(key: AgentJumpConfig.composerFirstKey, label: "Jump to an agent's composer", default: AgentJumpConfig.defaultComposerFirst),
@@ -45,8 +45,9 @@ public enum SettingsSchema {
                             keywords: ["header", "title bar", "click", "focus", "centre", "center", "fit", "zoom"]),
             ]),
             SettingsGroup(id: "general.updates", title: "Updates", rows: [
-                SettingsRow(.choice(key: "array.updateChannel", label: "Update channel", options: ["Stable", "Tip"], default: "Stable"),
-                            help: "Tip includes prerelease updates. Applies to the released app only.", keywords: ["sparkle", "beta"]),
+                SettingsRow(.choice(key: "array.updateChannel", label: "Update channel", options: ["Stable", "Tip"], default: "Stable",
+                                    titles: ["Stable": "Stable", "Tip": "Early access"]),
+                            help: "Early access includes prerelease updates.", keywords: ["sparkle", "beta", "tip", "prerelease"]),
                 SettingsRow(.action(id: "checkForUpdates", label: "Software update", buttonTitle: "Check for Updates…"),
                             keywords: ["update", "upgrade", "version", "sparkle"]),
             ]),
@@ -56,24 +57,21 @@ public enum SettingsSchema {
     private static func appearance() -> SettingsSection {
         SettingsSection(id: "appearance", title: "Appearance", iconSystemName: "paintbrush",
                         keywords: ["theme", "dark", "light", "look", "colour", "color"], groups: [
-            SettingsGroup(id: "appearance.theme", title: "Theme", rows: [
+            SettingsGroup(id: "appearance.theme", title: nil, rows: [
                 SettingsRow(.choice(key: AppTheme.defaultsKey, label: "App theme",
                                     options: AppTheme.allCases.map(\.rawValue),
                                     default: AppTheme.fallback.rawValue,
                                     titles: Dictionary(uniqueKeysWithValues: AppTheme.allCases.map { ($0.rawValue, $0.title) })),
-                            help: "Ten neutral palettes. Changes apply immediately across the app.",
                             keywords: ["neutral", "palette", "grey", "gray", "black", "white"]),
-            ]),
-            SettingsGroup(id: "appearance.canvasBackground", title: "Canvas background", rows: [
-                SettingsRow(.custom(id: "canvasBackground", label: "Canvas background")),
-            ]),
-            SettingsGroup(id: "appearance.corners", title: "Corners", rows: [
                 SettingsRow(.choice(key: CornerStyle.defaultsKey, label: "Corner style",
                                     options: CornerStyle.allCases.map(\.rawValue),
                                     default: CornerStyle.fallback.rawValue,
                                     titles: Dictionary(uniqueKeysWithValues: CornerStyle.allCases.map { ($0.rawValue, $0.title) })),
-                            help: "Tiles, zones, menus, the command menu, Settings and every card follow it right away.",
+                            help: "Tiles, zones, menus, the command menu and Settings follow it right away.",
                             keywords: ["corners", "radius", "rounded", "sharp", "square", "bubbly", "roundness"]),
+            ]),
+            SettingsGroup(id: "appearance.canvasBackground", title: "Canvas background", rows: [
+                SettingsRow(.custom(id: "canvasBackground", label: "Canvas background")),
             ]),
             SettingsGroup(id: "appearance.focus", title: "Focused tile outline", rows: [
                 SettingsRow(.toggle(key: FocusBorderConfig.enabledKey, label: "Outline the focused tile", default: FocusBorderConfig.defaultEnabled),
@@ -82,8 +80,6 @@ public enum SettingsSchema {
                             keywords: ["focus border", "color", "accent"]),
                 SettingsRow(.number(key: FocusBorderConfig.gapKey, label: "Outline gap", range: 0...40, default: FocusBorderConfig.defaultGap, unit: "px", step: 1),
                             keywords: ["focus border", "spacing"]),
-                SettingsRow(.toggle(key: ResizeHUDConfig.enabledKey, label: "Show size while resizing", default: ResizeHUDConfig.defaultEnabled),
-                            keywords: ["resize", "dimensions", "hud"]),
             ]),
             SettingsGroup(id: "appearance.commandMenu", title: "Command menu", rows: [
                 SettingsRow(.choice(key: CommandCenterAppearanceConfig.glassinessKey, label: "Background", options: CommandCenterAppearanceConfig.options, default: CommandCenterAppearanceConfig.defaultGlassiness.rawValue),
@@ -95,41 +91,41 @@ public enum SettingsSchema {
     }
 
     /// The sidebar's own settings. Pane id is new; the rows keep their defaults
-    /// keys, so saved values carry over from Appearance untouched.
+    /// keys, so saved values carry over from Appearance untouched. With the
+    /// sidebar off, every row but its switch is hidden (`SettingsDependencies`).
     private static func sidebar() -> SettingsSection {
         SettingsSection(id: "sidebar", title: "Sidebar", iconSystemName: "sidebar.left",
-                        keywords: ["sidebar", "activity dock", "inbox", "agents list", "list"], groups: [
-            SettingsGroup(id: "sidebar.dock", title: "Activity Dock", rows: [
-                SettingsRow(.toggle(key: WorkspaceSidebarConfig.visibleKey, label: "Show the Activity Dock", default: WorkspaceSidebarConfig.defaultVisible),
-                            help: "The side list of every agent, what each is doing, and what needs you.",
-                            keywords: ["sidebar", "inbox", "agents list"]),
-                SettingsRow(.number(key: WorkspaceSidebarConfig.widthKey, label: "Dock width", range: 180...640, default: WorkspaceSidebarConfig.defaultWidth, unit: "pt", step: 8),
-                            help: "You can also drag the dock's edge.",
-                            keywords: ["sidebar"]),
-            ]),
-            SettingsGroup(id: "sidebar.layout", title: "Layout", rows: [
+                        keywords: ["sidebar", "activity dock", "dock", "inbox", "agents list", "list"], groups: [
+            SettingsGroup(id: "sidebar.dock", title: nil, rows: [
+                SettingsRow(.toggle(key: WorkspaceSidebarConfig.visibleKey, label: "Show the sidebar", default: WorkspaceSidebarConfig.defaultVisible),
+                            help: "A list of every agent, what each is doing, and what needs you.",
+                            keywords: ["sidebar", "inbox", "agents list", "activity dock", "dock"]),
+                SettingsRow(.number(key: WorkspaceSidebarConfig.widthKey, label: "Sidebar width", range: 180...640, default: WorkspaceSidebarConfig.defaultWidth, unit: "pt", step: 8),
+                            help: "You can also drag its edge.",
+                            keywords: ["sidebar", "dock", "wide"]),
                 SettingsRow(.choice(key: SidebarLayout.defaultsKey, label: "Layout",
                                     options: SidebarLayout.allCases.map(\.rawValue),
                                     default: SidebarLayout.defaultLayout.rawValue,
                                     titles: Dictionary(uniqueKeysWithValues: SidebarLayout.allCases.map { ($0.rawValue, $0.title) })),
-                            help: "Ledger: one-line helpers, one count per lead, and what needs you on top. Quiet inbox: today's rows with a small Needs you box.",
+                            help: "Ledger is denser; Quiet inbox is calmer.",
                             keywords: ["sidebar", "layout", "ledger", "quiet", "inbox", "density"]),
             ]),
             SettingsGroup(id: "sidebar.highlight", title: "Highlight", rows: [
-                SettingsRow(.choice(key: SidebarActiveIndicatorStyle.defaultsKey, label: "Active agent",
+                SettingsRow(.choice(key: SidebarActiveIndicatorScope.defaultsKey, label: "Applies to",
+                                    options: SidebarActiveIndicatorScope.allCases.map(\.rawValue),
+                                    default: SidebarActiveIndicatorScope.fallback.rawValue,
+                                    titles: [SidebarActiveIndicatorScope.selected.rawValue: "Open agent",
+                                             SidebarActiveIndicatorScope.working.rawValue: "All working agents"]),
+                            help: "Which agents get the highlight.",
+                            keywords: ["sidebar", "highlight", "working", "lead", "selection", "active", "apply"]),
+                SettingsRow(.choice(key: SidebarActiveIndicatorStyle.defaultsKey, label: "Highlight style",
                                     options: SidebarActiveIndicatorStyle.allCases.map(\.rawValue),
                                     default: SidebarActiveIndicatorStyle.fallback.rawValue,
                                     titles: Dictionary(uniqueKeysWithValues: SidebarActiveIndicatorStyle.allCases.map { ($0.rawValue, $0.title) })),
-                            help: "How the open agent is highlighted. Changes apply immediately; Reduce Motion keeps it still.",
-                            keywords: ["sidebar", "duplex", "gradient", "sheen", "classic", "selection", "motion"]),
-                SettingsRow(.choice(key: SidebarActiveIndicatorScope.defaultsKey, label: "Apply active style to",
-                                    options: SidebarActiveIndicatorScope.allCases.map(\.rawValue),
-                                    default: SidebarActiveIndicatorScope.fallback.rawValue,
-                                    titles: Dictionary(uniqueKeysWithValues: SidebarActiveIndicatorScope.allCases.map { ($0.rawValue, $0.title) })),
-                            help: "Highlight every working agent and its lead, or only the agent you have open.",
-                            keywords: ["sidebar", "highlight", "working", "lead", "selection"]),
+                            help: "How the highlight looks.",
+                            keywords: ["sidebar", "duplex", "gradient", "sheen", "classic", "selection", "motion", "active agent"]),
             ]),
-            SettingsGroup(id: "sidebar.header", title: "Header", rows: [
+            SettingsGroup(id: "sidebar.header", title: nil, rows: [
                 SettingsRow(.choice(key: SidebarHeaderBackground.defaultsKey, label: "Header background",
                                     options: SidebarHeaderBackground.allCases.map(\.rawValue),
                                     default: SidebarHeaderBackground.fallback.rawValue,
@@ -140,39 +136,42 @@ public enum SettingsSchema {
         ])
     }
 
-    // Plan 110: small characters beside each agent's provider mark.
+    // Plan 110: small characters beside each agent's provider mark. "Character"
+    // is the animated figure; "badge" is the plate behind the provider mark.
     private static func agentCharacters() -> SettingsSection {
         SettingsSection(id: "agentCharacters", title: AgentCharacterCopy.feature, iconSystemName: "face.smiling",
                         keywords: ["icons", "icon packs", "characters", "sprites", "ducks", "mascot", "symbols"], groups: [
             SettingsGroup(id: "agentCharacters.display", title: nil, rows: [
-                SettingsRow(.choice(key: AgentCharacterConfig.bubbleStyleKey, label: "Tile icon",
-                                    options: AgentCharacterConfig.BubbleStyle.allCases.map(\.rawValue),
-                                    default: AgentCharacterConfig.defaultBubbleStyle.rawValue,
-                                    titles: Dictionary(uniqueKeysWithValues: AgentCharacterConfig.BubbleStyle.allCases.map { ($0.rawValue, $0.title) })),
-                            help: "The shape the \(AgentCharacterCopy.one) sits in at the start of the agent tile's title: a rounded square (Inline), a squircle, a glass orb, or Minimal: a flat squircle holding the provider mark.",
-                            keywords: ["agent", "icon", "bubble", "orb", "inline", "squircle", "minimal", "glass", "badge"]),
-                SettingsRow(.choice(key: AgentCharacterConfig.iconScaleKey, label: "Tile icon size",
-                                    options: AgentCharacterConfig.IconScale.allCases.map(\.rawValue),
-                                    default: AgentCharacterConfig.defaultIconScale.rawValue,
-                                    titles: Dictionary(uniqueKeysWithValues: AgentCharacterConfig.IconScale.allCases.map { ($0.rawValue, $0.title) })),
-                            help: "How big the Squircle, Orb and Minimal icon is at the tile's corner. Zoomed out below 80% it shrinks with the tile. Inline keeps its size.",
-                            keywords: ["agent", "icon", "size", "small", "large", "bigger", "smaller", "bubble"]),
-                SettingsRow(.toggle(key: AgentCharacterConfig.enabledKey, label: AgentCharacterCopy.show,
+                SettingsRow(.toggle(key: AgentCharacterConfig.enabledKey, label: "Show animated characters",
                                     default: AgentCharacterConfig.defaultEnabled),
-                            help: "A small \(AgentCharacterCopy.one) beside each agent's provider mark acts out what the agent is doing.",
-                            keywords: ["icons", "characters", "sprites", "ducks", "animation", "mascot"]),
-                SettingsRow(.choice(key: AgentCharacterConfig.motionKey, label: "Motion",
+                            help: "A small character beside each agent's provider mark acts out what the agent is doing.",
+                            keywords: ["icons", "characters", "sprites", "ducks", "animation", "mascot", "agent icons"]),
+                SettingsRow(.choice(key: AgentCharacterConfig.motionKey, label: "Animate while working",
                                     options: AgentCharacterConfig.Motion.allCases.map(\.rawValue),
                                     default: AgentCharacterConfig.defaultMotion.rawValue,
                                     titles: Dictionary(uniqueKeysWithValues: AgentCharacterConfig.Motion.allCases.map { ($0.rawValue, $0.title) })),
-                            help: "Resting agents always hold still. Reduce Motion in System Settings stills every \(AgentCharacterCopy.one).",
-                            keywords: ["icons", "characters", "animation", "reduce motion"]),
-                SettingsRow(.choice(key: AgentCharacterConfig.sizeKey, label: AgentCharacterCopy.size,
+                            help: "Off keeps every character on a still pose. Resting agents always hold still.",
+                            keywords: ["icons", "characters", "animation", "motion", "reduce motion", "still"]),
+                SettingsRow(.choice(key: AgentCharacterConfig.sizeKey, label: "Character size",
                                     options: AgentCharacterConfig.Size.allCases.map(\.rawValue),
                                     default: AgentCharacterConfig.defaultSize.rawValue,
                                     titles: Dictionary(uniqueKeysWithValues: AgentCharacterConfig.Size.allCases.map { ($0.rawValue, $0.title) })),
-                            help: "Larger \(AgentCharacterCopy.many) make the sidebar row and the agent tile's title bar taller to fit them.",
-                            keywords: ["icons", "characters", "size", "scale", "bigger", "larger"]),
+                            help: "Larger characters make the sidebar row and the tile's title bar taller.",
+                            keywords: ["icons", "characters", "size", "scale", "bigger", "larger", "icon size"]),
+            ]),
+            SettingsGroup(id: "agentCharacters.badge", title: "Tile badge", rows: [
+                SettingsRow(.choice(key: AgentCharacterConfig.bubbleStyleKey, label: "Badge style",
+                                    options: AgentCharacterConfig.BubbleStyle.allCases.map(\.rawValue),
+                                    default: AgentCharacterConfig.defaultBubbleStyle.rawValue,
+                                    titles: Dictionary(uniqueKeysWithValues: AgentCharacterConfig.BubbleStyle.allCases.map { ($0.rawValue, $0.title) })),
+                            help: "The shape behind the provider mark in an agent tile's title.",
+                            keywords: ["agent", "icon", "tile icon", "bubble", "orb", "inline", "squircle", "minimal", "glass", "badge"]),
+                SettingsRow(.choice(key: AgentCharacterConfig.iconScaleKey, label: "Badge size",
+                                    options: AgentCharacterConfig.IconScale.allCases.map(\.rawValue),
+                                    default: AgentCharacterConfig.defaultIconScale.rawValue,
+                                    titles: Dictionary(uniqueKeysWithValues: AgentCharacterConfig.IconScale.allCases.map { ($0.rawValue, $0.title) })),
+                            help: "For Squircle, Orb and Minimal. They shrink with the tile when zoomed out.",
+                            keywords: ["agent", "icon", "tile icon size", "size", "small", "large", "bigger", "smaller", "bubble", "badge"]),
             ]),
             SettingsGroup(id: "agentCharacters.sets", title: AgentCharacterCopy.set, rows: [
                 SettingsRow(.custom(id: "agentCharacters", label: AgentCharacterCopy.set),
@@ -182,46 +181,39 @@ public enum SettingsSchema {
     }
 
     private static func canvas() -> SettingsSection {
-        let toolbarItems: [SettingsRow] = CommandRegistry.definitions().compactMap { definition in
-            guard let item = definition.floatingToolbarItem else { return nil }
-            return SettingsRow(
-                .toggle(key: FloatingToolbarConfig.itemVisibleKey(commandID: definition.id.rawValue),
-                        label: "Show \(item.title) button", default: FloatingToolbarConfig.defaultItemVisible),
-                keywords: ["toolbar", "button"])
-        }
         return SettingsSection(id: "canvasAndZones", title: "Canvas", iconSystemName: "square.grid.2x2", groups: [
-            SettingsGroup(id: "canvas.layout", title: "Layout", rows: [
+            SettingsGroup(id: "canvas.layout", title: "Tiles", rows: [
                 SettingsRow(.toggle(key: CanvasAutoLayoutConfig.enabledKey, label: "Arrange tiles automatically", default: CanvasAutoLayoutConfig.defaultEnabled),
                             help: "New zones keep their tiles tidy. Each zone can override this.",
                             keywords: ["auto layout", "tidy", "arrange"]),
                 SettingsRow(.choice(key: CanvasAutoLayoutConfig.activationKey, label: "When you turn it on for a zone", options: CanvasAutoLayoutActivation.allCases.map(\.rawValue), default: CanvasAutoLayoutConfig.defaultActivation.rawValue,
                                     titles: [
-                                        CanvasAutoLayoutActivation.immediately.rawValue: "Tidy right away",
-                                        CanvasAutoLayoutActivation.onFirstEdit.rawValue: "Wait until the next change",
+                                        CanvasAutoLayoutActivation.immediately.rawValue: "Tidy now",
+                                        CanvasAutoLayoutActivation.onFirstEdit.rawValue: "On next change",
                                     ]),
-                            help: "What happens to the tiles already in a zone when you switch Arrange tiles automatically on for it.",
+                            help: "Whether the tiles already in the zone are tidied right away or at its next change.",
                             keywords: ["auto layout", "tidy"]),
                 SettingsRow(.choice(key: CanvasAutoLayoutConfig.growthKey, label: "New tiles grow the zone", options: CanvasGrowthDirection.allCases.map(\.rawValue), default: CanvasAutoLayoutConfig.defaultGrowth.rawValue,
                                     titles: [
-                                        CanvasGrowthDirection.fan.rawValue: "Fan out, shaped for the screen",
-                                        CanvasGrowthDirection.right.rawValue: "To the right",
-                                        CanvasGrowthDirection.down.rawValue: "Downward",
+                                        CanvasGrowthDirection.fan.rawValue: "Fan out",
+                                        CanvasGrowthDirection.right.rawValue: "Right",
+                                        CanvasGrowthDirection.down.rawValue: "Down",
                                     ]),
-                            help: "Where an auto-layout zone puts a new tile, and where a lead's helpers open.",
-                            keywords: ["auto layout", "grow", "direction", "fan", "helpers"]),
+                            help: "Where a new tile goes, and where a lead's helpers open. Fan out follows the zone's shape.",
+                            keywords: ["auto layout", "grow", "direction", "fan", "helpers", "right", "down", "downward"]),
                 SettingsRow(.number(key: TileGapResolver.userDefaultsKey, label: "Space between tiles", range: 0...160, default: TileGapResolver.defaultGap, unit: "pt", step: 4),
                             help: "The gap kept between neighbouring tiles when they are arranged or snapped.",
                             keywords: ["gap", "spacing", "padding"]),
-                SettingsRow(.number(key: ZoneBoundsConfig.paddingKey, label: "Zone padding", range: 0...240, default: ZoneBoundsConfig.defaultPadding, unit: "pt", step: 4),
-                            help: "Used when a new zone is laid out.",
-                            keywords: ["spacing", "margin"]),
                 SettingsRow(.toggle(key: DragMagnetizeConfig.enabledKey, label: "Snap tiles while dragging", default: DragMagnetizeConfig.defaultEnabled),
                             help: "Tiles you drag stick to the edges of nearby tiles.",
                             keywords: ["magnet", "snapping", "align"]),
             ]),
             SettingsGroup(id: "canvas.zones", title: "Zones", rows: [
+                SettingsRow(.number(key: ZoneBoundsConfig.paddingKey, label: "Zone padding", range: 0...240, default: ZoneBoundsConfig.defaultPadding, unit: "pt", step: 4),
+                            help: "The margin around the tiles when a new zone is laid out.",
+                            keywords: ["spacing", "margin"]),
                 SettingsRow(.toggle(key: ZoneChromeFeature.userDefaultsKey, label: "Show zone headers", default: true),
-                            help: "Headers, borders, and the project and Home folder of each zone.",
+                            help: "Each zone gets a title bar and a border.",
                             keywords: ["zone chrome", "border", "title bar"]),
                 SettingsRow(.text(key: DefaultGroupZoneName.userDefaultsKey, label: "New zone name", default: DefaultGroupZoneName.fallback),
                             help: "The name a zone gets when you create it. You can rename any zone.",
@@ -231,15 +223,22 @@ public enum SettingsSchema {
                             help: "Used when a zone is created. A colour you pick is never changed.",
                             keywords: ["color", "palette"]),
             ]),
-            SettingsGroup(id: "canvas.toolbar", title: "Toolbar and shortcut hints", rows: [
+            SettingsGroup(id: "canvas.toolbar", title: "Toolbar", rows: [
                 SettingsRow(.toggle(key: FloatingToolbarConfig.visibleKey, label: "Show the canvas toolbar", default: FloatingToolbarConfig.defaultVisible),
-                            help: "The floating bar of create buttons on the canvas. Choose which buttons it shows below.",
+                            help: "The floating bar of create buttons on the canvas.",
                             keywords: ["floating toolbar", "create"]),
-            ] + toolbarItems + [
+                SettingsRow(.custom(id: "toolbarButtons", label: "Toolbar buttons"),
+                            help: "Choose which buttons the toolbar shows.",
+                            keywords: ["toolbar", "button", "buttons"]),
                 SettingsRow(.action(id: "resetToolbarPosition", label: "Toolbar position", buttonTitle: "Reset Position"),
                             keywords: ["toolbar", "edge", "move"]),
+            ]),
+            SettingsGroup(id: "canvas.hints", title: "On the canvas", rows: [
                 SettingsRow(.toggle(key: CanvasShortcutRailConfig.visibleKey, label: "Show shortcut hints on the canvas", default: CanvasShortcutRailConfig.defaultVisible),
+                            help: "A strip of key hints along the canvas edge.",
                             keywords: ["shortcut rail", "keyboard", "help"]),
+                SettingsRow(.toggle(key: ResizeHUDConfig.enabledKey, label: "Show size while resizing", default: ResizeHUDConfig.defaultEnabled),
+                            keywords: ["resize", "dimensions", "hud"]),
             ]),
         ])
     }
@@ -504,11 +503,11 @@ public enum SettingsSchema {
     private static func keyboard() -> SettingsSection {
         SettingsSection(id: "keybindings", title: "Keyboard", iconSystemName: "keyboard",
                         keywords: ["keys", "hotkeys", "keybindings"], groups: [
-            SettingsGroup(id: "keyboard.navigation", title: "Navigation",
-                          footer: "Hold the key to show jump labels on every tile and zone.", rows: [
+            SettingsGroup(id: "keyboard.navigation", title: "Navigation", rows: [
                 SettingsRow(.choice(key: NavKeymap.leaderHoldDefaultsKey, label: "Hold to navigate", options: NavKeymap.leaderHoldModifierOptions, default: NavKeymap.modifierToken(NavKeymap.default.leaderHoldModifier),
                                     titles: ["opt": "⌥ Option", "ctrl": "⌃ Control", "cmd": "⌘ Command", "shift": "⇧ Shift"]),
-                            keywords: ["leader", "modifier", "jump"]),
+                            help: "Hold this key to label every tile and zone, then press a label to jump there.",
+                            keywords: ["leader", "modifier", "jump", "labels"]),
                 SettingsRow(.number(key: NavKeymap.leaderDwellDefaultsKey, label: "Hold for", range: Double(NavKeymap.minimumLeaderDwellMs)...2_000, default: Double(NavKeymap.default.leaderDwellMs), unit: "ms", step: 25),
                             keywords: ["delay", "leader"]),
                 SettingsRow(.text(key: NavKeymap.leaderLabelKeysDefaultsKey, label: "Tile label keys", default: NavKeymap.default.leaderLabelKeys),
@@ -659,6 +658,11 @@ public enum SettingsSchema {
                 CustomEntry(anchor: "canvasBackground.image", label: "Background image", keywords: words + ["picture", "photo", "opacity", "fit", "fill"]),
                 CustomEntry(anchor: "canvasBackground.reset", label: "Reset background", keywords: words),
             ]
+        case .custom("toolbarButtons", _):
+            return CommandRegistry.definitions().compactMap { definition in
+                guard let item = definition.floatingToolbarItem else { return nil }
+                return CustomEntry(anchor: "custom.toolbarButtons", label: "Show \(item.title) button", keywords: ["toolbar", "button"])
+            }
         case .custom("companion", _):
             return [CustomEntry(anchor: "custom.companion", label: "Pair an iPhone",
                                 keywords: ["companion", "invite", "relay", "pairing", "phone", "devices"])]

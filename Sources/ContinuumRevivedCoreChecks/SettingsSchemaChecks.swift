@@ -158,9 +158,9 @@ func runSettingsSchemaChecks() {
         expect(false, "settings schema must include Sidebar")
         fatalError("unreachable")
     }
-    expect(sidebarPane.fields.contains { $0.key == WorkspaceSidebarConfig.visibleKey }, "Sidebar exposes Activity Dock visibility")
-    expect(sidebarPane.fields.contains { $0.key == WorkspaceSidebarConfig.widthKey }, "Sidebar exposes Activity Dock width")
-    expect(!generalSection.fields.contains { $0.key == WorkspaceSidebarConfig.visibleKey }, "Activity Dock visibility left General")
+    expect(sidebarPane.fields.contains { $0.key == WorkspaceSidebarConfig.visibleKey }, "Sidebar exposes sidebar visibility")
+    expect(sidebarPane.fields.contains { $0.key == WorkspaceSidebarConfig.widthKey }, "Sidebar exposes sidebar width")
+    expect(!generalSection.fields.contains { $0.key == WorkspaceSidebarConfig.visibleKey }, "Sidebar visibility left General")
 
     let sidebarSuiteName = "WorkspaceSidebarConfigChecks-\(UUID().uuidString)"
     let sidebarDefaults = UserDefaults(suiteName: sidebarSuiteName)!

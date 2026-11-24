@@ -148,7 +148,7 @@ public enum ShortcutCatalog {
         ))
         entries.append(registeredEntry(
             id: "global.toggleWorkspaceSidebar",
-            label: "Show Activity Dock",
+            label: "Show Sidebar",
             fallback: KeyChord(keyCode: 1, modifiers: [.command, .shift]),
             defaults: defaults
         ))

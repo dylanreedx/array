@@ -639,7 +639,7 @@ private struct SettingsPreviewCardTitle: NSViewRepresentable {
     }
 }
 
-/// The sidebar's four looks use Array's shared choice surface.
+/// The sidebar's four highlight styles use Array's shared choice surface.
 struct SidebarActiveIndicatorSettingsRow: View {
     let model: SettingsModel
     let row: SettingsRow
@@ -661,28 +661,18 @@ private struct SidebarActiveIndicatorChoice: NSViewRepresentable {
 
     func makeNSView(context: Context) -> ChoiceButton {
         let button = ChoiceButton(title: SidebarActiveIndicatorStyle.fallback.title)
-        button.setAccessibilityLabel("Active agent")
+        button.setAccessibilityLabel("Highlight style")
         button.setAccessibilityIdentifier("settings.activeAgentStyle")
         return button
     }
 
     func updateNSView(_ button: ChoiceButton, context: Context) {
-        if field.key == SidebarActiveIndicatorScope.defaultsKey {
-            button.setAccessibilityLabel("Apply active style to")
-            button.setAccessibilityIdentifier("settings.activeAgentScope")
-            button.items = SidebarActiveIndicatorScope.allCases.map { ChoiceItem(id: $0.rawValue, title: $0.title) }
-        } else if field.key == SidebarLayout.defaultsKey {
-            button.setAccessibilityLabel("Sidebar layout")
-            button.setAccessibilityIdentifier("settings.sidebarLayout")
-            button.items = SidebarLayout.allCases.map { ChoiceItem(id: $0.rawValue, title: $0.title) }
-        } else {
-            button.items = SidebarActiveIndicatorStyle.allCases.map { ChoiceItem(id: $0.rawValue, title: $0.title) }
-        }
+        button.items = SidebarActiveIndicatorStyle.allCases.map { ChoiceItem(id: $0.rawValue, title: $0.title) }
         button.selectedID = model.binding(for: field).string
         button.onSelection = { item in model.write(.string(item.id), to: field) }
     }
 }
-/// Where an agent tile's icon sits (Inline, Squircle, Orb, Minimal) and how big it is, on Array's shared
+/// The badge behind an agent tile's provider mark (Inline, Squircle, Orb, Minimal), on Array's shared
 /// choice surface.
 struct TileAgentIconSettingsRow: View {
     let model: SettingsModel
@@ -704,22 +694,13 @@ private struct TileAgentIconChoice: NSViewRepresentable {
     let field: SettingsField
 
     func makeNSView(context: Context) -> ChoiceButton {
-        let sizing = field.key == AgentCharacterConfig.iconScaleKey
-        let button = ChoiceButton(title: sizing ? AgentCharacterConfig.defaultIconScale.title
-                                                : AgentCharacterConfig.defaultBubbleStyle.title)
-        button.setAccessibilityLabel(sizing ? "Tile icon size" : "Tile icon")
-        button.setAccessibilityIdentifier(sizing ? "settings.tileAgentIconSize" : "settings.tileAgentIcon")
+        let button = ChoiceButton(title: AgentCharacterConfig.defaultBubbleStyle.title)
+        button.setAccessibilityLabel("Badge style")
+        button.setAccessibilityIdentifier("settings.tileAgentIcon")
         return button
     }
 
     func updateNSView(_ button: ChoiceButton, context: Context) {
-        if field.key == AgentCharacterConfig.iconScaleKey {
-            button.items = AgentCharacterConfig.IconScale.allCases.map { ChoiceItem(id: $0.rawValue, title: $0.title) }
-            button.selectedID = AgentCharacterConfig.IconScale(rawValue: model.binding(for: field).string)?.rawValue
-                ?? AgentCharacterConfig.defaultIconScale.rawValue
-            button.onSelection = { item in model.write(.string(item.id), to: field) }
-            return
-        }
         button.items = AgentCharacterConfig.BubbleStyle.allCases.map { ChoiceItem(id: $0.rawValue, title: $0.title) }
         // A stored value from before this choice (0.7.50's Minimal) shows as
         // what it draws: the default.
