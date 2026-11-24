@@ -625,12 +625,31 @@ enum AgentNameOneShot {
         guard processExitCode(result.status) == 0 else {
             throw AgentNameOneShotError.failed(
                 processExitCode(result.status),
-                SecretRedactor.redactLocalDiagnostics(String(result.stderr.suffix(300))))
+                SecretRedactor.redactLocalDiagnostics(failureDetail(stdout: result.stdout, stderr: result.stderr)))
         }
         if titler.harness == .codex {
             return (try? String(contentsOf: lastMessageFile, encoding: .utf8)) ?? ""
         }
         return result.stdout
+    }
+
+    /// Why a one-shot exited non-zero. stderr when it has anything; otherwise
+    /// stdout, because `claude -p --output-format json` reports a usage limit,
+    /// an auth failure or an API error as a result object on STDOUT and leaves
+    /// stderr empty — which is how 89 failures on 2026-11-23 logged no reason.
+    /// A JSON result contributes its `result` text, anything else its tail.
+    static func failureDetail(stdout: String, stderr: String) -> String {
+        let err = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !err.isEmpty { return String(err.suffix(300)) }
+        let out = stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !out.isEmpty else { return "" }
+        if let data = out.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let text = object["result"] as? String ?? object["error"] as? String,
+           !text.isEmpty {
+            return "stdout: " + String(text.prefix(300))
+        }
+        return "stdout: " + String(out.suffix(300))
     }
 
     /// All blocking process and pipe work lives here. In particular, this never
@@ -19765,6 +19784,14 @@ private func checkGeneratedNameOneShot<Failure: Error>(
     esac
     cat > "$R/.p45-stdin"
     case "$model" in
+      *usage-limit*)
+        printf '%s\n' '{"type":"result","subtype":"success","is_error":true,"result":"You have hit your limit - resets 7pm"}'
+        exit 1
+        ;;
+      *stderr-failure*)
+        printf '%s\n' 'fixture: login expired' >&2
+        exit 1
+        ;;
       *normal-descendant*)
         # A loaded machine, made certain: while `.p45-slow` exists the titler
         # takes longer than a quiet run ever does before it answers.
@@ -20104,6 +20131,27 @@ private func checkGeneratedNameOneShot<Failure: Error>(
     guard timeoutResult,
           !fileManager.fileExists(atPath: root.appendingPathComponent(".p45-child-survived").path) else {
         throw fail("the one-shot timeout did not kill the forked process group")
+    }
+
+    // A failing CLI must leave its reason in the failure text. A usage limit
+    // arrives as a JSON result on stdout with stderr empty; a login failure on
+    // stderr. Both exit 1, and neither may log a bare "exited with code 1".
+    for (model, expected) in [
+        ("fixture-provider/usage-limit", "provider exited with code 1: stdout: You have hit your limit - resets 7pm"),
+        ("fixture-provider/stderr-failure", "provider exited with code 1: fixture: login expired"),
+    ] {
+        let described: String = await Task.detached(priority: .utility) {
+            do {
+                _ = try AgentNameOneShot.run(titler: titler(model), prompt: "x", timeout: 5,
+                                             environmentOverrides: fixtureEnvironment)
+                return "success"
+            } catch {
+                return String(describing: error)
+            }
+        }.value
+        guard described == expected else {
+            throw fail("a failing CLI did not record its reason: \(model) -> \(described.debugDescription)")
+        }
     }
 
     func descendantIsAlive(pidFile: URL) -> Bool {
