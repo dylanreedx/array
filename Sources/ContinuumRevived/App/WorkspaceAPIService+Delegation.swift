@@ -504,16 +504,28 @@ extension WorkspaceAPIService {
             source: .zone,
             zoneId: targetZoneId)
 
-        // Beside the anchor (the named tile, else the parent) when the anchor is
-        // in the target zone and the docked frame stays inside it; otherwise the
-        // zone's own automatic, clamped placement.
+        // No named tile and the parent's tile in the target zone: the helper
+        // group beside the parent, square, as every other helper route places
+        // it (`HelperTilePlacement`). Otherwise beside the anchor (the named
+        // tile) when the docked frame stays inside the zone, else the zone's
+        // own automatic, clamped placement.
         var worldPoint: CGPoint?
-        if let slot = canvas.visibleSpawnSlot(size: CanvasEngine.defaultFrame(for: .managedAgent),
+        var size: CGSize?
+        if placement?.nearTileId == nil, let leadTileId = parent.tileId,
+           canvas.zoneId(containing: leadTileId) == targetZoneId,
+           let placed = HelperTilePlacement.besideLead(
+               canvas: canvas, zoneId: targetZoneId, leadTileId: leadTileId,
+               familyTileIds: Set(supervisor.records.values
+                   .filter { $0.parentAgentID == parent.id && $0.id != childId }
+                   .compactMap(\.tileId))) {
+            (worldPoint, size) = (placed.center, placed.size)
+        }
+        if worldPoint == nil, size == nil, let slot = canvas.visibleSpawnSlot(size: CanvasEngine.defaultFrame(for: .managedAgent),
                                               anchor: canvas.spawnAnchorWorldPoint, zoneId: targetZoneId) {
             worldPoint = CGPoint(x: slot.midX, y: slot.midY)
         }
         let anchorId = placement?.nearTileId ?? parent.tileId
-        if worldPoint == nil, let anchorId, canvas.zoneId(containing: anchorId) == targetZoneId,
+        if worldPoint == nil, size == nil, let anchorId, canvas.zoneId(containing: anchorId) == targetZoneId,
            let anchor = canvas.navigationTileSnapshot(for: anchorId) {
             let size = CanvasEngine.defaultFrame(for: .managedAgent)
             let docked = CGRect(
@@ -533,7 +545,7 @@ extension WorkspaceAPIService {
         } catch {
             return .failed("project_unavailable: \(error.localizedDescription)")
         }
-        switch spawner.spawnManagedAgentForExistingAgent(childId, supervisor: supervisor, at: worldPoint, creationScope: scope) {
+        switch spawner.spawnManagedAgentForExistingAgent(childId, supervisor: supervisor, at: worldPoint, creationScope: scope, size: size) {
         case let .spawned(tileId):
             // The durable record binding first (P2A.5's one site is the wiring,
             // which repeats it idempotently), then the view binding.

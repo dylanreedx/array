@@ -499,9 +499,15 @@ public enum CanvasAutoLayoutEngine {
     /// enough to restore the gap, along one axis, and stops at the zone content
     /// wall instead of wrapping to a new lane. Solved fresh from the gesture
     /// baseline every frame, so retreating the drag relaxes every push.
+    ///
+    /// `preferClear` (a spawn): of the four minimal single-axis pushes, take the
+    /// smallest that lands the tile clear of every other tile, the
+    /// least-penetration one first on a tie; only when none is clear push as
+    /// above and chain. A spawn squeezing in beside its lead otherwise pushed a
+    /// resident straight into the lead's other helpers, and on through them.
     private static func propagatePushes(
         from sourceId: UUID, frames: inout [UUID: TileFrame], baseline: [UUID: TileFrame],
-        exclude: Set<UUID>, content: CGRect, gap: Double
+        exclude: Set<UUID>, content: CGRect, gap: Double, preferClear: Bool = false
     ) {
         let ids = frames.keys.sorted(by: uuidLess)
         var queue = [sourceId]
@@ -525,6 +531,20 @@ public enum CanvasAutoLayoutEngine {
                     let positive = b.y + b.height / 2 >= a.y + a.height / 2
                     moved.y = positive ? a.y + a.height + gap : a.y - gap - b.height
                     moved.y = min(max(moved.y, content.minY), max(content.minY, content.maxY - b.height))
+                }
+                if preferClear {
+                    var options = [moved]
+                    for (dx, dy) in [(a.x + a.width + gap - b.x, 0.0), (a.x - gap - b.width - b.x, 0.0),
+                                     (0.0, a.y + a.height + gap - b.y), (0.0, a.y - gap - b.height - b.y)] {
+                        var option = b
+                        option.x = min(max(b.x + dx, content.minX), max(content.minX, content.maxX - b.width))
+                        option.y = min(max(b.y + dy, content.minY), max(content.minY, content.maxY - b.height))
+                        options.append(option)
+                    }
+                    let clear = options.filter { option in
+                        !frames.contains { $0.key != id && overlapsOrUnderGap(option, $0.value, gap: gap - 0.26) }
+                    }
+                    if let best = clear.min(by: { squaredDistance($0, b) < squaredDistance($1, b) }) { moved = best }
                 }
                 if moved.x != b.x || moved.y != b.y {
                     frames[id] = moved
@@ -970,8 +990,13 @@ public enum CanvasAutoLayoutEngine {
         // the cluster at its exact frame, residents it presses on are pushed
         // aside along one axis, and everyone else magnetizes onto that. It can
         // never relocate — in particular never to a different lane.
+        // A growing (spawned) mover pushes past the content wall too: stopping a
+        // pushed resident there left it under the new tile. The zone then grows
+        // around both (`arrangeAutoLayoutAfterSpawn`).
         if pinMover, let mover, result[mover] != nil {
-            propagatePushes(from: mover, frames: &result, baseline: result, exclude: [], content: content, gap: gap)
+            propagatePushes(from: mover, frames: &result, baseline: result, exclude: [],
+                            content: growing ? content.insetBy(dx: -1_000_000, dy: -1_000_000) : content, gap: gap,
+                            preferClear: growing)
             return result
         }
         // A settle with a mover resolves the MOVER only (.plans/107). Every

@@ -41,18 +41,28 @@ enum SubagentTileZoneChecks {
     /// framed, so only the OFF pass can see whether the frame itself is beside
     /// the parent.
     static func run() throws {
-        // Independent of creation presets and of the helper's height.
+        // The group geometry, independent of creation presets: squares as tall
+        // as the lead, rows of three at its right, then below, one gap apart.
         let preset = CanvasEngine.defaultFrame(for: .managedAgent)
         let lead = TileFrame(x: 113, y: 227, width: Double(preset.width), height: Double(preset.height))
         let configuredGap = TileGapResolver.resolvedGap()
-        for height in [lead.height / 4, (lead.height-configuredGap)/2, lead.height * 1.5] {
-            let placed = TileSpawnPlacement.besideLead(newSize: CGSize(width: lead.width,height: height),
-                lead: lead, helpers: [], siblings: [lead], gap: configuredGap)
-            try expect(abs(placed.x-(lead.x+lead.width+configuredGap)) < 0.001
-                       && abs(placed.y-lead.y) < 0.001
-                       && placed.width == lead.width && placed.height == height,
-                       "explicit first helper must keep its size and dock right, top-aligned, at the standard gap")
+        let side = TileSpawnPlacement.helperSide(lead: lead, minimum: CanvasEngine.minimumFrame(for: .managedAgent))
+        try expect(side == lead.height, "a helper must be as tall as its lead; got \(side) for \(lead.height)")
+        try expect(TileSpawnPlacement.helperSide(lead: TileFrame(x: 0, y: 0, width: 300, height: 100),
+                                                 minimum: CGSize(width: 320, height: 240)) == 320,
+                   "a helper must never be smaller than an agent's minimum")
+        for index in 0..<6 {
+            let slot = TileSpawnPlacement.helperGroupSlot(index: index, lead: lead, side: side, gap: configuredGap)
+            let column = Double(index % 3), row = Double(index / 3)
+            try expect(abs(slot.x - (lead.x + lead.width + configuredGap + column * (side + configuredGap))) < 0.001
+                       && abs(slot.y - (lead.y + row * (side + configuredGap))) < 0.001
+                       && slot.width == side && slot.height == side,
+                       "helper slot \(index) must be square in row \(Int(row)), column \(Int(column)) at the lead's right; got \(describe(slot))")
         }
+        let taken = TileSpawnPlacement.helperGroupSlot(index: 0, lead: lead, side: side, gap: configuredGap)
+        try expect(TileSpawnPlacement.firstFreeHelperSlot(lead: lead, side: side, occupied: [taken], gap: configuredGap)
+                   == TileSpawnPlacement.helperGroupSlot(index: 1, lead: lead, side: side, gap: configuredGap),
+                   "a taken slot must hand the next helper the following slot")
 
         for (autoLayout, growth) in [(true, CanvasGrowthDirection.fan), (true, .right), (true, .down), (false, .fan)] {
             let suite = "subagent-tile-zone-\(UUID().uuidString)"
@@ -64,6 +74,98 @@ enum SubagentTileZoneChecks {
             defaults.set(growth.rawValue, forKey: CanvasAutoLayoutConfig.growthKey)
             try runScenario(autoLayoutDefaults: defaults, mode: "\(autoLayout ? "auto-layout on" : "auto-layout off"), growth \(growth.rawValue)")
         }
+        try runHelperGroup()
+    }
+
+    /// A lead with 1, then 3, then 6 helpers opened from its chip, among
+    /// neighbours (`HelperPlacementFixture`). Every helper is a square as tall
+    /// as the lead, in spawn order in rows of three at the lead's right, inside
+    /// the lead's zone; nothing overlaps; the lead never moves; a neighbour moves
+    /// only when the group needs its place, along one axis, and only as far as
+    /// gap contact with what pushed it. `CONTINUUM_HELPER_PLACEMENT_STILLS`
+    /// names a directory for a still at three helpers.
+    private static func runHelperGroup() throws {
+        let fixture = try HelperPlacementFixture()
+        defer { fixture.close() }
+        let canvas = fixture.canvas
+        func rect(_ f: TileFrame) -> CGRect { CGRect(x: f.x, y: f.y, width: f.width, height: f.height) }
+        func same(_ a: TileFrame, _ b: TileFrame) -> Bool {
+            abs(a.x - b.x) < 0.5 && abs(a.y - b.y) < 0.5 && abs(a.width - b.width) < 0.5 && abs(a.height - b.height) < 0.5
+        }
+        let gap = TileGapResolver.resolvedGap(defaults: canvas.autoLayoutDefaults)
+        let initial = try fixture.persistedFrames()
+        guard let lead = initial[fixture.leadTile] else { throw Failure(message: "the lead was not persisted") }
+        let side = max(lead.height, Double(CanvasEngine.minimumFrame(for: .managedAgent).height))
+        var previous = initial
+        let stills = ProcessInfo.processInfo.environment["CONTINUUM_HELPER_PLACEMENT_STILLS"]
+        for target in [1, 3, 6] {
+            while fixture.helperTiles.count < target { try fixture.surfaceHelper() }
+            let stage = "\(target) helper\(target == 1 ? "" : "s")"
+            let frames = try fixture.persistedFrames()
+            guard let zone = fixture.zoneRect else { throw Failure(message: "\(stage): the zone vanished") }
+            try expect(frames[fixture.leadTile].map { same($0, lead) } == true,
+                       "\(stage): the lead must not move; was \(describe(lead)), now \(frames[fixture.leadTile].map(describe) ?? "gone")")
+            for (index, tile) in fixture.helperTiles.enumerated() {
+                guard let f = frames[tile] else { throw Failure(message: "\(stage): helper \(index + 1) was not persisted") }
+                try expect(abs(f.width - side) < 0.5 && abs(f.height - side) < 0.5,
+                           "\(stage): helper \(index + 1) must be a \(Int(side)) square; got \(describe(f))")
+                // Row-major at the lead's right, spawn order.
+                let column = Double(index % 3), row = Double(index / 3)
+                try expect(abs(f.x - (lead.x + lead.width + gap + column * (side + gap))) < 0.5
+                           && abs(f.y - (lead.y + row * (side + gap))) < 0.5,
+                           "\(stage): helper \(index + 1) must sit in row \(Int(row) + 1), column \(Int(column) + 1) "
+                           + "of the group beside the lead \(describe(lead)); got \(describe(f))")
+                try expect(canvas.zoneId(containing: tile) == fixture.zoneId
+                           && rect(zone).insetBy(dx: -0.5, dy: -0.5).contains(rect(f)),
+                           "\(stage): helper \(index + 1) \(describe(f)) must be inside the lead's zone \(describe(zone))")
+            }
+            let members = frames.filter { canvas.zoneId(containing: $0.key) == fixture.zoneId }
+            try expect(members.count == 1 + fixture.neighbours.count + target,
+                       "\(stage): every tile must stay in the lead's zone; \(members.count) of \(1 + fixture.neighbours.count + target) are")
+            for (id, f) in members {
+                for (other, g) in members where other != id {
+                    let overlap = rect(f).intersection(rect(g))
+                    try expect(overlap.isNull || overlap.width < 0.5 || overlap.height < 0.5,
+                               "\(stage): \(describe(f)) overlaps \(describe(g))")
+                }
+            }
+            for (name, id) in fixture.neighbours {
+                guard let was = previous[id], let now = frames[id] else { throw Failure(message: "\(stage): neighbour \(name) vanished") }
+                let dx = now.x - was.x, dy = now.y - was.y
+                try expect(abs(now.width - was.width) < 0.5 && abs(now.height - was.height) < 0.5,
+                           "\(stage): neighbour \(name) must keep its size")
+                guard abs(dx) > 0.5 || abs(dy) > 0.5 else { continue }
+                try expect(abs(dx) < 0.5 || abs(dy) < 0.5,
+                           "\(stage): neighbour \(name) must be pushed along one axis; moved (\(Int(dx)), \(Int(dy)))")
+                // Minimal: it stops at gap contact with a tile on the side it was pushed from.
+                let pusher = members.contains { other, g in
+                    guard other != id else { return false }
+                    let overlapX = min(now.x + now.width, g.x + g.width) - max(now.x, g.x) > 0.5
+                    let overlapY = min(now.y + now.height, g.y + g.height) - max(now.y, g.y) > 0.5
+                    if dx > 0.5 { return overlapY && abs(now.x - (g.x + g.width + gap)) < 0.5 }
+                    if dx < -0.5 { return overlapY && abs(g.x - (now.x + now.width + gap)) < 0.5 }
+                    if dy > 0.5 { return overlapX && abs(now.y - (g.y + g.height + gap)) < 0.5 }
+                    return overlapX && abs(g.y - (now.y + now.height + gap)) < 0.5
+                }
+                try expect(pusher, "\(stage): neighbour \(name) moved (\(Int(dx)), \(Int(dy))) further than gap contact with what pushed it")
+                // Pushed only when the group needed its place.
+                try expect(fixture.helperTiles.contains { frames[$0].map { rect($0).intersects(rect(was)) } == true }
+                           || members.contains { $0.key != id && rect($0.value).intersects(rect(was)) },
+                           "\(stage): neighbour \(name) moved although nothing took its place")
+            }
+            if target == 3, let stills {
+                try fixture.renderStill(to: URL(fileURLWithPath: stills, isDirectory: true), name: "three-helpers")
+            }
+            previous = frames
+        }
+        guard let left = fixture.neighbours.first(where: { $0.name == "left" }),
+              let wasLeft = initial[left.id], let nowLeft = try fixture.persistedFrames()[left.id] else {
+            throw Failure(message: "the left neighbour vanished")
+        }
+        try expect(same(wasLeft, nowLeft), "the neighbour left of the lead is clear of the group and must not move; "
+                   + "was \(describe(wasLeft)), now \(describe(nowLeft))")
+        print("subagent-tile-zone: helper group: 1, 3 and 6 helpers opened as \(Int(side)) squares in rows of three beside "
+              + "their lead, in spawn order, inside its zone, pushing neighbours aside by gap contact, nothing overlapping")
     }
 
     private static func runScenario(autoLayoutDefaults: UserDefaults, mode: String) throws {
@@ -265,113 +367,62 @@ enum SubagentTileZoneChecks {
         }
 
         // Beside, not merely inside: the first child docks to the parent's right,
-        // top-aligned, one tile gap away; the second, finding that spot taken,
-        // stacks under it.
+        // top-aligned, one tile gap away, as a square as tall as the parent; the
+        // second takes the next square of the row.
         let persisted = try store.loadCanvas().tiles
         guard let parentFrame = persisted.first(where: { $0.id == parentTile })?.frame,
               let first = persisted.first(where: { $0.id == opened[0] })?.frame,
               let second = persisted.first(where: { $0.id == opened[1] })?.frame else {
             throw Failure(message: "the parent and both children must be persisted")
         }
-        // The gap is the canvas's tile gap, which auto-layout re-settles to.
-        let gap = first.x - (parentFrame.x + parentFrame.width)
-        try expect(abs(gap - TileGapResolver.resolvedGap()) < 0.5 && first.x > parentFrame.x && abs(first.y - parentFrame.y) < 0.5,
+        let gap = TileGapResolver.resolvedGap()
+        let side = max(parentFrame.height, Double(CanvasEngine.minimumFrame(for: .managedAgent).height))
+        for child in [first, second] {
+            try expect(abs(child.width - side) < 0.5 && abs(child.height - side) < 0.5,
+                       "\(mode): a child opened beside its parent must be a \(Int(side)) square; got \(describe(child))")
+        }
+        try expect(abs(first.x - (parentFrame.x + parentFrame.width + gap)) < 0.5 && abs(first.y - parentFrame.y) < 0.5,
                    "\(mode): the first child must open docked beside its parent \(describe(parentFrame)); got \(describe(first))")
-        func adjacent(_ a: TileFrame, _ b: TileFrame) -> Bool {
-            let sepX = max(a.x - (b.x + b.width), b.x - (a.x + a.width))
-            let sepY = max(a.y - (b.y + b.height), b.y - (a.y + a.height))
-            let limit = TileGapResolver.defaultGap * 3
-            return (sepX >= -0.5 && sepX <= limit && sepY < 0) || (sepY >= -0.5 && sepY <= limit && sepX < 0)
-        }
-        if autoLayoutDefaults.bool(forKey: CanvasAutoLayoutConfig.enabledKey) {
-            // Size-aware (.plans/107 model B): a child is its parent's width and
-            // half its height, so two stack exactly beside the parent.
-            let expectedHeight = max(Double(CanvasEngine.minimumFrame(for: .managedAgent).height),
-                                     (parentFrame.height - TileGapResolver.resolvedGap()) / 2)
-            for child in [first, second] {
-                try expect(abs(child.width - parentFrame.width) < 0.5 && abs(child.height - expectedHeight) < 0.5,
-                           "\(mode): a child opened beside its parent must be \(parentFrame.width)x\(expectedHeight); "
-                           + "got \(describe(child))")
-            }
-            // Preserve the model-B helper column independently of tile presets.
-            if first.height + TileGapResolver.resolvedGap() + second.height <= parentFrame.height + 0.5 {
-                try expect(abs(second.x-first.x) < 0.5
-                           && abs(second.y-(first.y+first.height+TileGapResolver.resolvedGap())) < 0.5,
-                           "\(mode): the second helper must fill the lead's right column below the first")
-            } else {
-                try expect(abs(second.y-parentFrame.y) < 0.5
-                           && abs(second.x-(first.x+first.width+TileGapResolver.resolvedGap())) < 0.5,
-                           "\(mode): a helper taller than the column must wrap right at the lead's top")
-            }
-            // Keep the independent adjacency and no-single-row witness.
-            try expect((adjacent(second, parentFrame) || adjacent(second, first))
-                           && !(abs(second.y - first.y) < 0.5 && second.x > first.x),
-                       "\(mode): the second child must fan out against the parent or the first child, not "
-                       + "extend the row; parent \(describe(parentFrame)), first \(describe(first)), second \(describe(second))")
-        } else {
-            let stackGap = second.y - (first.y + first.height)
-            try expect(abs(second.x - first.x) < 0.5 && stackGap >= 0 && stackGap <= TileGapResolver.defaultGap * 3,
-                       "\(mode): the second child must stack under the first, beside the parent; first "
-                       + "\(describe(first)), second \(describe(second))")
-        }
+        let autoLayout = autoLayoutDefaults.bool(forKey: CanvasAutoLayoutConfig.enabledKey)
+        let inRow = abs(second.y - first.y) < 0.5 && abs(second.x - (first.x + first.width + gap)) < 0.5
+        // Auto layout off moves nothing and keeps the group inside the zone, so
+        // a row with no room left continues under the first child.
+        let underFirst = !autoLayout && abs(second.x - first.x) < 0.5 && abs(second.y - (first.y + side + gap)) < 0.5
+        try expect(inRow || underFirst,
+                   "\(mode): the second child must take the next square of the group; first \(describe(first)), second \(describe(second))")
 
-        // A full column. The film's fan-out zone held two children beside its
-        // Lead; the third found no free slot in the column, fell back to the
-        // zone's automatic placement, whose camera centre sat in the gap between
-        // the two children, and opened on top of the Lead and the second child.
-        // Children past the column's last row start the next column at the
-        // parent's top, and no child ever overlaps another tile of the zone.
-        let rowHeight = first.height + gap
-        // Model-B columns use the lead's actual height; ordinary columns use
-        // the zone's available height. Neither depends on a creation preset.
-        let rowsInColumn = autoLayoutDefaults.bool(forKey: CanvasAutoLayoutConfig.enabledKey)
-            ? max(1, Int((parentFrame.height + gap) / rowHeight))
-            : Int((fanOutRect.y + fanOutRect.height - parentFrame.y + gap) / rowHeight)
-        let overflow = mintChild("child-overflow")
-        for index in 2..<rowsInColumn {
-            let filler = mintChild("child-\(index + 1)")
-            try openFromChip(filler, index: index)
-        }
-        // The film's camera: centred on the gap under the first child, where
-        // automatic placement finds no anchor and every nearby offset collides.
-        guard let lastInColumn = try store.loadCanvas().tiles.first(where: { $0.id == opened[0] })?.frame else {
-            throw Failure(message: "\(mode): the first child vanished")
-        }
+        // A full row. The film's fan-out zone held two children beside its Lead;
+        // the third found no free slot, fell back to the zone's automatic
+        // placement, whose camera centre sat in the gap between the two children,
+        // and opened on top of the Lead. With the camera on that gap, a fourth
+        // child still opens in the group, under the first, and nothing overlaps.
+        for index in 2..<3 { try openFromChip(mintChild("child-\(index + 1)"), index: index) }
         let zoom = canvas.viewport.zoom
-        let gapCentre = CGPoint(x: lastInColumn.x + lastInColumn.width / 2,
-                                y: lastInColumn.y + lastInColumn.height + gap / 2)
+        let gapCentre = CGPoint(x: first.x + first.width + gap / 2, y: first.y + first.height / 2)
         canvas.setViewport(CanvasViewport(
             x: gapCentre.x - canvas.bounds.width / zoom / 2,
             y: gapCentre.y - canvas.bounds.height / zoom / 2,
             zoom: zoom))
-        let overflowTile = try openFromChip(overflow, index: rowsInColumn)
+        let overflowTile = try openFromChip(mintChild("child-overflow"), index: 3)
         let zoneTiles = try store.loadCanvas().tiles.filter { canvas.zoneId(containing: $0.id) == zoneFanOut }
         func rect(_ frame: TileFrame) -> CGRect { CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height) }
-        for tile in zoneTiles where tile.id != parentTile {
+        for tile in zoneTiles {
             for other in zoneTiles where other.id != tile.id {
                 let overlap = rect(tile.frame).intersection(rect(other.frame))
                 try expect(overlap.isNull || overlap.width < 0.5 || overlap.height < 0.5,
-                           "\(mode): child \(describe(tile.frame)) overlaps \(describe(other.frame)) after "
-                           + "\(rowsInColumn + 1) children filled the column beside the parent")
+                           "\(mode): \(describe(tile.frame)) overlaps \(describe(other.frame)) after four children opened")
             }
         }
-        guard let overflowFrame = try store.loadCanvas().tiles.first(where: { $0.id == overflowTile })?.frame else {
+        guard let overflowFrame = zoneTiles.first(where: { $0.id == overflowTile })?.frame else {
             throw Failure(message: "\(mode): the overflow child was not persisted")
         }
-        if autoLayoutDefaults.bool(forKey: CanvasAutoLayoutConfig.enabledKey) {
-            let family = zoneTiles.filter { opened.contains($0.id) || $0.id == parentTile }
-                .filter { $0.id != overflowTile }.map(\.frame)
-            try expect(family.contains { adjacent(overflowFrame, $0) },
-                       "\(mode): the overflow child must dock against the parent or a sibling; got \(describe(overflowFrame))")
-        } else {
-            let columnGap = overflowFrame.x - (first.x + first.width)
-            try expect(abs(overflowFrame.y - parentFrame.y) < 0.5 && columnGap >= 0
-                       && columnGap <= TileGapResolver.defaultGap * 3,
-                       "\(mode): the child past a full column must start the next column at the parent's top; "
-                       + "first \(describe(first)), overflow \(describe(overflowFrame))")
+        if autoLayout && inRow {
+            try expect(abs(overflowFrame.x - first.x) < 0.5 && abs(overflowFrame.y - (first.y + side + gap)) < 0.5,
+                       "\(mode): the fourth child must start the second row under the first; first \(describe(first)), "
+                       + "fourth \(describe(overflowFrame))")
         }
 
-        print("subagent-tile-zone: \(mode): \(rowsInColumn + 1) children opened from the parent's chip landed beside it in its zone, "
-              + "a full column wrapping to the next, with another zone of the same project armed")
+        print("subagent-tile-zone: \(mode): four square children opened from the parent's chip landed in a row beside it "
+              + "in its zone, the fourth starting the next row, with another zone of the same project armed")
     }
 }

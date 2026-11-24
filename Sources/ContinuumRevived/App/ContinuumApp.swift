@@ -18647,17 +18647,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// swarm spike). One zone id for framing, siblings, z-order and install
     /// (hazard 9), the parent's, whichever zone is armed.
     ///
-    /// Children stack in a column at the parent's right, top-aligned with it: the
-    /// first spot that is inside the zone and free. A full column starts the next
-    /// one to its right, at the parent's top: the film's fan-out zone held two
-    /// children beside its Lead, and the third fell through to automatic placement,
-    /// whose camera centre sat in the gap between them and opened it on top of the
-    /// Lead. With no free spot in any column, nil, and the zone's own automatic
-    /// placement takes over. The whole answer is nil when the
-    /// parent has no tile on this canvas or its zone belongs to a project other
-    /// than the child's.
-    /// Where (and, under auto layout, how big) a child agent's tile opens
-    /// beside its parent. The size is nil outside auto layout: the default.
+    /// Children open as squares as tall as the parent, in rows at its right,
+    /// then below (`HelperTilePlacement`). The film's fan-out zone once held two
+    /// children beside its Lead and the third fell through to automatic
+    /// placement, on top of the Lead; the group slot never does. The whole
+    /// answer is nil when the parent has no tile on this canvas or its zone
+    /// belongs to a project other than the child's; a nil point (auto layout
+    /// off, no free slot) leaves the zone's automatic placement to decide.
     private func spawnPlacementBesideParent(of agentId: AgentID, parentID: AgentID? = nil) -> (TileSpawner, CreationScope, CGPoint?, CGSize?)? {
         guard let record = agentSupervisor.records[agentId],
               let parentId = parentID ?? record.parentAgentID,
@@ -18671,50 +18667,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 ?? spawnerAndScope(forTile: parentTileId),
               record.projectId == nil || record.projectId == scope.projectId,
               let zoneId = scope.zoneId,
-              let zone = canvasView.installedZonePlacement(for: zoneId),
-              let parent = canvasView.navigationTileSnapshot(for: parentTileId) else { return nil }
+              canvasView.installedZonePlacement(for: zoneId) != nil,
+              canvasView.navigationTileSnapshot(for: parentTileId) != nil else { return nil }
         if lentHome != nil { return (spawner, scope, nil, nil) }
-        let size = CanvasEngine.defaultFrame(for: .managedAgent)
-        let gap = TileGapResolver.resolvedGap()
-        let zoneRect = CGRect(x: zone.origin.x, y: zone.origin.y, width: zone.size.width, height: zone.size.height)
-        let zoneTiles = canvasView.tilesInWorldFrames(forZoneId: zoneId) ?? []
-        // Helpers carry explicit beside intent. Fill columns to the lead's
-        // right and let auto layout grow the zone; automatic fan-out visibility
-        // and growth ranking must never move the first helper below its lead.
-        if canvasView.isAutoLayoutActive(inZone: zoneId) {
-            // Size-aware (.plans/107 model B): a helper is its lead's width and
-            // half its height, never below an agent's minimum, so two helpers
-            // stack exactly beside their lead.
-            let minimum = CanvasEngine.minimumFrame(for: .managedAgent)
-            let helperSize = CGSize(
-                width: max(Double(minimum.width), parent.worldFrame.width),
-                height: max(Double(minimum.height), (parent.worldFrame.height - gap) / 2))
-            let familyTileIds = Set(agentSupervisor.records.values
-                .filter { $0.parentAgentID == parentId && $0.id != agentId }
-                .compactMap(\.tileId))
-            let placed = TileSpawnPlacement.besideLead(
-                newSize: helperSize, lead: parent.worldFrame,
-                helpers: zoneTiles.filter { familyTileIds.contains($0.id) }.map(\.frame),
-                siblings: zoneTiles.map(\.frame), gap: gap)
-            return (spawner, scope, CGPoint(x: placed.x + placed.width / 2, y: placed.y + placed.height / 2), helperSize)
+        // A square in the lead's helper group, spawn order left to right then
+        // down; under auto layout the settle pushes neighbours out of its way.
+        let familyTileIds = Set(agentSupervisor.records.values
+            .filter { $0.parentAgentID == parentId && $0.id != agentId }
+            .compactMap(\.tileId))
+        guard let placed = HelperTilePlacement.besideLead(
+            canvas: canvasView, zoneId: zoneId, leadTileId: parentTileId, familyTileIds: familyTileIds) else {
+            return (spawner, scope, nil, nil)
         }
-        let occupied = zoneTiles.map {
-            CGRect(x: $0.frame.x, y: $0.frame.y, width: $0.frame.width, height: $0.frame.height)
-        }
-        var column = CGRect(
-            x: parent.worldFrame.x + parent.worldFrame.width + gap,
-            y: parent.worldFrame.y, width: size.width, height: size.height)
-        while zoneRect.contains(column) {
-            var slot = column
-            while zoneRect.contains(slot) {
-                if !occupied.contains(where: { $0.intersects(slot) }) {
-                    return (spawner, scope, CGPoint(x: slot.midX, y: slot.midY), nil)
-                }
-                slot.origin.y += size.height + gap
-            }
-            column.origin.x += size.width + gap
-        }
-        return (spawner, scope, nil, nil)
+        return (spawner, scope, placed.center, placed.size)
     }
 
     @objc func toggleWorkspaceSidebarFromMenu(_ sender: Any?) {

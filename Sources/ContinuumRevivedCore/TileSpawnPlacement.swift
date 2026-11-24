@@ -460,29 +460,47 @@ public enum TileSpawnPlacement {
         return false
     }
 
-    // MARK: - Explicit helper columns
+    // MARK: - Helper groups
 
-    /// Explicit helper intent: fill columns to the lead's right, starting at
-    /// its top. Camera visibility and automatic growth direction cannot change
-    /// the side. Candidates come from actual frames, independent of presets.
-    public static func besideLead(newSize: CGSize, lead: TileFrame, helpers: [TileFrame],
-                                  siblings: [TileFrame], gap: Double) -> TileFrame {
-        let size = sanitizedSize(newSize)
+    /// Helpers sit in rows of this many squares at their lead's right.
+    public static let helperGroupColumns = 3
+
+    /// A surfaced helper is square, as tall as its lead (so the first row lines
+    /// up with the lead's top and bottom), never below an agent's minimum.
+    public static func helperSide(lead: TileFrame, minimum: CGSize) -> Double {
+        let floor = Double(max(minimum.width, minimum.height))
+        return lead.height.isFinite ? max(floor, lead.height) : floor
+    }
+
+    /// Slot `index` of a lead's helper group: rows of `helperGroupColumns`
+    /// squares, the first row top-aligned at the lead's right one `gap` away,
+    /// later rows below it. Row-major, so helpers surfaced in spawn order read
+    /// left to right, then down.
+    public static func helperGroupSlot(index: Int, lead: TileFrame, side: Double, gap: Double) -> TileFrame {
         let gap = gap.isFinite ? max(0, gap) : 0
-        let firstX = lead.x + lead.width + gap
-        let lastY = max(lead.y, lead.y + lead.height - Double(size.height))
-        let xs = ([firstX] + siblings.map { $0.x + $0.width + gap })
-            .filter { $0 >= firstX }.sorted()
-        let ys = ([lead.y] + helpers.map { $0.y + $0.height + gap })
-            .filter { $0 >= lead.y && $0 <= lastY + 0.001 }.sorted()
-        let obstacles = siblings.map { rect(for: $0) }
-        for x in xs { for y in ys {
-            let frame = TileFrame(x: x, y: y, width: Double(size.width), height: Double(size.height))
-            let guarded = rect(for: frame).insetBy(dx: -max(0, gap - 0.5), dy: -max(0, gap - 0.5))
-            if !obstacles.contains(where: { $0.intersects(guarded) }) { return frame }
-        } }
-        // The furthest sibling edge always offers an unoccupied top slot.
-        return TileFrame(x: xs.last ?? firstX, y: lead.y, width: Double(size.width), height: Double(size.height))
+        let column = index % helperGroupColumns, row = index / helperGroupColumns
+        return TileFrame(x: lead.x + lead.width + gap + Double(column) * (side + gap),
+                         y: lead.y + Double(row) * (side + gap),
+                         width: side, height: side)
+    }
+
+    /// The first group slot that is clear of every frame in `occupied` (the
+    /// lead's helpers already on the canvas, plus anything else the caller may
+    /// not push) and accepted by `allowed`. Existing helpers never move, so a
+    /// re-surfaced helper fills the first hole. nil when no slot in the first
+    /// `limit` qualifies.
+    public static func firstFreeHelperSlot(
+        lead: TileFrame, side: Double, occupied: [TileFrame], gap: Double,
+        limit: Int = 64, allowed: (TileFrame) -> Bool = { _ in true }
+    ) -> TileFrame? {
+        let inset = -max(0, (gap.isFinite ? gap : 0) - 0.5)
+        let obstacles = occupied.map { rect(for: $0) }
+        for index in 0..<max(1, limit) {
+            let slot = helperGroupSlot(index: index, lead: lead, side: side, gap: gap)
+            let guarded = rect(for: slot).insetBy(dx: inset, dy: inset)
+            if allowed(slot), !obstacles.contains(where: { $0.intersects(guarded) }) { return slot }
+        }
+        return nil
     }
 
     // MARK: - Geometry helpers
