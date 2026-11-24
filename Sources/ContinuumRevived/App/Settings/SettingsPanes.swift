@@ -304,6 +304,9 @@ private struct SettingsPaneForm: View {
                         AgentCharacterSections(model: model.agentCharacters, settings: model, field: group.rows[0].field)
                     } else {
                         Section {
+                            if let subheading = group.subheading {
+                                SettingsGroupSubheading(text: subheading, learnMore: group.learnMore)
+                            }
                             ForEach(Array(group.rows.enumerated()), id: \.offset) { _, row in
                                 SettingsFieldRow(model: model, row: row)
                             }
@@ -337,6 +340,27 @@ private struct SettingsPaneForm: View {
             .onChange(of: model.scrollRequest) { _, _ in scroll(proxy) }
             .onAppear { scroll(proxy) }
         }
+    }
+}
+
+/// What a group is, directly under its title, with an optional docs link.
+struct SettingsGroupSubheading: View {
+    let text: String
+    let learnMore: SettingsLearnMore?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(text)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let learnMore, let url = URL(string: learnMore.url) {
+                Button(learnMore.title) { NSWorkspace.shared.open(url) }
+                    .buttonStyle(.link)
+                    .font(.callout)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

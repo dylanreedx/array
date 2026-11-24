@@ -351,6 +351,16 @@ public struct SettingsRow: Equatable, Sendable {
     }
 }
 
+/// A "Learn more" link under a group's subheading.
+public struct SettingsLearnMore: Equatable, Sendable {
+    public let title: String
+    public let url: String
+    public init(title: String = "Learn more", url: String) {
+        self.title = title
+        self.url = url
+    }
+}
+
 /// A titled group of rows inside a pane (a grouped-form section). `footer`
 /// carries the honest application note ("Applies to new terminals.").
 public struct SettingsGroup: Equatable, Sendable {
@@ -358,10 +368,17 @@ public struct SettingsGroup: Equatable, Sendable {
     public let title: String?
     public let footer: String?
     public let rows: [SettingsRow]
+    /// Plain words directly under the title, above the rows, saying what the
+    /// group is; `learnMore` adds a link to the docs after them.
+    public let subheading: String?
+    public let learnMore: SettingsLearnMore?
 
-    public init(id: String, title: String?, footer: String? = nil, rows: [SettingsRow]) {
+    public init(id: String, title: String?, subheading: String? = nil, learnMore: SettingsLearnMore? = nil,
+                footer: String? = nil, rows: [SettingsRow]) {
         self.id = id
         self.title = title
+        self.subheading = subheading
+        self.learnMore = learnMore
         self.footer = footer
         self.rows = rows
     }

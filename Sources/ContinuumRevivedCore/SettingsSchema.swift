@@ -255,10 +255,12 @@ public enum SettingsSchema {
         return SettingsSection(id: "agents", title: "Agents", iconSystemName: "sparkles", sidebarHeading: tilesHeading,
                                keywords: ["ai", "assistant"], groups: [
             // Managed mode is one switch; the rows that steer it exist only while it is on.
-            SettingsGroup(id: "agents.managedMode", title: nil,
+            SettingsGroup(id: "agents.managedMode", title: "Managed mode",
+                          subheading: "A lead agent plans the work and hands tasks to helper agents, which show inside its sidebar card.",
+                          learnMore: SettingsLearnMore(url: "https://arrayapp.dev/docs/agents#managed-mode"),
                           footer: "Applies to Claude Code and Codex agents. A change takes effect at each agent's next turn, which re-reads its conversation at full price.", rows: [
                 SettingsRow(.toggle(key: AgentManagedModeConfig.enabledKey, label: "Managed mode", default: true),
-                            help: "A lead agent plans the work and hands pieces to helper agents.",
+                            help: "Turn off and every agent works on its own.",
                             keywords: ["managed", "lead", "delegate", "helpers", "orchestrate", "opinionated"]),
                 SettingsRow(.number(key: AgentSpawnLimitConfig.maximumActiveChildrenKey, label: "Limit helpers running at once",
                                     range: Double(AgentSpawnLimitConfig.supportedRange.lowerBound)...Double(AgentSpawnLimitConfig.supportedRange.upperBound),
