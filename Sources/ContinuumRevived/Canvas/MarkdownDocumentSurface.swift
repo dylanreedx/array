@@ -123,7 +123,7 @@ final class MarkdownDocumentSurface: NSObject, NSSplitViewDelegate {
         draft = value
         previewWork?.cancel()
         guard mode != .edit else { return }
-        let work = DispatchWorkItem { [weak self] in self?.renderDraft() }
+        let work = DispatchWorkItem { [weak self] in self?.renderDraft(restoringPresentation: false) }
         previewWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: work)
     }
@@ -131,7 +131,7 @@ final class MarkdownDocumentSurface: NSObject, NSSplitViewDelegate {
     func flushPreview() {
         previewWork?.cancel()
         previewWork = nil
-        if mode != .edit { renderDraft() }
+        if mode != .edit { renderDraft(restoringPresentation: false) }
     }
 
     func applyTheme() {
@@ -221,7 +221,10 @@ final class MarkdownDocumentSurface: NSObject, NSSplitViewDelegate {
         return view
     }
 
-    private func renderDraft() {
+    /// A render caused by typing must leave the caret and scroll where the user
+    /// has them: the saved presentation state is from the last mode change, and
+    /// restoring it would move the caret back to wherever Edit was last left.
+    private func renderDraft(restoringPresentation: Bool = true) {
         if let previewView {
             let currentTheme = theme()
             if lastRenderedDraft?.isEqual(to: draft) != true || lastRenderedTheme != currentTheme {
@@ -230,7 +233,7 @@ final class MarkdownDocumentSurface: NSObject, NSSplitViewDelegate {
                 lastRenderedTheme = currentTheme
             }
         }
-        restorePresentationState()
+        if restoringPresentation { restorePresentationState() }
     }
 
     private func capturePresentationState() {

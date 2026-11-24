@@ -324,6 +324,28 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
         try expect(note.mode == .edit && note.textView.selectedRange() == NSRange(location: 2, length: 0),
                    "Preview then Edit restores the caret; selection \(note.textView.selectedRange())")
 
+        // The caret follows the user through Split, where the preview re-renders
+        // a moment after every keystroke: that re-render must not move it.
+        func spin() { RunLoop.current.run(until: Date().addingTimeInterval(0.35)) }
+        note.textView.string = ""
+        try click(control, at: 0.5)
+        _ = window.makeFirstResponder(note.textView)
+        try type("abc")
+        spin()
+        try expect(note.textView.selectedRange() == NSRange(location: 3, length: 0),
+                   "typing in Split leaves the caret after the text once the preview re-renders; selection \(note.textView.selectedRange())")
+        try click(control, at: 5.0 / 6.0)
+        try type("X")
+        try expect(saved == "abcX", "Split then Edit types at the caret, not the start; saved \(saved.debugDescription)")
+        try click(control, at: 0.5)
+        note.textView.setSelectedRange(NSRange(location: note.textView.string.utf16.count, length: 0))
+        try type("END")
+        spin()
+        try click(control, at: 1.0 / 6.0)
+        try click(control, at: 5.0 / 6.0)
+        try type("Z")
+        try expect(saved == "abcXENDZ", "Split, Preview then Edit types after the caret Split left; saved \(saved.debugDescription)")
+
         // The title-bar Share button never sits over the mode control.
         note.setTitleBarShareAction(true)
         var shownAtSomeWidth = false
