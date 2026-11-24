@@ -268,12 +268,17 @@ final class PlanOrbView: NSView {
 
     override var intrinsicContentSize: NSSize { NSSize(width: side, height: side) }
 
-    /// In a pile: everything except the orb in front (`front`, in this orb's
-    /// own coordinates) grown by `gap`, so the front orb's whole circle and a
+    /// The pointer is on this orb: the tile header's own orb hover (the glass
+    /// fades in and swells a little).
+    func setHovered(_ hovered: Bool) { bubble.setHovered(hovered) }
+    var qaIsHovered: Bool { bubble.isHovered }
+
+    /// In a pile: everything except the orbs in front (`fronts`, in this orb's
+    /// own coordinates) grown by `gap`, so each front orb's whole circle and a
     /// thin gap of canvas show and this one is clipped along that arc.
-    func cut(by front: NSRect?, gap: CGFloat) {
+    func cut(by fronts: [NSRect], gap: CGFloat) {
         guard let layer else { return }
-        guard let front else { layer.mask = nil; return }
+        guard !fronts.isEmpty else { layer.mask = nil; return }
         let mask = (layer.mask as? CAShapeLayer) ?? CAShapeLayer()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -281,7 +286,7 @@ final class PlanOrbView: NSView {
         mask.frame = bounds
         let path = CGMutablePath()
         path.addRect(bounds.insetBy(dx: -side, dy: -side))
-        path.addEllipse(in: front.insetBy(dx: -gap, dy: -gap))
+        for front in fronts { path.addEllipse(in: front.insetBy(dx: -gap, dy: -gap)) }
         mask.path = path
         CATransaction.commit()
         layer.mask = mask
@@ -381,6 +386,37 @@ enum PlanOrbs {
         case .helper(let i): g.helpers[i].phase
         case .lead: s.phase == .done ? .done : .todo
         default: s.phase
+        }
+    }
+}
+
+// MARK: - Orb hover
+
+/// What a hovered orb says about its helper: the plan's state word and age, in
+/// the plan's state ink, with the sidebar's own state glyph (the ledger's:
+/// a raised hand for needing you, a warning for a failure, a check for done;
+/// working and idle carry none, the sidebar shows its gyro or nothing there).
+@MainActor
+enum PlanOrbHover {
+    static func symbol(_ p: PlanGlance.Phase) -> String? {
+        switch p {
+        case .needsYou: "questionmark.circle.fill"
+        case .failed: "exclamationmark.triangle.fill"
+        case .done: "checkmark.circle"
+        case .working, .idle, .todo: nil
+        }
+    }
+    static func stateText(_ h: PlanGlance.Helper) -> String { PlanGlance.word(h.phase, ago: h.ago) ?? "" }
+    static func stateInk(_ p: PlanGlance.Phase, theme: TokenTheme) -> NSColor {
+        PlanInk.accent(p).map { $0.color.nsColor(for: theme) } ?? PlanInk.secondary(theme)
+    }
+    static func glyph(_ p: PlanGlance.Phase, pointSize: CGFloat, ink: NSColor) -> NSImage? {
+        guard let name = symbol(p), let image = CanvasSymbolImage.image(named: name, pointSize: pointSize, weight: .semibold) else { return nil }
+        return NSImage(size: image.size, flipped: false) { rect in
+            image.draw(in: rect)
+            ink.set()
+            rect.fill(using: .sourceAtop)
+            return true
         }
     }
 }

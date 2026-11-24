@@ -140,6 +140,12 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         setAccessibilityRole(.button)
         popover.animatesPresentation = true
         isHidden = true
+        // One area for the whole line, orbs included: crossing from orb to orb,
+        // or orb to words, never leaves it. It follows the visible rect itself.
+        let area = NSTrackingArea(rect: .zero, options: [.activeInKeyWindow, .mouseEnteredAndExited, .mouseMoved, .inVisibleRect],
+                                  owner: self)
+        addTrackingArea(area)
+        hoverArea = area
     }
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
 
@@ -149,6 +155,9 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         hash.combine(sentence)
         hash.combine(isOpen)
         for o in orbs { hash.combine("\(o.kind)"); hash.combine("\(o.phase)") }
+        hash.combine(lineHovered)
+        hash.combine(isPressed)
+        hash.combine(hoveredOrb.map { "\($0.kind)" })
         return hash.finalize()
     }
 
@@ -202,6 +211,7 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         }
         for o in orbs where !next.contains(where: { $0 === o }) { o.removeFromSuperview() }
         orbs = next
+        if let h = hoveredOrb, !orbs.contains(where: { $0 === h }) { setHoveredOrb(nil) }
         needsLayout = true
     }
 
@@ -256,15 +266,25 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
     override func layout() {
         super.layout()
         var x: CGFloat = 0
-        for (i, o) in orbs.enumerated() {
+        for o in orbs {
             o.frame = NSRect(x: x, y: (bounds.height - orbSide) / 2, width: orbSide, height: orbSide)
             x += orbSide - overlap
-            // The front orb, the most pressing, draws on top.
-            o.layer?.zPosition = CGFloat(orbs.count - i)
-            // ...and cuts a clean, even gap out of the one behind it, as the
-            // inbox swarm's front card does (`SwarmPose.knockout`).
-            o.cut(by: i == 0 ? nil : orbs[i - 1].frame.offsetBy(dx: -o.frame.minX, dy: -o.frame.minY),
-                  gap: PlanMetrics.s(SwarmPose.knockout, zoom))
+        }
+        stackPile()
+    }
+
+    private func stackPile() {
+        // The front orb, the most pressing, draws on top; a hovered orb comes
+        // in front of everything.
+        let hovered = hoveredOrb.flatMap { h in orbs.firstIndex { $0 === h } }
+        func above(_ a: Int, _ b: Int) -> Bool { a == hovered ? true : b == hovered ? false : a < b }
+        for (i, o) in orbs.enumerated() {
+            o.layer?.zPosition = CGFloat(i == hovered ? orbs.count + 1 : orbs.count - i)
+            // ...and cuts a clean, even gap out of each neighbour behind it, as
+            // the inbox swarm's front card does (`SwarmPose.knockout`).
+            let fronts = [i - 1, i + 1].filter { orbs.indices.contains($0) && above($0, i) }
+                .map { orbs[$0].frame.offsetBy(dx: -o.frame.minX, dy: -o.frame.minY) }
+            o.cut(by: fronts, gap: PlanMetrics.s(SwarmPose.knockout, zoom))
         }
     }
 
@@ -273,18 +293,33 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
 
     override func draw(_ dirtyRect: NSRect) {
         let theme = effectiveTokenTheme
-        if isOpen {
-            // While its plan is open the line wears the row hover fill: full and even.
-            AgentSurfaceRole.rowHover.color.nsColor(for: theme).setFill()
-            let r = PlanMetrics.s(Space.s, zoom)
-            NSBezierPath(roundedRect: bounds.insetBy(dx: -r, dy: 0), xRadius: r, yRadius: r).fill()
+        // Pressed is a step stronger than hover; while its plan is open the line
+        // keeps the hover fill. At rest it paints nothing.
+        if let fill = lineFill(theme) {
+            fill.setFill()
+            let r = CGFloat(zoom.scaled(CornerStyle.current.radius(CornerRole.card.base)))
+            NSBezierPath(roundedRect: bounds.insetBy(dx: -PlanMetrics.s(Space.s, zoom), dy: 0), xRadius: r, yRadius: r).fill()
         }
-        var x = pileWidth + (orbs.isEmpty ? 0 : gap)
+        let start = pileWidth + (orbs.isEmpty ? 0 : gap)
         let mid = bounds.midY
-        for (i, (s, phase)) in parts.enumerated() {
-            if i > 0 { x += PlanInk.text(separator, x: x, midY: mid, maxX: bounds.maxX, font: font, color: PlanInk.secondary(theme)) }
-            if let phase { x += PlanInk.pill(s, phase, x: x, midY: mid, font: font, theme: theme, zoom: zoom) }
-            else { x += PlanInk.text(s, x: x, midY: mid, maxX: bounds.maxX, font: font, color: PlanInk.secondary(theme)) }
+        // Inline orb hover: the sentence gives way to the hovered helper, in
+        // place, over the line hover's own fade.
+        let swap = shownHelper == nil ? 0 : min(1, max(0, swapAmount))
+        let context = NSGraphicsContext.current?.cgContext
+        if swap < 1 {
+            context?.saveGState(); context?.setAlpha(1 - swap)
+            var x = start
+            for (i, (s, phase)) in parts.enumerated() {
+                if i > 0 { x += PlanInk.text(separator, x: x, midY: mid, maxX: bounds.maxX, font: font, color: PlanInk.secondary(theme)) }
+                if let phase { x += PlanInk.pill(s, phase, x: x, midY: mid, font: font, theme: theme, zoom: zoom) }
+                else { x += PlanInk.text(s, x: x, midY: mid, maxX: bounds.maxX, font: font, color: PlanInk.secondary(theme)) }
+            }
+            context?.restoreGState()
+        }
+        if swap > 0, let helper = shownHelper {
+            context?.saveGState(); context?.setAlpha(swap)
+            drawHelper(helper, x: start, maxX: bounds.maxX - chevronSize, midY: mid, theme: theme)
+            context?.restoreGState()
         }
         guard let chevron = CanvasSymbolImage.image(named: isOpen ? "chevron.down" : "chevron.up",
                                                     pointSize: PlanMetrics.s(10, zoom), weight: .semibold) else { return }
@@ -299,17 +334,166 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         tinted.draw(in: r, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
     }
 
+    /// "Name · ⚠ Failed · 27 min ago": the helper's name, truncated to what is
+    /// left, then its state in the sidebar's glyph and the plan's state ink.
+    private func drawHelper(_ h: PlanGlance.Helper, x: CGFloat, maxX: CGFloat, midY: CGFloat, theme: TokenTheme) {
+        let state = PlanOrbHover.stateText(h)
+        let ink = PlanOrbHover.stateInk(h.phase, theme: theme)
+        let glyph = PlanOrbHover.glyph(h.phase, pointSize: font.pointSize, ink: ink)
+        let glyphGap = PlanMetrics.s(Space.xs, zoom)
+        let stateWidth = (glyph.map { $0.size.width + glyphGap } ?? 0) + PlanInk.width(state, font)
+        let sepWidth = PlanInk.width(separator, font)
+        let nameMax = max(x, maxX - stateWidth - sepWidth)
+        var cursor = x + PlanInk.text(h.name, x: x, midY: midY, maxX: nameMax, font: font, color: PlanInk.primary(theme))
+        cursor += PlanInk.text(separator, x: cursor, midY: midY, maxX: maxX, font: font, color: PlanInk.secondary(theme))
+        if let glyph {
+            glyph.draw(in: NSRect(x: cursor, y: (midY - glyph.size.height / 2).rounded(), width: glyph.size.width, height: glyph.size.height),
+                       from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+            cursor += glyph.size.width + glyphGap
+        }
+        PlanInk.text(state, x: cursor, midY: midY, maxX: maxX, font: font, color: ink)
+    }
+
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); applyTokens() }
     func applyTokens() { needsDisplay = true }
     override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    // MARK: Hover
+
+    /// The fill's step now: pressed, then open or hovered, else nothing.
+    var qaLineFillRole: SidebarSurfaceRole? { isPressed ? .active : (isOpen || lineHovered) ? .hover : nil }
+    /// The hovered orb, which is the front of the pile while it is hovered.
+    private(set) var hoveredOrb: PlanOrbView?
+    /// Checks only: the line's one tracking area, and how many times the
+    /// pointer entered and left it.
+    var qaTrackingArea: NSTrackingArea? { hoverArea }
+    private(set) var qaCrossings = (entered: 0, exited: 0)
+    /// Checks only: the helper the line is showing in place of its sentence.
+    var qaInlineHelper: PlanGlance.Helper? { swapTarget > 0 ? shownHelper : nil }
+
+    private var hoverArea: NSTrackingArea?
+    private var lineHovered = false
+    private var isPressed = false { didSet { if isPressed != oldValue { needsDisplay = true } } }
+    /// 0 at rest, 1 hovered: the hover fill's strength, faded like a sidebar row's.
+    @objc dynamic var hoverAmount: CGFloat = 0 { didSet { needsDisplay = true } }
+    /// The helper the line shows while an orb is hovered; kept through the fade out.
+    private var shownHelper: PlanGlance.Helper?
+    @objc dynamic var swapAmount: CGFloat = 0 { didSet { needsDisplay = true } }
+    private var swapTarget: CGFloat = 0
+
+    override class func defaultAnimation(forKey key: NSAnimatablePropertyKey) -> Any? {
+        key == "hoverAmount" || key == "swapAmount" ? CABasicAnimation() : super.defaultAnimation(forKey: key)
+    }
+
+    /// The sidebar's hover pill: `textPrimary` at the hover step's strength,
+    /// translucent so it reads the same over the status row's chrome; pressed
+    /// is the next step up the ladder.
+    private func lineFill(_ theme: TokenTheme) -> NSColor? {
+        let ink = TextToken.textPrimary.color.nsColor(for: theme)
+        if isPressed { return ink.withAlphaComponent(CGFloat(SidebarSurfaceRole.active.emphasisAlpha)) }
+        let hover = NSColor(cgColor: AgentInboxCardView.hoverMarkColour(theme: theme)) ?? ink
+        if isOpen { return hover }
+        return hoverAmount > 0.001 ? hover.withAlphaComponent(hover.alphaComponent * min(1, hoverAmount)) : nil
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        guard event.trackingArea === hoverArea else { return super.mouseEntered(with: event) }
+        qaCrossings.entered += 1
+        setLineHovered(true)
+        setHoveredOrb(orb(at: convert(event.locationInWindow, from: nil)))
+    }
+
+    private(set) var qaMoves = 0
+    override func mouseMoved(with event: NSEvent) {
+        qaMoves += 1
+        if !lineHovered { setLineHovered(true) }
+        setHoveredOrb(orb(at: convert(event.locationInWindow, from: nil)))
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        guard event.trackingArea === hoverArea else { return super.mouseExited(with: event) }
+        qaCrossings.exited += 1
+        isPressed = false
+        setLineHovered(false)
+        setHoveredOrb(nil)
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        guard newWindow == nil else { return }
+        isPressed = false
+        lineHovered = false
+        hoverAmount = 0
+        setHoveredOrb(nil)
+        swapAmount = 0; swapTarget = 0; shownHelper = nil
+    }
+
+    private func setLineHovered(_ on: Bool) {
+        guard on != lineHovered else { return }
+        lineHovered = on
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = window == nil ? 0 : AgentInboxCardView.fillFadeDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            animator().hoverAmount = on ? 1 : 0
+        }
+    }
+
+    /// The orb under `point`. The hovered one keeps the pointer while it is
+    /// still inside it, so the overlap between two orbs never flips back and
+    /// forth; otherwise the front-most orb wins.
+    private func orb(at point: NSPoint) -> PlanOrbView? {
+        func contains(_ o: PlanOrbView) -> Bool { hypot(point.x - o.frame.midX, point.y - o.frame.midY) <= o.frame.width / 2 }
+        if let h = hoveredOrb, contains(h) { return h }
+        return orbs.first(where: contains)
+    }
+
+    private func setHoveredOrb(_ next: PlanOrbView?) {
+        guard next !== hoveredOrb else { return }
+        hoveredOrb?.setHovered(false)
+        hoveredOrb = next
+        next?.setHovered(true)
+        stackPile()
+        showOrbHover()
+    }
+
+    private func helper(for orb: PlanOrbView?) -> PlanGlance.Helper? {
+        guard case let .agent(id, _)? = orb?.kind else { return nil }
+        return glance?.helpers.first { $0.id == id }
+    }
+
+    /// The hovered orb's helper takes the sentence's place in the line.
+    private func showOrbHover() {
+        let h = isOpen ? nil : helper(for: hoveredOrb)
+        if let h { shownHelper = h }
+        fadeSwap(to: h == nil ? 0 : 1)
+    }
+
+    private func fadeSwap(to target: CGFloat) {
+        guard target != swapTarget else { needsDisplay = true; return }
+        swapTarget = target
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = window == nil ? 0 : AgentInboxCardView.fillFadeDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            animator().swapAmount = target
+        }
+    }
+
     override func mouseDown(with event: NSEvent) {
+        // A helper's orb reveals that helper, as its orb in the plan does.
+        if case let .agent(id, _)? = orb(at: convert(event.locationInWindow, from: nil))?.kind {
+            if isOpen { close() }
+            onRevealOwner?(id)
+            return
+        }
         // The popover's own outside-click handling closed it on this very
         // click: that click was the close.
         if closedThisTurn { return }
+        isPressed = true
         toggle()
     }
+
+    override func mouseUp(with event: NSEvent) { isPressed = false }
     override func accessibilityPerformPress() -> Bool { toggle(); return glance != nil }
 
     func toggle() { if isOpen { close() } else { open() } }
@@ -324,6 +508,7 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         let list = PlanListView(glance, zoom: zoom)
         list.onReveal = { [weak self] id in self?.close(); self?.onRevealOwner?(id) }
         list.onChoose = { [weak self] answer in self?.close(); self?.onChoose?(answer) }
+        fadeSwap(to: 0)
         let surface = PlanPopoverSurfaceView(list)
         surface.onCancel = { [weak self] in self?.close() }
         let size = list.preferredSize(maxWidth: popoverMaxWidth)
@@ -346,3 +531,4 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         refit()
     }
 }
+

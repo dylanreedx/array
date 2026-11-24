@@ -110,7 +110,8 @@ extension ManagedLeadPlanChecks {
         // its own offscreen window at his tile size, as the render leg does.
         tile.removeFromSuperview()
         tile.frame = NSRect(x: 0, y: 0, width: 960, height: 800)
-        let host = NSWindow(contentRect: tile.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        // Key-capable, so the line's key-window tracking area answers the pointer.
+        let host = SidebarParityCapture.KeyWindow(contentRect: tile.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         host.contentView = tile
         host.orderFrontOffscreenForChecks()
         defer { line.close(); host.orderOut(nil) }
@@ -251,6 +252,12 @@ extension ManagedLeadPlanChecks {
         }
         try await AgentPresenceChecks.eventually("the pile did not hold four orbs") { line.qaPile.count == 4 }
         try cutPass("pile4")
+        let hoverStills = ProcessInfo.processInfo.environment["CONTINUUM_LEAD_PLAN_HOVER_DIR"].map { URL(fileURLWithPath: $0) }
+        var hovers: [String] = []
+        for appearance in [NSAppearance.Name.aqua, .darkAqua] {
+            hovers.append(try await hoverPass(line, window: window, appearance: appearance, stills: hoverStills))
+        }
+        print("Lead plan hover: " + hovers.joined(separator: "; "))
         // Helpers finish until two are left: the cut follows the new pile.
         for h in line.glance?.helpers ?? [] where line.qaPile.count > 2 && h.phase != .done {
             supervisor.qaDeliver(.turnStarted(threadId: AgentSupervisor.threadId(for: h.id), turnId: "t9"), to: h.id, now: Date())
@@ -271,27 +278,44 @@ extension ManagedLeadPlanChecks {
     /// band just outside the front orb's circle (its ring's outer edge) out to
     /// the knockout gap, where it overlaps the rear orb: every pixel there must
     /// be clear. The rear orb must still paint beyond the band.
-    static func orbCut(_ line: AgentLeadPlanView, appearance: NSAppearance.Name, still: URL?) throws -> String {
+    static func lineBitmap(_ line: AgentLeadPlanView, appearance: NSAppearance.Name, still: URL?) throws -> NSBitmapImageRep {
         let theme = NSAppearance(named: appearance)!
         let previous = NSApp.appearance
         defer { NSApp.appearance = previous; line.window?.appearance = nil }
         NSApp.appearance = theme; line.window?.appearance = theme
         line.window?.contentView?.layoutSubtreeIfNeeded(); line.layoutSubtreeIfNeeded()
-        let pile = line.qaPile
-        try expect(pile.count >= 2, "orb cut: the pile has \(pile.count) orbs")
         var result: Result<NSBitmapImageRep, Error>!
-        theme.performAsCurrentDrawingAppearance { result = Result { try UIProbe.bitmap(of: line, id: "lead-plan-orb-cut") } }
+        theme.performAsCurrentDrawingAppearance { result = Result { try UIProbe.bitmap(of: line, id: "lead-plan-line") } }
         let rep = try result.get()
         if let still {
             try FileManager.default.createDirectory(at: still.deletingLastPathComponent(), withIntermediateDirectories: true)
             try rep.representation(using: .png, properties: [:])!.write(to: still)
         }
+        return rep
+    }
+
+    /// `pairs` are (front, rear) indices into the pile; by default each orb
+    /// cuts the one after it.
+    /// With `background` (the line's own hover fill), the gap shows that fill
+    /// instead of nothing.
+    static func orbCut(_ line: AgentLeadPlanView, appearance: NSAppearance.Name, still: URL?,
+                       pairs: [(Int, Int)]? = nil, background: NSColor? = nil) throws -> String {
+        let pile = line.qaPile
+        try expect(pile.count >= 2, "orb cut: the pile has \(pile.count) orbs")
+        let rep = try lineBitmap(line, appearance: appearance, still: still)
         let scale = CGFloat(rep.pixelsWide) / line.bounds.width
         let gap = PlanMetrics.s(SwarmPose.knockout, line.zoom)
         func alpha(_ px: Int, _ py: Int) -> CGFloat { rep.colorAt(x: px, y: py)?.alphaComponent ?? 0 }
+        /// How far a gap pixel is from showing nothing but what is behind the pile.
+        func off(_ px: Int, _ py: Int) -> CGFloat {
+            guard let background, let c = rep.colorAt(x: px, y: py)?.usingColorSpace(.deviceRGB) else { return alpha(px, py) }
+            return premultipliedDistance(c, background)
+        }
+        /// Rear ink beyond the gap: anything that is not the background.
+        func ink(_ px: Int, _ py: Int) -> Bool { background == nil ? alpha(px, py) > 0.5 : off(px, py) > 0.2 }
         var worst: CGFloat = 0, rearInk = 0, sampled = 0
-        for i in 1..<pile.count {
-            let front = pile[i - 1].frame, rear = pile[i].frame
+        for (f, b) in pairs ?? (1..<pile.count).map({ ($0 - 1, $0) }) {
+            let front = pile[f].frame, rear = pile[b].frame
             let fc = CGPoint(x: front.midX, y: front.midY), rc = CGPoint(x: rear.midX, y: rear.midY)
             let r = front.width / 2
             for py in Int(rear.minY * scale)..<Int(ceil(rear.maxY * scale)) {
@@ -301,14 +325,164 @@ extension ManagedLeadPlanChecks {
                     guard dr < r - 0.5 else { continue }
                     // Half a device pixel of antialiasing at each edge of the band.
                     if df > r + 0.5 / scale, df < r + gap - 0.5 / scale {
-                        worst = max(worst, alpha(px, py)); sampled += 1
-                    } else if df > r + gap + 1, alpha(px, py) > 0.5 { rearInk += 1 }
+                        worst = max(worst, off(px, py)); sampled += 1
+                    } else if df > r + gap + 1, ink(px, py) { rearInk += 1 }
                 }
             }
         }
         try expect(sampled > 0, "orb cut: no pixels in the gap band (gap \(gap) pt at \(scale)x)")
         try expect(rearInk > 0, "orb cut: the rear orbs painted nothing outside the gap")
-        try expect(worst < 0.1, "orb cut: the rear orb paints inside the gap around the front orb (alpha \(String(format: "%.2f", worst)) over \(sampled) px)")
+        try expect(worst < 0.1, "orb cut: the rear orb paints inside the gap around the front orb (\(background == nil ? "alpha" : "off the line's fill by") \(String(format: "%.2f", worst)) over \(sampled) px)")
         return "gap \(String(format: "%.2f", gap)) pt clear over \(sampled) px (max alpha \(String(format: "%.2f", worst)))"
+    }
+
+    /// The largest channel difference of two colours, premultiplied, so a faint
+    /// translucent fill compares by what it actually adds.
+    static func premultipliedDistance(_ a: NSColor, _ b: NSColor) -> CGFloat {
+        let a = a.usingColorSpace(.deviceRGB)!, b = b.usingColorSpace(.deviceRGB)!
+        return max(abs(a.redComponent * a.alphaComponent - b.redComponent * b.alphaComponent),
+                   abs(a.greenComponent * a.alphaComponent - b.greenComponent * b.alphaComponent),
+                   abs(a.blueComponent * a.alphaComponent - b.blueComponent * b.alphaComponent),
+                   abs(a.alphaComponent - b.alphaComponent))
+    }
+
+    /// The line's hover, driven through `NSApp.sendEvent`: the whole line takes
+    /// the row hover fill and gives it back on exit; an orb under the pointer
+    /// comes to the front of the cut, swells, and after the dwell shows its
+    /// helper's card; crossing the pile never leaves the line.
+    static func hoverPass(_ line: AgentLeadPlanView, window: NSWindow, appearance: NSAppearance.Name,
+                          stills: URL?) async throws -> String {
+        let name = appearance == .darkAqua ? "dark" : "light"
+        window.acceptsMouseMovedEvents = true
+        window.makeKey()
+        window.appearance = NSAppearance(named: appearance)
+        line.layoutSubtreeIfNeeded()
+        let pile = line.qaPile
+        try expect(pile.count == 4, "hover: the pile has \(pile.count) orbs")
+        var movesHanded = 0
+        func move(_ p: NSPoint) throws {
+            guard let e = NSEvent.mouseEvent(with: .mouseMoved, location: line.convert(p, to: nil), modifierFlags: [],
+                                             timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                             context: nil, eventNumber: 0, clickCount: 0, pressure: 0) else {
+                throw WorkspaceAgentReportChecks.Failure(description: "hover: no mouse-moved event")
+            }
+            // A synthetic move carries no window-server tracking area, so the
+            // window hands it to the first responder (the composer), not to the
+            // line's area; then it goes to the area's owner, as a real move does.
+            let before = line.qaMoves
+            NSApp.sendEvent(e)
+            if line.qaMoves == before { line.mouseMoved(with: e); movesHanded += 1 }
+        }
+        // AppKit drops a synthetic crossing (it carries no window-server tracking
+        // area); then it goes to the area's owner, the one call a real crossing
+        // makes (`SidebarHelperHoverChecks.crossing`).
+        var handed = 0
+        func crossing(_ type: NSEvent.EventType, _ p: NSPoint) throws {
+            guard let area = line.qaTrackingArea,
+                  let e = NSEvent.enterExitEvent(with: type, location: line.convert(p, to: nil), modifierFlags: [],
+                                                 timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                                 context: nil, eventNumber: 0, trackingNumber: unsafeBitCast(area, to: Int.self),
+                                                 userData: nil) else {
+                throw WorkspaceAgentReportChecks.Failure(description: "hover: the line has no tracking area")
+            }
+            let before = line.qaCrossings
+            NSApp.sendEvent(e)
+            guard line.qaCrossings == before else { return }
+            guard let owner = area.owner as? NSResponder else { throw WorkspaceAgentReportChecks.Failure(description: "hover: no owner") }
+            if type == .mouseEntered { owner.mouseEntered(with: e) } else { owner.mouseExited(with: e) }
+            handed += 1
+        }
+        let theme: TokenTheme = appearance == .darkAqua ? .dark : .light
+        let hoverInk = NSColor(cgColor: AgentInboxCardView.hoverMarkColour(theme: theme))!.usingColorSpace(.deviceRGB)!
+        /// A review still of `view` in this pass's appearance.
+        func snap(_ view: NSView, _ file: String) throws {
+            guard let stills else { return }
+            let theme = NSAppearance(named: appearance)!
+            let previous = NSApp.appearance
+            defer { NSApp.appearance = previous; window.appearance = nil }
+            NSApp.appearance = theme; window.appearance = theme
+            (view as? TokenThemed)?.applyTokens()
+            window.contentView?.layoutSubtreeIfNeeded()
+            var result: Result<NSBitmapImageRep, Error>!
+            theme.performAsCurrentDrawingAppearance { result = Result { try UIProbe.bitmap(of: view, id: "lead-plan-still") } }
+            try result.get().representation(using: .png, properties: [:])!.write(to: stills.appendingPathComponent(file))
+        }
+        /// The line's own fill, read between the pile and the words.
+        func fill(_ still: String) throws -> NSColor? {
+            if let stills, let row = line.superview?.superview {
+                // In place: the whole status row, on its own chrome.
+                try FileManager.default.createDirectory(at: stills, withIntermediateDirectories: true)
+                try snap(row, "\(still)-\(name)-row.png")
+            }
+            let rep = try lineBitmap(line, appearance: appearance, still: stills?.appendingPathComponent("\(still)-\(name).png"))
+            let scale = CGFloat(rep.pixelsWide) / line.bounds.width
+            let p = NSPoint(x: pile[3].frame.maxX + 3, y: line.bounds.midY)
+            let c = rep.colorAt(x: Int(p.x * scale), y: Int(p.y * scale))?.usingColorSpace(.deviceRGB)
+            return (c?.alphaComponent ?? 0) < 0.01 ? nil : c
+        }
+        func isHoverInk(_ c: NSColor?) -> Bool { c.map { premultipliedDistance($0, hoverInk) < 0.02 } ?? false }
+        let fade = UInt64((AgentInboxCardView.fillFadeDuration + 0.15) * 1000)
+        let words = NSPoint(x: pile[3].frame.maxX + 20, y: line.bounds.midY)
+        func centre(_ i: Int) -> NSPoint { NSPoint(x: pile[i].frame.midX, y: pile[i].frame.midY) }
+
+        // Resting: nothing painted.
+        try expect(line.qaLineFillRole == nil && line.hoveredOrb == nil, "hover(\(name)): the line is not at rest")
+        try expect(try fill("resting") == nil, "hover(\(name)): the resting line paints a fill")
+
+        // The line.
+        try crossing(.mouseEntered, words)
+        try move(words)
+        try await Task.sleep(for: .milliseconds(fade))
+        try expect(line.qaLineFillRole == .hover, "hover(\(name)): the hovered line's fill is \(String(describing: line.qaLineFillRole)), not the hover step")
+        let lineFill = try fill("line-hover")
+        try expect(isHoverInk(lineFill), "hover(\(name)): the hovered line paints \(String(describing: lineFill)), not the hover step \(hoverInk)")
+        try expect(line.hoveredOrb == nil, "hover(\(name)): an orb is hovered over the words")
+
+        // Across the pile, back to front and back again: one line, never left.
+        let crossed = line.qaCrossings
+        for i in [3, 2, 1, 0, 1, 2] {
+            try move(centre(i))
+            try expect(line.hoveredOrb === pile[i], "hover(\(name)): the pointer on orb \(i) hovers \(String(describing: line.hoveredOrb.flatMap { o in pile.firstIndex { $0 === o } })) (line in window \(line.window === window), key \(window.isKeyWindow), first responder \(String(describing: window.firstResponder.map { type(of: $0) })), moved \(line.qaMoves))")
+            try expect(pile[i].qaIsHovered && pile.enumerated().allSatisfy { $0.offset == i || !$0.element.qaIsHovered },
+                       "hover(\(name)): orb \(i) is not the only swollen orb")
+            try expect(line.qaLineFillRole == .hover, "hover(\(name)): the line lost its hover on orb \(i)")
+        }
+        try expect(line.qaCrossings == crossed, "hover(\(name)): crossing the pile left and re-entered the line \(line.qaCrossings) vs \(crossed)")
+
+        // Orb 2 (behind 0 and 1) is the front now: it cuts both its neighbours.
+        try expect(pile.allSatisfy { $0 === pile[2] || ($0.layer?.zPosition ?? 0) < (pile[2].layer?.zPosition ?? 0) },
+                   "hover(\(name)): the hovered orb is not on top")
+        let cut = try orbCut(line, appearance: appearance, still: stills?.appendingPathComponent("orb-hover-\(name).png"),
+                             pairs: [(2, 1), (2, 3)], background: hoverInk)
+        func helper(_ i: Int) -> PlanGlance.Helper? {
+            line.glance?.helpers.first { h in if case let .agent(id, _) = pile[i].kind { return h.id == id }; return false }
+        }
+        guard let front = helper(2) else { throw WorkspaceAgentReportChecks.Failure(description: "hover(\(name)): orb 2 has no helper") }
+        let failedIndex = (0..<pile.count).first { helper($0)?.phase == .failed }
+        var said: [String] = []
+        // A: the sentence gives way to the helper, in place; no floating surface.
+        try await Task.sleep(for: .milliseconds(fade))
+        try expect(line.qaInlineHelper?.id == front.id && line.swapAmount > 0.99,
+                   "hover(\(name)): the line does not show orb 2's helper: \(line.qaInlineHelper?.name ?? "nil") at \(line.swapAmount)")
+        _ = try fill("orb-hover")
+        said.append("\(front.name) · \(PlanOrbHover.stateText(front))")
+        if let f = failedIndex {
+            try move(centre(f))
+            try await Task.sleep(for: .milliseconds(fade))
+            try expect(line.qaInlineHelper?.phase == .failed && PlanOrbHover.symbol(.failed) == "exclamationmark.triangle.fill",
+                       "hover(\(name)): the failed orb does not show Failed with the warning glyph")
+            _ = try fill("orb-failed")
+            said.append("failed orb \(f) with \(PlanOrbHover.symbol(.failed) ?? "-")")
+        }
+
+        // Leaving: the fill, the hover, the card and the cut all go back.
+        try crossing(.mouseExited, NSPoint(x: line.bounds.maxX + 40, y: line.bounds.midY))
+        try await Task.sleep(for: .milliseconds(fade))
+        try expect(line.qaLineFillRole == nil && line.hoveredOrb == nil && pile.allSatisfy { !$0.qaIsHovered },
+                   "hover(\(name)): leaving did not restore the line")
+        try expect(try fill("left") == nil, "hover(\(name)): the line kept a fill after the pointer left")
+        try expect(line.qaInlineHelper == nil, "hover(\(name)): the helper outlived the hover")
+        _ = try orbCut(line, appearance: appearance, still: nil)
+        return "\(name): line fill the sidebar hover step then nil; orb 2 front with \(cut); shows \(said); 0 crossings over the pile; \(handed) crossings and \(movesHanded) moves handed to the line after NSApp.sendEvent"
     }
 }
