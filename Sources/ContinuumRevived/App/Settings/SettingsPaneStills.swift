@@ -30,11 +30,30 @@ enum SettingsPaneStills {
                     if pane != "agents" && !managed { continue }
                     fixture.select(pane)
                     fixture.settle(0.3)
-                    guard let rep = fixture.snapshot(), let png = rep.representation(using: .png, properties: [:]) else {
-                        throw SettingsStillsError.noImage(pane)
+                    // Scroll the form a card at a time so every group is seen.
+                    let scroll = fixture.descendants(NSScrollView.self).max { $0.frame.height < $1.frame.height }
+                    let page = max(200, (scroll?.contentView.bounds.height ?? 560) - 80)
+                    let total = scroll?.documentView?.frame.height ?? 0
+                    var offset: CGFloat = 0
+                    var index = 1
+                    while true {
+                        if let scroll {
+                            let flipped = scroll.documentView?.isFlipped ?? true
+                            let y = flipped ? offset : max(0, total - scroll.contentView.bounds.height - offset)
+                            scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
+                            scroll.reflectScrolledClipView(scroll.contentView)
+                        }
+                        fixture.settle(0.3)
+                        guard let rep = fixture.snapshot(), let png = rep.representation(using: .png, properties: [:]) else {
+                            throw SettingsStillsError.noImage(pane)
+                        }
+                        let suffix = pane == "agents" ? (managed ? "-managed-on" : "-managed-off") : ""
+                        try png.write(to: directory.appendingPathComponent("\(pane)\(suffix)-\(look)-\(index).png"))
+                        let viewport = scroll?.contentView.bounds.height ?? 0
+                        if scroll == nil || pane != "agents" || offset + viewport >= total { break }
+                        offset += page
+                        index += 1
                     }
-                    let suffix = pane == "agents" ? (managed ? "-managed-on" : "-managed-off") : ""
-                    try png.write(to: directory.appendingPathComponent("\(pane)\(suffix)-\(look).png"))
                 }
                 if managed {
                     // Terminal with its switches off, to see the dependents hidden.

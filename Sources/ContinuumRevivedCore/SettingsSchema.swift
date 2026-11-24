@@ -387,7 +387,8 @@ public enum SettingsSchema {
                             help: "Frees memory. Your next message resumes the conversation.",
                             keywords: ["idle", "memory", "hibernate", "session", "timeout", "reap"],
                             optionalNumber: SettingsOptionalNumber(off: nil, onValue: .double(AgentIdleSessionConfig.defaultMinutes),
-                                                                   range: AgentIdleSessionConfig.supportedRange, unit: "min",
+                                                                   range: AgentIdleSessionConfig.supportedRange,
+                                                                   stops: [1, 2, 5, 10, 15, 20, 30, 45, 60, 90, 120], unit: "min",
                                                                    sliderLabel: "Stop idle sessions after")),
             ]),
             SettingsGroup(id: "agents.privacy", title: "Privacy", rows: [
