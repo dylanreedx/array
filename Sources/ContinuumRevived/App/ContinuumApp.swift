@@ -1463,6 +1463,14 @@ enum ContinuumApp {
             }
         }
 
+        if let index = CommandLine.arguments.firstIndex(of: "--file-open-design-stills") {
+            let dir = CommandLine.arguments.dropFirst(index + 1).first ?? "/tmp/file-open-stills"
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do { try FileOpenDesignStills.run(outDir: dir); Foundation.exit(0) } catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
+            }
+        }
+
         if CommandLine.arguments.contains("--palette-agent-harness-check") {
             do {
                 _ = NSApplication.shared
