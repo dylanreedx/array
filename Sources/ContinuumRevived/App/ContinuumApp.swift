@@ -35041,16 +35041,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             && canvas.canvasState.lastActiveTileId == browserTileId
         try expect(revealInspectedBrowserWorked, "Reveal Inspected Browser did not focus the linked browser tile")
 
-        let browserSection = SettingsSchema.sections().first { $0.id == "browser" }
-        // What the Browser pane shows: each row's label and its secondary line.
-        let settingsCopy = browserSection?.rows.flatMap { [$0.field.label, $0.help ?? ""] }.joined(separator: " ") ?? ""
+        // The Safari inspector switch lives in Advanced → Developer (5ea82a6c0 moved it
+        // out of Browser and shortened its copy). What the pane shows: the row's label
+        // and its secondary line, which must say that this is Safari's inspector and
+        // that Array's own inspector is a separate thing needing no setting.
+        let developerSection = SettingsSchema.sections().first { $0.id == "advanced" }
+        let settingsCopy = developerSection?.groups.first { $0.id == "advanced.developer" }?.rows
+            .flatMap { [$0.field.label, $0.help ?? ""] }.joined(separator: " ") ?? ""
         let settingsCopyDistinguishesSafariAndArrayInspector = settingsCopy.contains("Safari Web Inspector")
-            && settingsCopy.contains("native WebKit inspection")
-            && settingsCopy.contains("Array Inspector")
-            && settingsCopy.contains("Elements")
-            && settingsCopy.contains("Console")
-            && settingsCopy.contains("Styles")
-            && settingsCopy.contains("Network")
+            && settingsCopy.contains("Safari's Develop menu")
+            && settingsCopy.contains("Array's own inspector")
         try expect(settingsCopyDistinguishesSafariAndArrayInspector, "Browser settings copy does not distinguish Safari Web Inspector from Array Inspector")
 
         let timestamp = Self.qaTimestamp()
