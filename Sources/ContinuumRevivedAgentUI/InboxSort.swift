@@ -421,6 +421,9 @@ public enum InboxSort {
         case .approval, .input: return (0, at)
         case .working: return (1, at)
         case .ready, .failed:
+            // A helper whose report failed is one the lead says needs you, the
+            // same as the tile's NEEDS YOU group: it is always drawn, first.
+            if row.parentId != nil, row.selfReport?.reportedFailure == true, !row.isCleared { return (0, at) }
             // A cleared outcome folds: Clear acknowledges it, the count keeps it.
             if row.isCleared { return (3, at) }
             if endedInFailure(row), !isUnopenedFailure(row) { return (3, at) }

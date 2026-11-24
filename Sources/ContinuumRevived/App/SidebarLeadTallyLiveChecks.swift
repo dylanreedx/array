@@ -82,6 +82,23 @@ enum SidebarLeadTallyLiveChecks {
                        "\(tag): the line must say 3 working, it says \"\(tally.liveLine)\"")
             f.inbox.reload(rows: failedRows)
             f.inbox.layoutForQA()
+            // The three rows "3 need you" counts are drawn first, in spawn order,
+            // each with a red "Failed" pill, and stay on screen while the lead's
+            // other helpers fold under "N more".
+            let failedIDs = (7...9).map(uuid)
+            let drawn = f.inbox.rowIdsForQA
+            let leadIndex = drawn.firstIndex(of: uuid(0)) ?? 0
+            let firstThree = Array(drawn.dropFirst(leadIndex + 1).prefix(3))
+            try expect(firstThree == failedIDs,
+                       "\(tag): the first three helper rows must be the failed helpers h7 h8 h9, in spawn order")
+            for id in failedIDs {
+                try expect(f.inbox.cellForQA(id: id)?.reportPillForQA == "Failed",
+                           "\(tag): a failed helper's pill must read \"Failed\"")
+            }
+            try expect(f.inbox.rowIdsForQA.contains(uuid(0)) && !f.inbox.expandedFanoutParentsForQA.contains(uuid(0)),
+                       "\(tag): the failed rows must be visible while the lead is folded")
+            try expect(Set(drawn).isDisjoint(with: Set(failedIDs)) == false, "\(tag): failed rows drawn")
+            try expect(drawn.count < failedRows.count, "\(tag): the other helpers must fold (\(drawn.count) of \(failedRows.count) drawn)")
             if let dir = ProcessInfo.processInfo.environment["ARRAY_STILLS_DIR"] {
                 try SidebarParityCapture.capture(
                     f.inbox, to: URL(fileURLWithPath: dir).appendingPathComponent("lead-failed-\(tag).png"))

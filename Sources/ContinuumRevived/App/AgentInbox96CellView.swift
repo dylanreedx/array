@@ -2046,7 +2046,11 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         placementLabel.font = .token(.label)
         // A report with checks that did not pass is a small neutral pill in the
         // clock's place. Only the agent's own outcome is ever red.
-        if sub, case let .checks(failed, _)? = row.selfReportLine, failed > 0 {
+        // A helper that failed says so, in the pill's place and in red, whatever
+        // its unconfirmed checks: the lead's "N need you" is made of these rows.
+        if sub, row.state == .failed || row.selfReport?.reportedFailure == true {
+            reportPillText = "Failed"
+        } else if sub, case let .checks(failed, _)? = row.selfReportLine, failed > 0 {
             reportPillText = "\(failed) unconfirmed"
         } else {
             reportPillText = nil
@@ -2183,6 +2187,7 @@ final class AgentInbox96CellView: NSTableCellView, AgentInboxRowCell {
         let clock = stateLabel.stringValue
         stateLabel.textColor = clock == "Failed" ? failed : clock == "Done" ? primary : secondary
         decorations.dark = theme == .dark
+        decorations.reportPillColour = reportPillText == "Failed" ? failed : nil
         let resting = isSubagentRow && row.state != .working && Self.ask(row) == nil
         if titleShimmerPhase != nil {
             // The muted base the band passes over.
@@ -4054,6 +4059,8 @@ private final class Decorations: NSView {
     var workspaceTreatment: AgentInbox96CellView.WorkspaceTreatment = .workspaceLabel
     /// Plan 106: a subagent's report result, "1 unconfirmed", in a small quiet pill.
     var reportPill: (rect: NSRect, text: String)?
+    /// The pill's ink when it names a failure; nil is the quiet neutral.
+    var reportPillColour: NSColor?
     var dark = false
 
     override init(frame frameRect: NSRect) {
@@ -4089,13 +4096,14 @@ private final class Decorations: NSView {
         }
         if paintsBorder { drawBorder() }
         if let pill = reportPill {
-            muted.withAlphaComponent(dark ? 0.16 : 0.1).setFill()
+            let ink = reportPillColour ?? muted
+            ink.withAlphaComponent(dark ? 0.16 : 0.1).setFill()
             NSBezierPath(roundedRect: pill.rect, xRadius: pill.rect.height / 2, yRadius: pill.rect.height / 2).fill()
             let font = AgentInbox96CellView.pillFont
             let size = (pill.text as NSString).size(withAttributes: [.font: font])
             (pill.text as NSString).draw(
                 at: NSPoint(x: pill.rect.midX - size.width / 2, y: pill.rect.midY - size.height / 2),
-                withAttributes: [.font: font, .foregroundColor: muted])
+                withAttributes: [.font: font, .foregroundColor: ink])
         }
         if let slot = identityDot, let identityDotColour {
             identityDotColour.setFill()
