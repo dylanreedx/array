@@ -36,7 +36,10 @@ enum AgentFileIndexMemoryChecks {
 
     /// Recorded from the suggestions of the build before the fix
     /// (2e280397) over this fixture; every later build must match it.
-    static let goldenSuggestionDigest = "60dfeb4fe7aadd05"
+    /// Re-recorded when the picker moved to fzf-style ranking (4df607a2c), which
+    /// deliberately reorders tier-2 hits; the fixture's abbreviation query became
+    /// "group-07swift" because a scattered-letters query now matches nothing.
+    static let goldenSuggestionDigest = "87e237227dd14323"
 
     /// Malloc bytes the first index may cost per fixture file.
     static let maxBytesPerIndexedFile = 350
@@ -119,7 +122,7 @@ enum AgentFileIndexMemoryChecks {
             AgentCompletionQuery(trigger: "@", text: "", replacementRange: range, context: context),
             AgentCompletionQuery(trigger: "@", text: "rea", replacementRange: range, context: context),
             AgentCompletionQuery(trigger: "@", text: "file-042", replacementRange: range, context: context),
-            AgentCompletionQuery(trigger: "@", text: "grp07swift", replacementRange: range, context: context),
+            AgentCompletionQuery(trigger: "@", text: "group-07swift", replacementRange: range, context: context),
             AgentCompletionQuery(trigger: "@", text: "", replacementRange: range, context: context,
                                  navigationPath: "module-03"),
             AgentCompletionQuery(trigger: "@", text: "", replacementRange: range, context: context,
