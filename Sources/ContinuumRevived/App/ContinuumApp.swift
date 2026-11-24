@@ -15286,8 +15286,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         }
         coordinator.askSignUpName = { [weak self] relay in
             if let preview = MultiplayerPreview.current, preview.driver != nil { return preview.name }
-            return await self?.askCollaborationName(title: "Share from Array",
-                detail: "Choose the name your teammates see. Array signs you up on \(relay); no code or password is needed.",
+            return await self?.askCollaborationName(title: "Your name for sharing",
+                detail: "Choose the name your teammates see beside your prompts. No password is needed.",
                 action: "Continue")
         }
         return coordinator
@@ -15401,7 +15401,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// A newcomer joining through a link only picks the name teammates see.
     /// The link's token is the enrollment; no password, code or key is asked for.
     private func askShareLinkName(relay: String, slug: String) async -> String? {
-        await askCollaborationName(title: "Join “\(slug)”", detail: "Choose the name your teammates see. You join through \(relay).", action: "Join")
+        // The slug is the shared thing's own title, hyphenated: read it back as words.
+        await askCollaborationName(title: "Join “\(ShareLinkSession.title(fromSlug: slug))”",
+                                   detail: "Choose the name your teammates see beside your prompts. No password is needed.", action: "Join")
     }
 
     /// The one name prompt for a person with no collaboration account: a sheet
