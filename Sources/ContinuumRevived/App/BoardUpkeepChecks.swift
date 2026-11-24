@@ -184,8 +184,26 @@ enum BoardUpkeepChecks {
         _ = f.api.sweepBoardUpkeep()
         try expect(f.api.boardUpkeepNudgeCount == nudgesBefore + 2, "a second sweep nudges nobody again")
         view.layoutSubtreeIfNeeded()
-        try expect(view.cardView(for: cardA)?.qaMetaText.hasPrefix("Stale") == true && view.cardView(for: other)?.qaMetaText.contains("Stale") != true,
+        try expect(view.cardView(for: cardA)?.qaMetaText.hasPrefix("Helper finished") == true && view.cardView(for: other)?.qaMetaText.contains("Helper finished") != true,
                    "the board tile marks the stale card, and only it: \(view.cardView(for: cardA)?.qaMetaText ?? "nil")")
+        let marked = view.cardView(for: cardA)
+        let commentCount = card(cardA)?.comments.count ?? 0
+        try expect(marked?.qaMetaText == "Helper finished · \(commentCount) comment\(commentCount == 1 ? "" : "s")",
+                   "the marker names what happened and joins the count with the board's \" · \": \(marked?.qaMetaText ?? "nil")")
+        try expect(marked?.qaMetaToolTip == "The helper working on this finished. Move the card to Done, or back to To Do if it needs more.",
+                   "the marker explains itself on hover: \(marked?.qaMetaToolTip ?? "nil")")
+        // Moving the card clears the marker at once, before any sweep; moving it
+        // back to a working column shows it again for as long as the sweep holds it.
+        guard case .applied = runtime.apply(.moveCard(id: cardA, toColumn: done, after: nil, before: nil), to: boardID) else {
+            throw WorkspaceAgentReportChecks.Failure(description: "board-upkeep: could not move the card to Done")
+        }
+        view.layoutSubtreeIfNeeded()
+        try expect(view.cardView(for: cardA)?.qaMetaText.contains("Helper finished") == false, "moving the card clears the marker without a sweep")
+        guard case .applied = runtime.apply(.moveCard(id: cardA, toColumn: doing, after: nil, before: nil), to: boardID) else {
+            throw WorkspaceAgentReportChecks.Failure(description: "board-upkeep: could not move the card back to Doing")
+        }
+        view.layoutSubtreeIfNeeded()
+        try expect(view.cardView(for: cardA)?.qaMetaText.hasPrefix("Helper finished") == true, "a card back in Doing shows the marker the sweep still holds")
 
         if let directory = ProcessInfo.processInfo.environment["ARRAY_BOARD_UPKEEP_STILLS"] {
             try writeStills(view, to: URL(fileURLWithPath: directory, isDirectory: true), runtime: runtime)

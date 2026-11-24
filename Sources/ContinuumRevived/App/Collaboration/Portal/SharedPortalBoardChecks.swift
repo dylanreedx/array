@@ -158,7 +158,7 @@ enum SharedPortalBoardChecks {
         }
         try require(guestView.cardView(for: receipts)?.qaMetaText == hostView.cardView(for: receipts)?.qaMetaText,
                     "a card's notes and picture markers match: \(guestView.cardView(for: receipts)?.qaMetaText ?? "")")
-        try require(guestView.cardView(for: wallet)?.qaMetaText == "1 comment  Notes  3 linked" && hostView.cardView(for: wallet)?.qaMetaText == "1 comment  Notes  4 linked",
+        try require(guestView.cardView(for: wallet)?.qaMetaText == "1 comment · Notes · 3 linked" && hostView.cardView(for: wallet)?.qaMetaText == "1 comment · Notes · 4 linked",
                     "the guest's links are the host's minus the file outside the project")
         guard let shownURL = guestView.board.card(wallet)?.links.first, case .url(let address) = shownURL else { throw Failure(description: "no URL link on the guest") }
         try require(address == "https://example.com/pr/12", "the guest's URL link is the scrubbed page: \(address)")

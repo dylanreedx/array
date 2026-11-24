@@ -94,9 +94,13 @@ final class KanbanTileNSView: TileNSView, NSSplitViewDelegate {
     var staleCardIDs: Set<UUID> = [] {
         didSet {
             guard staleCardIDs != oldValue else { return }
-            for view in columnViews { view.staleCardIDs = staleCardIDs }
             render(board)
         }
+    }
+    /// A moved card stops showing the marker at once, not at the next sweep:
+    /// only a working column (between the first and last) carries it.
+    private func staleIDs(in columnId: UUID) -> Set<UUID> {
+        BoardUpkeep.workingColumns(board).contains(columnId) ? staleCardIDs : []
     }
     /// Fires when a task is dropped on a managed-agent tile. The app turns it
     /// into an assignment. Preparing and sending remain separate actions.
@@ -378,6 +382,7 @@ final class KanbanTileNSView: TileNSView, NSSplitViewDelegate {
             for column in board.orderedColumns {
                 guard let view = columnViews.first(where: { $0.columnId == column.id }) else { continue }
                 view.name = column.name
+                view.staleCardIDs = staleIDs(in: column.id)
                 departed += view.setCards(board.orderedCards(in: column.id), assigneeName: { [weak self] id in
                     self?.agentDisplayName?(id)
                 })
@@ -413,7 +418,7 @@ final class KanbanTileNSView: TileNSView, NSSplitViewDelegate {
         for view in columnViews { view.removeFromSuperview() }
         columnViews = board.orderedColumns.map { column in
             let view = KanbanColumnView(columnId: column.id, name: column.name)
-            view.staleCardIDs = staleCardIDs
+            view.staleCardIDs = staleIDs(in: column.id)
             view.setCards(board.orderedCards(in: column.id), assigneeName: { [weak self] id in
                 self?.agentDisplayName?(id)
             })

@@ -136,7 +136,7 @@ final class KanbanCardView: NSView, TokenThemed {
         let meta = Self.metaText(for: card, assigneeName: assigneeName, stale: stale)
         metaLabel.stringValue = meta ?? ""
         metaLabel.isHidden = meta == nil
-        metaLabel.toolTip = stale ? "Nobody assigned to this task is working on it" : nil
+        metaLabel.toolTip = stale ? "The helper working on this finished. Move the card to Done, or back to To Do if it needs more." : nil
         setAccessibilityLabel(Self.accessibilityLabel(for: card, assigneeName: assigneeName, stale: stale))
         needsLayout = true
     }
@@ -146,18 +146,18 @@ final class KanbanCardView: NSView, TokenThemed {
     static func metaText(for card: BoardCard, assigneeName: String?, stale: Bool = false) -> String? {
         var parts: [String] = []
         // `BoardUpkeep`: quiet, first, in the same caption as everything else.
-        if stale { parts.append("Stale") }
+        if stale { parts.append("Helper finished") }
         if !card.comments.isEmpty { parts.append("\(card.comments.count) comment\(card.comments.count == 1 ? "" : "s")") }
         if !card.attachments.isEmpty { parts.append("\(card.attachments.count) image\(card.attachments.count == 1 ? "" : "s")") }
         if !card.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { parts.append("Notes") }
         if !card.links.isEmpty { parts.append("\(card.links.count) linked") }
-        return parts.isEmpty ? nil : parts.joined(separator: "  ")
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     static func accessibilityLabel(for card: BoardCard, assigneeName: String?, stale: Bool = false) -> String {
         var label = card.title.isEmpty ? "Untitled task" : card.title
         if let assigneeName { label += ", assigned to \(assigneeName)" }
-        if stale { label += ", stale" }
+        if stale { label += ", helper finished" }
         if !card.body.isEmpty { label += ", has notes" }
         return label
     }
@@ -320,6 +320,7 @@ final class KanbanCardView: NSView, TokenThemed {
     func qaPerformContextChoice(_ id: String) { performContextChoice(id, anchor: .zero) }
     func qaDismissContextMenu() { contextMenuController.dismiss() }
     var qaAssigneeTitle: String { assignButton.title }
+    var qaMetaToolTip: String? { metaLabel.toolTip }
     var qaMetaText: String { metaLabel.isHidden ? "" : metaLabel.stringValue }
     var qaHasThumbnail: Bool { !thumbnail.isHidden && thumbnail.image != nil }
     var qaAssigneeImageAspectRatio: CGFloat {
