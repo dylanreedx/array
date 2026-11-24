@@ -3123,6 +3123,12 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         // ID on every streamed chunk cost O(transcript) per chunk (history S02).
         let priorEntryIDs: Set<AgentNodeID> = capturedIdentity == nil
             ? [] : Set(model.document.entries.map(\.id))
+        // While the camera moves, a visible stream re-parses at a third of the view
+        // rate: the parse is main-thread work on the pan's own frame.
+        if case .contentDelta = event {
+            model.setStreamingParseRate(FrameGovernor.shared.shouldDefer()
+                ? Self.cameraMotionParsesPerSecond : Self.viewParsesPerSecond)
+        }
         model.ingest(event)
         if let identity = capturedIdentity,
            case let .itemStarted(_, itemID, _, _) = captureEvent {
@@ -5153,6 +5159,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     static let chunkStatusInterval: TimeInterval = 0.25
     private var chunkStatusTimer: Timer?
     private var chunkSnapshotRefreshPending = false
+    static let viewParsesPerSecond: Double = 30
+    static let cameraMotionParsesPerSecond: Double = 10
     /// QA: turn-snapshot refreshes, however they were triggered.
     private(set) var qaTurnSnapshotRefreshCount = 0
     /// QA: status-row refreshes, however they were triggered.

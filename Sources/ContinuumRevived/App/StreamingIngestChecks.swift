@@ -17,6 +17,41 @@ enum StreamingIngestChecks {
     static func run() throws {
         try runSupervisorParsesAnOpenStreamAtItsOwnRate()
         try runChunksRefreshTheStatusRowAtMostEveryInterval()
+        try runCameraMotionSlowsAVisibleStreamsParse()
+    }
+
+    /// A pan re-parsed every visible open message at the 30 Hz view rate on the
+    /// pan's own frame. While the camera moves it parses at the motion rate; the
+    /// view rate returns with the gesture, and the text still ends complete.
+    private static func runCameraMotionSlowsAVisibleStreamsParse() throws {
+        func parses(moving: Bool, thread: String) -> (count: Int, tile: ManagedAgentTileNSView) {
+            let governor = FrameGovernor.shared
+            governor.qaReset()
+            governor.qaSetInteraction { moving }
+            let tile = Tile(id: UUID(), kind: .managedAgent, title: "motion-parse",
+                            frame: TileFrame(x: 0, y: 0, width: 420, height: 300),
+                            zPosition: .fromLegacyRank(1), zoneId: nil, runtimeRef: nil, metadata: TileMetadata())
+            let view = ManagedAgentTileNSView(tile: tile, threadId: thread)
+            view.ingest(.turnStarted(threadId: thread, turnId: "t"))
+            let before = view.qaStreamingMarkupParseCount
+            let end = Date().addingTimeInterval(1.0)
+            var index = 0
+            while Date() < end {
+                view.ingest(.contentDelta(threadId: thread, turnId: "t", streamKind: .assistant, delta: "word\(index) "))
+                index += 1
+                RunLoop.main.run(until: Date().addingTimeInterval(0.005))
+            }
+            let count = view.qaStreamingMarkupParseCount - before
+            view.ingest(.turnCompleted(threadId: thread, turnId: "t", outcome: .completed, errorMessage: nil))
+            governor.qaSetInteraction(nil)
+            return (count, view)
+        }
+        let still = parses(moving: false, thread: "still").count
+        let moving = parses(moving: true, thread: "moving").count
+        try expect(moving <= Int(ManagedAgentTileNSView.cameraMotionParsesPerSecond) + 3,
+                   "a visible stream parsed \(moving) times in 1 s while the camera moved; at most \(Int(ManagedAgentTileNSView.cameraMotionParsesPerSecond) + 3)")
+        try expect(still >= moving * 2, "at rest it must parse at the view rate: \(still) at rest vs \(moving) in motion")
+        print("streaming ingest: a visible stream parsed \(still)x/s at rest and \(moving)x/s while the camera moved")
     }
 
     /// The supervisor's transcript is persisted and previewed, never drawn, yet it

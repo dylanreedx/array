@@ -161,6 +161,9 @@ final class FrameGovernor {
         step()
     }
 
+    /// QA: stands in for the canvas's gesture signal.
+    func qaSetInteraction(_ provider: (() -> Bool)?) { interactionProvider = provider; visibleCache = nil }
+
     /// QA: the governor's state back to a fresh one for the next arm.
     func qaReset() {
         settleTimer?.invalidate(); settleTimer = nil

@@ -964,6 +964,13 @@ public struct AgentTranscriptProjection: Sendable {
         return result
     }
 
+    /// Re-paces the parse of the open stream and of every later one.
+    public mutating func setStreamingParseRate(_ rate: Double) {
+        guard rate != streamingParsesPerSecond else { return }
+        streamingParsesPerSecond = rate
+        openStream?.scheduler.setMaximumParsesPerSecond(rate)
+    }
+
     private mutating func scheduledMarkupMutationsForOpenStream() -> [AgentDocumentMutation] {
         let now = monotonicNow()
         guard openStream?.scheduler.shouldParse(now: now) == true else { return [] }

@@ -123,6 +123,7 @@ public struct ManagedAgentTranscriptModel: Equatable, Sendable {
         get { semanticProjection.streamingParsesPerSecond }
         set { semanticProjection.streamingParsesPerSecond = newValue }
     }
+    public mutating func setStreamingParseRate(_ rate: Double) { semanticProjection.setStreamingParseRate(rate) }
     public var nextStreamingMarkupParseDeadline: TimeInterval? { semanticProjection.nextStreamingMarkupParseDeadline }
 
     /// A complete value snapshot for a newly-created view of this agent. This is

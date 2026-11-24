@@ -33,7 +33,7 @@ public struct StreamingMarkupBuffer: Equatable, Sendable {
 /// The caller owns the clock and invokes the parser only when this scheduler
 /// returns true. `requestParse()` never owns or copies semantic source.
 public struct StreamingMarkupParseScheduler: Equatable, Sendable {
-    public let minimumInterval: TimeInterval
+    public private(set) var minimumInterval: TimeInterval
     public private(set) var hasPendingRequest: Bool
     private var lastParseTime: TimeInterval?
 
@@ -42,6 +42,12 @@ public struct StreamingMarkupParseScheduler: Equatable, Sendable {
         self.minimumInterval = 1 / maximumParsesPerSecond
         self.hasPendingRequest = false
         self.lastParseTime = nil
+    }
+
+    /// Re-paces a stream already open; a parse already taken stays taken.
+    public mutating func setMaximumParsesPerSecond(_ rate: Double) {
+        precondition(rate.isFinite && rate > 0)
+        minimumInterval = 1 / rate
     }
 
     public mutating func requestParse() {
