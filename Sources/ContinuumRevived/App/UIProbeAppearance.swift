@@ -1298,11 +1298,10 @@ enum UIProbeAppearance {
         case "ComposerDictationPillView":
             values.insert(hex(AgentSurfaceRole.composer.color.cgColor(for: theme)))
         case "UserPromptView.rule":
-            // A1 (ticket rulings 1, 3): the authorship rule is a LINE role
-            // (`AgentLineRole.authorship`) painted as a FILL because it is drawn
-            // as a plain `NSView` subview, not a border. Same admission shape as
-            // `ProviderModelPickerView`'s indicator/divider above.
-            values.insert(hex(AgentLineRole.authorship.color.cgColor(for: theme)))
+            // The user turn is one full, even tint (the one-sided authorship bar is
+            // gone): the `rule` subview fills the whole row with the `artifact`
+            // SURFACE role, so that is the one background it may paint.
+            values.insert(hex(AgentSurfaceRole.artifact.color.cgColor(for: theme)))
         case "ProviderRailButton", "ChoiceRowView":
             // The rail's interaction ladder mirrors choice rows; the rows are
             // the original owners of it (P4.7). Resting state paints nothing.
