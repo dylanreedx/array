@@ -89,7 +89,12 @@ public struct CollaborationAPI: Sendable {
         if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "authorization") }
         if let epoch { request.setValue(String(epoch), forHTTPHeaderField: "if-match") }
         if let body { let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601; request.httpBody = try encoder.encode(body); request.setValue("application/json", forHTTPHeaderField: "content-type") }
-        let (bytes, response) = try await boundedData(for: request)
+        let started = CollaborationTimeline.now()
+        let (bytes, response): (Data, URLResponse)
+        do { (bytes, response) = try await boundedData(for: request) } catch {
+            CollaborationTimeline.request(method, path, started: started, status: nil); throw error
+        }
+        CollaborationTimeline.request(method, path, started: started, status: (response as? HTTPURLResponse)?.statusCode)
         guard bytes.count <= 8_388_608 else { throw CollaborationClientError.responseTooLarge }
         guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
         let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601

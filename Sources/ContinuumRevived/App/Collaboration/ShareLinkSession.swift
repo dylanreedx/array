@@ -1,6 +1,7 @@
 import AppKit
 import ContinuumRevivedCore
 import ContinuumRevivedCollaborationProtocol
+import ContinuumRevivedCollaborationClient
 
 // Round 2 of .plans/105-collaboration/IN-CANVAS.md: share one agent or a dragged
 // area by link, in place. Nothing here waits on the Collaboration window.
@@ -238,6 +239,7 @@ final class ShareLinkSession {
             return
         }
         let previous = phase
+        CollaborationTimeline.mark("share.copy-pressed", target.origin == .agent ? "agent" : "\(target.items.count) tiles")
         await run {
             if case .live(let stale) = previous {
                 try await self.links.revokeLink(area: stale.area.rawValue, link: stale.id)
@@ -267,6 +269,7 @@ final class ShareLinkSession {
             } else if self.target.isSingleAgent, let tile = self.target.tileIDs.first {
                 // One agent: nothing on this canvas moves and no zone is made.
                 let area = try await self.zones.shareAgent(tile: tile, name: self.zoneName)
+                CollaborationTimeline.mark("share.published")
                 do {
                     link = try await self.links.createShareLink(area: area, slug: self.slug, lifetime: self.lifetime)
                 } catch {
@@ -376,6 +379,7 @@ final class ShareLinkSession {
     private func write(_ link: Collaboration.ShareLink) {
         pasteboard.clearContents()
         copied = pasteboard.setString(link.url.absoluteString, forType: .string)
+        CollaborationTimeline.mark("share.link-copied")
         failure = copied ? nil : "The link could not be copied. Try again."
         onChange?()
     }

@@ -83,11 +83,13 @@ final class ShareLinkCoordinator {
     /// https://arrayapp.dev/s/<slug>#<token>.
     @discardableResult
     func open(_ url: URL) async -> ShareLinkOpenOutcome {
+        CollaborationTimeline.mark("join.link-opened")
         let outcome: ShareLinkOpenOutcome
         do {
             let model = try accountProvider()
             let opener = ShareLinkOpener(account: model, signIn: signIn, askName: askName, open: { [openArea, openAgent, openPortal, openTile] state, model in
                 guard let person = model.activeAccount?.identity.person else { throw CollaborationAccountFailure.notConnected }
+                CollaborationTimeline.mark("join.admitted")
                 let area = state.document.id.rawValue
                 // Mode A: a link to one agent lands as one tile, never a zone.
                 if let openAgent, let item = AppDelegate.sharedAgentItem(in: state.document, me: person) {
