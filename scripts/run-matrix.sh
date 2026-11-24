@@ -2618,6 +2618,9 @@ run_app_check .build/debug/Array --project-icon-check
 # runner and Terminal face never pause it. Stand-in claude on PATH, no tmux.
 run_app_check .build/debug/Array --external-session-watch-check
 run_app_check .build/debug/Array --external-session-move-check
+# Session discovery is event-driven: no pass on an idle Mac, a new session file
+# seen within 1 s, a burst coalesced (the production monitor over a synthetic home).
+run_app_check .build/debug/Array --external-session-fsevents-check
 run_app_check .build/debug/Array --agent-paused-elsewhere-check
 # CX-01: the bundled pi extensions through the REAL pi's own parser. Nothing else
 # in the repo ever asks pi to PARSE these files, which is how a merge-spliced

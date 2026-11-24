@@ -1,14 +1,18 @@
 import AppKit
+import CoreServices
 import ContinuumRevivedCore
 
 // Plan: .plans/79-session-handoff/README.md
 /// Every Claude and Codex session on this Mac, kept current for the sidebar.
 ///
-/// One owner for the whole app. Discovery runs off the main thread every 3s
-/// while Array is frontmost and every 10s when it is not; the main thread only
+/// One owner for the whole app. Discovery runs off the main thread when
+/// FSEvents reports a change under `~/.claude/sessions` or `~/.codex/sessions`
+/// (coalesced, at most one pass per `eventMinGap`), plus a slow safety poll for
+/// missed events. While a Codex CLI runs, its exit and busy window have no file
+/// event, so the old 3s/10s cadence stays until it is gone. The main thread only
 /// compares the result with the last one and, when it changed, tells
-/// `onChange`. Nothing here runs per frame, and an unchanged Mac costs the main
-/// thread one array comparison per tick.
+/// `onChange`. Nothing here runs per frame, and an unchanged Mac costs nothing
+/// between events.
 ///
 /// Inert until `start()`, which only a real launch calls (CLAUDE.md hazard 6):
 /// a check drives it with `publish(_:)` and never touches the real process
@@ -17,6 +21,9 @@ import ContinuumRevivedCore
 final class ExternalSessionMonitor {
     static let activeInterval: TimeInterval = 3
     static let inactiveInterval: TimeInterval = 10
+    /// Safety net for an event FSEvents did not deliver, and for a Claude that
+    /// died without removing its file.
+    static let safetyInterval: TimeInterval = 60
     /// How long a launch's sends wait for the first pass (~150 ms on a real
     /// Mac) before going ahead without it.
     static let firstPassWait: TimeInterval = 2
@@ -36,6 +43,17 @@ final class ExternalSessionMonitor {
     /// Checks only: discovery reads these folders instead of the user's.
     var homeOverride: (home: URL, codexHome: URL)?
 
+    /// Passes started, for the witness.
+    private(set) var passCount = 0
+    /// False falls back to polling at the old cadence (the witness's RED arm).
+    var watchesFilesystem = true
+    /// A pass never starts sooner than this after the last one ended, however
+    /// many events arrive: a streaming Codex rollout must not out-poll 3s.
+    var eventMinGap: TimeInterval = 3
+    private var watcher: SessionFolderWatcher?
+    private var lastPassEnded = Date.distantPast
+    private var eventTimer: Timer?
+
     private let worker = Worker()
     private var timer: Timer?
     private var tickInFlight = false
@@ -45,6 +63,44 @@ final class ExternalSessionMonitor {
         guard !isStarted else { return }
         isStarted = true
         beginAwaitingFirstPass()
+        if watchesFilesystem { startWatching() }
+        tick()
+    }
+
+    private func startWatching() {
+        let home = homeOverride?.home ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        let codexHome = homeOverride?.codexHome ?? ProcessInfo.processInfo.environment["CODEX_HOME"]
+            .flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? home.appendingPathComponent(".codex", isDirectory: true)
+        watcher = SessionFolderWatcher(paths: [
+            home.appendingPathComponent(".claude/sessions", isDirectory: true).path,
+            codexHome.appendingPathComponent("sessions", isDirectory: true).path,
+        ]) { [weak self] in
+            MainActor.assumeIsolated { self?.folderChanged() }
+        }
+    }
+
+    /// An event: pass now if the last pass is old enough, else once it is.
+    private func folderChanged() {
+        guard isStarted, eventTimer == nil, !tickInFlight else {
+            if tickInFlight { eventPending = true }
+            return
+        }
+        let wait = max(0, eventMinGap - Date().timeIntervalSince(lastPassEnded))
+        guard wait > 0 else { fireEventPass(); return }
+        let timer = Timer(timeInterval: wait, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.fireEventPass() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        eventTimer = timer
+    }
+    private var eventPending = false
+
+    private func fireEventPass() {
+        eventTimer?.invalidate()
+        eventTimer = nil
+        timer?.invalidate()
+        timer = nil
         tick()
     }
 
@@ -77,6 +133,9 @@ final class ExternalSessionMonitor {
         isStarted = false
         timer?.invalidate()
         timer = nil
+        eventTimer?.invalidate()
+        eventTimer = nil
+        watcher = nil
     }
 
     /// Replace the snapshot. The production path's last step, and the one a
@@ -102,6 +161,7 @@ final class ExternalSessionMonitor {
     private func tick() {
         guard isStarted, !tickInFlight else { return }
         tickInFlight = true
+        passCount += 1
         let worker = worker
         let panes = arrayShellPanes()
         let home = homeOverride
@@ -116,9 +176,14 @@ final class ExternalSessionMonitor {
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     self.tickInFlight = false
+                    self.lastPassEnded = Date()
                     guard self.isStarted else { return }
                     self.publish(next)
                     self.scheduleNext()
+                    if self.eventPending {
+                        self.eventPending = false
+                        self.folderChanged()
+                    }
                 }
             }
         }
@@ -126,15 +191,52 @@ final class ExternalSessionMonitor {
 
     /// Checks only: one interval whether or not the app is frontmost.
     var qaInterval: TimeInterval?
+    /// Checks only: the polling cadence (not the safety interval).
+    var pollingOverride: TimeInterval?
 
     private func scheduleNext() {
-        let interval = qaInterval ?? (NSApp?.isActive == true ? Self.activeInterval : Self.inactiveInterval)
+        let polling = pollingOverride ?? (NSApp?.isActive == true ? Self.activeInterval : Self.inactiveInterval)
+        // A Codex CLI's exit and busy window leave no file event.
+        let needsPolling = !watchesFilesystem || reportsEveryPass()
+            || snapshot.sessions.contains { $0.provider == .codex }
+        let interval = qaInterval ?? (needsPolling ? polling : Self.safetyInterval)
         let timer = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
         // Common modes: a scroll or a drag in progress must not hold a scan.
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
+    }
+
+    /// FSEvents on the folders discovery reads. The stream's own latency
+    /// coalesces a burst into one callback.
+    private final class SessionFolderWatcher {
+        private var stream: FSEventStreamRef?
+        private let handler: () -> Void
+
+        init(paths: [String], handler: @escaping () -> Void) {
+            self.handler = handler
+            var context = FSEventStreamContext(
+                version: 0, info: Unmanaged.passUnretained(self).toOpaque(), retain: nil, release: nil, copyDescription: nil)
+            let callback: FSEventStreamCallback = { _, info, _, _, _, _ in
+                guard let info else { return }
+                Unmanaged<SessionFolderWatcher>.fromOpaque(info).takeUnretainedValue().handler()
+            }
+            guard let stream = FSEventStreamCreate(
+                nil, callback, &context, paths as CFArray, FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 0.3,
+                FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagWatchRoot)
+            ) else { return }
+            self.stream = stream
+            FSEventStreamSetDispatchQueue(stream, DispatchQueue.main)
+            FSEventStreamStart(stream)
+        }
+
+        deinit {
+            guard let stream else { return }
+            FSEventStreamStop(stream)
+            FSEventStreamInvalidate(stream)
+            FSEventStreamRelease(stream)
+        }
     }
 
     /// The reader and discovery keep caches and are not thread-safe; they only

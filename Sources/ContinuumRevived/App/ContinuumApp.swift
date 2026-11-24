@@ -1206,6 +1206,7 @@ enum ContinuumApp {
         for (flag, leg) in [
             ("--external-session-watch-check", ExternalSessionHandoffChecks.runWatch),
             ("--external-session-move-check", ExternalSessionHandoffChecks.runMove),
+            ("--external-session-fsevents-check", ExternalSessionFSEventsChecks.run),
             ("--agent-paused-elsewhere-check", ExternalSessionHandoffChecks.runPaused),
         ] as [(String, @MainActor (String?) throws -> String)] {
             guard let index = CommandLine.arguments.firstIndex(of: flag) else { continue }
