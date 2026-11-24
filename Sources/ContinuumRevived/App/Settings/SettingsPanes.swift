@@ -304,14 +304,18 @@ private struct SettingsPaneForm: View {
                         AgentCharacterSections(model: model.agentCharacters, settings: model, field: group.rows[0].field)
                     } else {
                         Section {
-                            if let subheading = group.subheading {
-                                SettingsGroupSubheading(text: subheading, learnMore: group.learnMore)
-                            }
                             ForEach(Array(group.rows.enumerated()), id: \.offset) { _, row in
                                 SettingsFieldRow(model: model, row: row)
                             }
                         } header: {
-                            if let title = group.title { Text(title) }
+                            if let title = group.title {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(title)
+                                    if let subheading = group.subheading {
+                                        SettingsGroupSubheading(text: subheading, learnMore: group.learnMore)
+                                    }
+                                }
+                            }
                         } footer: {
                             let _ = model.revision
                             let hint = group.rows.compactMap(\.requires).first { !$0.isMet(in: model.defaults) }?.hint
@@ -343,24 +347,30 @@ private struct SettingsPaneForm: View {
     }
 }
 
-/// What a group is, directly under its title, with an optional docs link.
+/// What a group is, directly under its title; the docs link ends the sentence.
 struct SettingsGroupSubheading: View {
     let text: String
     let learnMore: SettingsLearnMore?
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(text)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            if let learnMore, let url = URL(string: learnMore.url) {
-                Button(learnMore.title) { NSWorkspace.shared.open(url) }
-                    .buttonStyle(.link)
-                    .font(.callout)
-            }
+    private var attributed: AttributedString {
+        var result = AttributedString(text)
+        if let learnMore, URL(string: learnMore.url) != nil,
+           var link = try? AttributedString(markdown: "[\(learnMore.title)](\(learnMore.url))") {
+            link.foregroundColor = .accentColor
+            result.append(AttributedString(" "))
+            result.append(link)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        return result
+    }
+
+    var body: some View {
+        Text(attributed)
+            .font(.callout)
+            .fontWeight(.regular)
+            .textCase(nil)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -526,24 +536,16 @@ private struct SettingsModelPickerRow: View {
 
     var body: some View {
         let items = model.modelPickerItems()
-        let providers = items.filter(\.offered).reduce(into: [String]()) { if !$0.contains($1.provider) { $0.append($1.provider) } }
         let missing = items.first { !$0.offered }
         VStack(alignment: .leading, spacing: 6) {
-            Picker(selection: Binding(get: { model.storedModel }, set: { model.write(.string($0), to: row.field) })) {
-                ForEach(providers, id: \.self) { provider in
-                    Section(provider.isEmpty ? "Models" : provider) {
-                        ForEach(items.filter { $0.offered && $0.provider == provider }) { item in
-                            Text(item.title).tag(item.id)
-                        }
-                    }
-                }
-                if let missing {
-                    Text("\(missing.id) (not offered)").tag(missing.id)
-                }
-            } label: {
+            let selectedTitle = items.first { $0.id == model.storedModel }.map { $0.offered ? $0.title : "\($0.id) (not offered)" }
+                ?? model.storedModel
+            HStack {
                 SettingsRowLabel(title: row.field.label, help: items.isEmpty ? "Waiting for \(model.currentHarness.rawValue) to list its models." : row.help)
+                Spacer()
+                SettingsModelChoice(model: model, field: row.field, items: items)
+                    .frame(width: max(180, ChoiceButton.fittingWidth(forTitle: selectedTitle)), height: ChoiceButton.controlHeight)
             }
-            .pickerStyle(.menu)
             if let missing {
                 Label("\(model.currentHarness.rawValue) does not offer \(missing.id). Choose one of its models.",
                       systemImage: "exclamationmark.triangle.fill")
@@ -552,6 +554,27 @@ private struct SettingsModelPickerRow: View {
                     .accessibilityIdentifier("ArraySettingsModelWarning")
             }
         }
+    }
+}
+
+/// The default model, on Array's shared choice surface, as wide as its title.
+private struct SettingsModelChoice: NSViewRepresentable {
+    let model: SettingsModel
+    let field: SettingsField
+    let items: [SettingsModel.ModelItem]
+
+    func makeNSView(context: Context) -> ChoiceButton {
+        let button = ChoiceButton(title: "Model")
+        button.setAccessibilityLabel("Model")
+        button.setAccessibilityIdentifier("settings.agentModel")
+        return button
+    }
+
+    func updateNSView(_ button: ChoiceButton, context: Context) {
+        button.items = items.map { ChoiceItem(id: $0.id, title: $0.offered ? $0.title : "\($0.id) (not offered)", detail: nil, icon: nil,
+                                              enabled: $0.offered, destructive: false, toolTip: nil) }
+        button.selectedID = model.storedModel
+        button.onSelection = { item in model.write(.string(item.id), to: field) }
     }
 }
 

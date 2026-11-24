@@ -259,7 +259,7 @@ public enum SettingsSchema {
                           subheading: "A lead agent plans the work and hands tasks to helper agents, which show inside its sidebar card.",
                           learnMore: SettingsLearnMore(url: "https://arrayapp.dev/docs/agents#managed-mode"),
                           footer: "Applies to Claude Code and Codex agents. A change takes effect at each agent's next turn, which re-reads its conversation at full price.", rows: [
-                SettingsRow(.toggle(key: AgentManagedModeConfig.enabledKey, label: "Managed mode", default: true),
+                SettingsRow(.toggle(key: AgentManagedModeConfig.enabledKey, label: "Use Managed mode", default: true),
                             help: "Turn off and every agent works on its own.",
                             keywords: ["managed", "lead", "delegate", "helpers", "orchestrate", "opinionated"]),
                 SettingsRow(.number(key: AgentSpawnLimitConfig.maximumActiveChildrenKey, label: "Limit helpers running at once",
