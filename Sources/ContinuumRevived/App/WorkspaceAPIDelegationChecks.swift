@@ -646,10 +646,13 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false, inspectLaunch: 
             // record, left off the launch.
             let retryable = await waitUntil(timeout: 5, pollInterval: 0.02) { staleFailed.map { supervisor.mayRetry($0, from: lead) } ?? false }
             check(retryable, "\(target.rawValue): the stale helper must be retryable")
+            // Read the failed helper's launch count BEFORE the retry: a Claude retry
+            // continues it, and the continued launch is recorded by the call itself.
+            let launchesBeforeRetry = staleFailed.map { effortLaunches[$0]?.count ?? 0 } ?? 0
             if let staleFailed, let retried = childId(delegateEffort(lead, ["task": "stale retry", "retryOf": staleFailed.rawValue.uuidString]), "\(target.rawValue) stale inherited retry") {
                 check(supervisor.records[retried]?.thinking == "xhigh", "\(target.rawValue): the retry must inherit the stale effort, got \(String(describing: supervisor.records[retried]?.thinking))")
                 // A Claude retry continues the same helper: its NEXT launch is the one read.
-                let staleLaunch = retried == staleFailed ? (effortLaunches[retried]?.count ?? 0) + 1 : 1
+                let staleLaunch = retried == staleFailed ? launchesBeforeRetry + 1 : 1
                 if let launch = await settle(retried, launch: staleLaunch, "\(target.rawValue) stale inherited retry") {
                     check(launch.effort == nil && launch.effortArguments.isEmpty,
                           "\(target.rawValue): an inherited stale effort must not reach the CLI; launch effort \(String(describing: launch.effort)), argv effort \(launch.effortArguments)")
