@@ -2921,6 +2921,100 @@ enum FileOpenChecks {
             print("file preview strip: a restore that lands on a parked tile still draws on return")
         }
         try parkedDuringRead()
+        // 10. A Bash step whose command is a long heredoc (no description) must still read its
+        //     real name and command after a restore, not a bare "Tool".
+        func restoredLongBash() throws {
+            let heredoc = "cd /tmp/long-bash-folder && mkdir -p outputs && cat > outputs/report.md <<'EOF'\n# Review Report\n\n## Summary\n\nA short test report.\nEOF\ncat > outputs/page.html <<'EOF'\n<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<title>Welcome</title>\n<style>\n  body { margin: 0; font-family: system-ui, sans-serif; color: #1f2933; }\n  header { background: #2563eb; color: #fff; padding: 32px 24px; }\n</style>\n</head>\n<body><header><h1>Welcome</h1></header></body>\n</html>\nEOF\nls -la outputs"
+            var lines: [String] = []
+            func line(_ object: [String: Any]) {
+                if let data = try? JSONSerialization.data(withJSONObject: object), let text = String(data: data, encoding: .utf8) { lines.append(text) }
+            }
+            line(["type": "user", "timestamp": "2026-11-24T05:41:01.000Z", "message": ["role": "user", "content": "Run a command."]])
+            line(["type": "assistant", "timestamp": "2026-11-24T05:41:02.000Z", "message": ["role": "assistant", "content": [
+                ["type": "tool_use", "id": "toolu_long_1", "name": "Bash", "input": ["command": heredoc]]]]])
+            line(["type": "user", "timestamp": "2026-11-24T05:41:03.000Z", "message": ["role": "user", "content": [
+                ["type": "tool_result", "tool_use_id": "toolu_long_1", "content": "total 0"]]]])
+            line(["type": "assistant", "timestamp": "2026-11-24T05:41:06.000Z", "message": ["role": "assistant", "content": [["type": "text", "text": "Long bash closing text."]]]])
+            let transcript = ClaudeSessionTranscriptReader.parse(lines: lines, threadId: "long-bash-thread")
+            let tile = ManagedAgentTileNSView(tile: Tile(
+                id: UUID(), kind: .managedAgent, title: "long", frame: TileFrame(x: 0, y: 0, width: 760, height: 760),
+                zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata(launchProfileId: "managed")))
+            tile.frame = NSRect(x: 0, y: 0, width: 760, height: 760)
+            let window = NSWindow(contentRect: tile.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = tile
+            window.orderFrontOffscreenForChecks()
+            defer { window.orderOut(nil) }
+            guard let canvas = tile.qaCanvasTranscript else { throw Failure(message: "the restored tile has no drawn transcript") }
+            canvas.bindToolDetailAgent(AgentID(rawValue: UUID()))
+            tile.renderRehydratedPreviousSession(transcript)
+            let settle = Date().addingTimeInterval(20)
+            repeat {
+                tile.layoutSubtreeIfNeeded(); canvas.flushPendingVisualUpdate(); canvas.layoutSubtreeIfNeeded()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            } while (canvas.toolDetail.qaHeldRecordCount < 1 || !canvas.qaLaidOutText.contains("Long bash closing text.")) && Date() < settle
+            let tools = canvas.qaToolCalls
+            let described = tools.map { "\($0.name)|\($0.presentedToolNameText ?? "-")|\($0.presentedShell?.command.prefix(30) ?? "-")|\(($0.summary ?? "-").prefix(30))" }
+            try expect(tools.count == 1 && !tools[0].name.isEmpty && tools[0].name != "Tool" && (tools[0].presentedShell?.command.contains("long-bash-folder") ?? false),
+                       "a restored long Bash step must keep its name and command; held \(canvas.toolDetail.qaHeldRecordCount); tool rows: \(described)")
+            let row = canvas.qaVisibleTextLines.map(\.text).joined(separator: " | ")
+            try expect(row.contains("Bash") || row.contains("long-bash-folder"), "the drawn row must say Bash or its command, drew '\(row.prefix(300))'")
+            print("file preview strip: a restored long Bash step keeps its name and command")
+        }
+        try restoredLongBash()
+        // 11. A Bash step on a tile attached to the supervisor (the path a relaunch takes), then
+        //     parked and returned: its row keeps the real name and command throughout.
+        func attachedBash() throws {
+            var lines: [String] = []
+            func line(_ object: [String: Any]) {
+                if let data = try? JSONSerialization.data(withJSONObject: object), let text = String(data: data, encoding: .utf8) { lines.append(text) }
+            }
+            line(["type": "user", "timestamp": "2026-11-24T05:41:01.000Z", "message": ["role": "user", "content": "Run a command."]])
+            line(["type": "assistant", "timestamp": "2026-11-24T05:41:02.000Z", "message": ["role": "assistant", "content": [
+                ["type": "tool_use", "id": "toolu_att_1", "name": "Bash", "input": ["command": "ls -la attached-folder", "description": "List the attached folder"]]]]])
+            line(["type": "user", "timestamp": "2026-11-24T05:41:03.000Z", "message": ["role": "user", "content": [
+                ["type": "tool_result", "tool_use_id": "toolu_att_1", "content": "total 0"]]]])
+            line(["type": "assistant", "timestamp": "2026-11-24T05:41:06.000Z", "message": ["role": "assistant", "content": [["type": "text", "text": "Attached bash closing text."]]]])
+            let support = tempRoot.appendingPathComponent("attached-bash-support", isDirectory: true)
+            let supervisor = AgentSupervisor(
+                store: AgentStore(applicationSupportDirectory: support),
+                makeRunner: { _ in ScriptedAgentRunner(script: []) },
+                transcriptStore: AgentTranscriptStore(root: support.appendingPathComponent("transcripts", isDirectory: true)))
+            let tile = ManagedAgentTileNSView(tile: Tile(
+                id: UUID(), kind: .managedAgent, title: "attached-bash", frame: TileFrame(x: 0, y: 0, width: 760, height: 760),
+                zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata(launchProfileId: "managed")))
+            tile.frame = NSRect(x: 0, y: 0, width: 760, height: 760)
+            let window = NSWindow(contentRect: tile.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = tile
+            window.orderFrontOffscreenForChecks()
+            defer { tile.detach(); window.orderOut(nil) }
+            let id = supervisor.spawn(role: nil, prompt: nil, cwd: checkout, model: "anthropic/claude-haiku-4-5-20251001", thinking: "low")
+            supervisor.seedRehydratedTranscript(
+                ClaudeSessionTranscriptReader.parse(lines: lines, threadId: tile.qaThreadIdForChecks), for: id)
+            func rows(_ label: String) throws -> String {
+                let deadline = Date().addingTimeInterval(20)
+                while Date() < deadline {
+                    tile.layoutSubtreeIfNeeded()
+                    tile.qaCanvasTranscript?.flushPendingVisualUpdate()
+                    RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+                    if (tile.qaCanvasTranscript?.toolDetail.qaHeldRecordCount ?? 0) >= 1,
+                       tile.qaCanvasTranscript?.qaLaidOutText.contains("Attached bash closing text.") == true { break }
+                }
+                guard let canvas = tile.qaCanvasTranscript else { throw Failure(message: "no drawn transcript") }
+                let tools = canvas.qaToolCalls
+                let described = tools.map { "\($0.name)|\($0.presentedToolNameText ?? "-")|\($0.presentedShell?.command ?? "-")" }
+                try expect(tools.count == 1 && tools[0].name.contains("Bash") || tools.first?.presentedShell?.command.contains("attached-folder") == true
+                           || tools.first?.name.contains("attached") == true,
+                           "\(label): a restored Bash step must keep its name and command; held \(canvas.toolDetail.qaHeldRecordCount); rows \(described)")
+                return described.joined(separator: ";")
+            }
+            tile.attach(agentID: id, supervisor: supervisor)
+            _ = try rows("attached")
+            tile.detach()
+            tile.attach(agentID: id, supervisor: supervisor)
+            _ = try rows("re-attached after a park")
+            print("file preview strip: a Bash step on an attached tile keeps its name and command across a park")
+        }
+        try attachedBash()
         // 9. Follow-ups on a restored transcript: a finished Bash step keeps its name and command,
         //    and a created file's count reads plainly ("+16"), never "≥ +16 −0" or "+4 −?".
         func restoredFollowups() throws {

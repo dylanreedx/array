@@ -291,7 +291,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     var identityStyleDefaults: UserDefaults = .standard {
         didSet { applyIdentityChrome() }
     }
-    private let toolDetailStore = AgentToolDetailStore()
+    private let toolDetailStore: AgentToolDetailStore
     private let managedImageThumbnailPipeline = ComposerImageIOThumbnailPipeline()
     private let managedImageObservers = ManagedImageObservationRegistry()
     private let managedImageProviderID = UUID()
@@ -480,8 +480,10 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         descriptor: AgentDescriptor? = nil,
         providerSettings: AgentModelConfig.Resolution? = nil,
         statusRowPlacement: AgentStatusRowPlacement = .aboveComposer,
-        monotonicNow: @escaping @Sendable () -> TimeInterval = { AgentTranscriptClock.monotonic() }
+        monotonicNow: @escaping @Sendable () -> TimeInterval = { AgentTranscriptClock.monotonic() },
+        toolDetailStore: AgentToolDetailStore = AgentToolDetailStore()
     ) {
+        self.toolDetailStore = toolDetailStore
         let fileIndex = AgentFileIndex()
         // No fixtures. The filter here used to drop `fixture.files` and
         // `fixture.commands` and keep `fixture.skills`, which put two invented
