@@ -58,18 +58,24 @@ enum FileUXTranscriptStills {
                 host.wantsLayer = true
                 host.layer?.backgroundColor = (dark ? NSColor(white: 0.09, alpha: 1) : NSColor(white: 0.97, alpha: 1)).cgColor
                 let ctx = AgentRenderContext(actions: .disabled, tokens: .transcript, appearance: theme)
-                let list = try await makeList(ctx, turns: turns, size: NSSize(width: size.width - 32, height: size.height - 32))
-                list.frame = NSRect(x: 16, y: 16, width: size.width - 32, height: size.height - 32)
-                host.addSubview(list)
-                for _ in 0..<6 {
-                    list.frame.size.width += 1; host.layoutSubtreeIfNeeded()
+                let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                window.contentView = host
+                window.orderFrontOffscreenForChecks()
+                // The default renderer: the drawn transcript.
+                let canvas = try await makeCanvas(ctx, turns: turns, size: NSSize(width: size.width - 32, height: size.height - 32))
+                canvas.frame = NSRect(x: 16, y: 16, width: size.width - 32, height: size.height - 32)
+                host.addSubview(canvas)
+                for _ in 0..<12 {
+                    canvas.flushPendingVisualUpdate(); host.layoutSubtreeIfNeeded()
                     try await Task.sleep(nanoseconds: 250_000_000)
-                    list.frame.size.width -= 1; host.layoutSubtreeIfNeeded()
-                    CATransaction.flush()
                 }
-                if hover, let strip = find(AgentFileStripView.self, in: host, where: { $0.qaThumbCount == 3 }) {
-                    strip.setHovered(1)
-                    CATransaction.flush()
+                if hover, canvas.qaFileThumbs.count >= 3 {
+                    let center = canvas.qaFileThumbs[2].center
+                    let event = NSEvent.mouseEvent(with: .mouseMoved, location: canvas.convert(center, to: nil), modifierFlags: [],
+                                                   timestamp: 0, windowNumber: window.windowNumber, context: nil,
+                                                   eventNumber: 0, clickCount: 0, pressure: 0)!
+                    canvas.mouseMoved(with: event)
+                    try await Task.sleep(nanoseconds: 400_000_000)
                 }
                 guard let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) else { continue }
                 host.cacheDisplay(in: host.bounds, to: rep)
@@ -77,6 +83,42 @@ enum FileUXTranscriptStills {
                     .write(to: dir.appendingPathComponent("strip-\(dark ? "dark" : "light")\(hover ? "-hover" : "").png"))
             }
         }
+    }
+
+    static func makeCanvas(_ ctx: AgentRenderContext, turns: [Turn], size: NSSize) async throws -> AgentTranscriptCanvasView {
+        let store = AgentToolDetailStore()
+        let canvas = AgentTranscriptCanvasView(toolDetailStore: store)
+        canvas.frame = NSRect(origin: .zero, size: size)
+        try canvas.updateRenderContext(ctx)
+        var entries: [AgentEntry] = []
+        for (index, turn) in turns.enumerated() {
+            let thread = "stills-thread-\(index)"
+            var projection = AgentTranscriptProjection(threadId: thread)
+            try projection.appendUserPrompt(id: AgentNodeID(rawValue: "stills-user-\(index)")!, text: turn.prompt)
+            var translator = ClaudeEventTranslator(runToken: "stills\(index)")
+            let line = #"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"\#(turn.reply)"}},"parent_tool_use_id":null}"#
+            for event in translator.translate(stream: [line]) { projection.ingest(event.withThreadId(thread)) }
+            entries += projection.document.entries
+            let scope = AgentToolDetailScope(agentID: "stills-agent", threadID: thread, turnID: "turn-\(index)", provider: "runtime")!
+            let itemID = AgentToolDetailID(stringLiteral: "write-\(index)")
+            let key = AgentToolDetailKey(scope: scope, providerItemID: itemID)
+            _ = await store.recordStart(AgentToolDetailStart(
+                identity: key, toolName: "write", affectedFiles: turn.files.map(\.0),
+                fileChanges: turn.files.map { .init(action: $0.1 == .add ? .add : .write, path: $0.0.lastPathComponent, addedLines: 24, removedLines: 0) }))
+            _ = await store.recordEnd(AgentToolDetailEnd(identity: key, status: .completed))
+            let block = AgentBlock(id: AgentNodeID(rawValue: "stills-diff-\(index)")!, revision: 1, kind: .diff,
+                                   payload: .diff(AgentDiffPayload(text: "", summary: "")))
+            let entry = AgentEntry(id: AgentNodeID(rawValue: "stills-diff-entry-\(index)")!, revision: 1, role: .assistant,
+                                   provenance: .providerItem(provider: "runtime", itemID: itemID.rawValue), blocks: [block])
+            _ = canvas.bindToolDetailIdentity(key, to: entry.id)
+            entries.append(entry)
+        }
+        let document = AgentDocument(version: 1, entries: entries)
+        try canvas.enqueue(document: document, patch: AgentDocumentPatch(
+            fromVersion: 0, toVersion: 1, inserted: document.entries.flatMap(\.blocks).map(\.id)), final: true)
+        await canvas.qaAdoptStoreRecords()
+        await canvas.qaWaitForToolDetailRefresh()
+        return canvas
     }
 
     static func find<T: NSView>(_ type: T.Type, in view: NSView, where match: (T) -> Bool) -> T? {
