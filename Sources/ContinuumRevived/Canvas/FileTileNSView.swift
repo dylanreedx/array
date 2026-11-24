@@ -104,7 +104,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     /// instant and Preview can never drift from Source inside one tile.
     private(set) var loadedText: String?
     private var markdownSurface: MarkdownDocumentSurface?
-    private var modeControl: NSSegmentedControl?
+    private var modeControl: ModeSegmentedControl?
     private var markdownFormatControl: NSPopUpButton?
     private let dirtyLabel = NSTextField(labelWithString: "")
     private let referenceLabel = NSTextField(labelWithString: "")
@@ -1264,16 +1264,15 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
         }
     }
 
-    @objc private func modeControlChanged(_ sender: NSSegmentedControl) {
+    @objc private func modeControlChanged(_ sender: ModeSegmentedControl) {
         setMode(Mode(segmentIndex: sender.selectedSegment) ?? .edit)
     }
 
     private func installModeControl() {
         guard modeControl == nil else { return }
-        let control = NSSegmentedControl(labels: ["Preview", "Split", "Edit"], trackingMode: .selectOne, target: self, action: #selector(modeControlChanged(_:)))
-        control.controlSize = .small
-        control.font = NSFont.systemFont(ofSize: 10, weight: .medium)
-        for segment in 0..<control.segmentCount { control.setWidth(160 / 3, forSegment: segment) }
+        let control = ModeSegmentedControl(labels: ["Preview", "Split", "Edit"], totalWidth: 160)
+        control.target = self
+        control.action = #selector(modeControlChanged(_:))
         control.selectedSegment = mode.segmentIndex
         control.setAccessibilityLabel("Markdown display mode")
         modeControl = control
@@ -1436,7 +1435,7 @@ final class FileTileNSView: TileNSView, NSTextViewDelegate, NSSplitViewDelegate 
     /// QA: the rendered Markdown document, when one is installed.
     var qaMarkdownDocument: FileMarkdownDocumentView? { markdownSurface?.previewView }
     /// QA: the mode control, which must exist for Markdown and never otherwise.
-    var qaModeControl: NSSegmentedControl? { modeControl }
+    var qaModeControl: ModeSegmentedControl? { modeControl }
     var qaSourceLanguage: FilePreview.SourceLanguage { sourceLanguage }
     var qaHasLineNumbers: Bool { scrollView.rulersVisible && scrollView.verticalRulerView === lineNumberRuler }
     var qaCodeEditorVisible: Bool {

@@ -17,7 +17,7 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
     let noteId: UUID
     private(set) var mode: Mode = .edit
     private var markdownSurface: MarkdownDocumentSurface!
-    private var modeControl: NSSegmentedControl?
+    private var modeControl: ModeSegmentedControl?
     private let saveStateLabel = NSTextField(labelWithString: "Saved")
     private var activeBody: NSView?
     private(set) var saveState: SaveState = .saved
@@ -126,15 +126,14 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
         surfaceEpoch &+= 1
     }
 
-    @objc private func modeChanged(_ sender: NSSegmentedControl) {
+    @objc private func modeChanged(_ sender: ModeSegmentedControl) {
         setMode(Mode(segmentIndex: sender.selectedSegment) ?? .edit)
     }
 
     private func installModeControl() {
-        let control = NSSegmentedControl(labels: ["Preview", "Split", "Edit"], trackingMode: .selectOne, target: self, action: #selector(modeChanged(_:)))
-        control.controlSize = .small
-        control.font = NSFont.systemFont(ofSize: 10, weight: .medium)
-        for segment in 0..<control.segmentCount { control.setWidth(160 / 3, forSegment: segment) }
+        let control = ModeSegmentedControl(labels: ["Preview", "Split", "Edit"], totalWidth: 160)
+        control.target = self
+        control.action = #selector(modeChanged(_:))
         control.selectedSegment = mode.segmentIndex
         control.setAccessibilityLabel("Note Markdown display mode")
         modeControl = control
@@ -222,7 +221,7 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
     override var surfaceScrollOffsets: [CGPoint] { markdownSurface?.visibleScrollOrigins ?? [] }
 
     /// QA access to the real title-bar control.
-    var qaModeControl: NSSegmentedControl? { modeControl }
+    var qaModeControl: ModeSegmentedControl? { modeControl }
 
     // MARK: - Export (A4)
 
