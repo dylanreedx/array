@@ -45,7 +45,7 @@ enum SidebarHoverTextChecks {
 
     private static func runOne(layout: SidebarLayout, appearance: NSAppearance.Name, snapshotDirectory: URL?) async throws {
         let tag = "\(layout.rawValue)/\(appearance == .aqua ? "light" : "dark")"
-        let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 300, height: 400))
+        let inbox = AgentInboxView(frame: NSRect(x: 0, y: 0, width: 360, height: 400))
         inbox.prefersReducedMotion = { true }
         inbox.hoverCardEnabled = false
         inbox.onRevealRow = { _ in }

@@ -41,10 +41,10 @@ enum ExternalSessionsSidebarChecks {
         let monitor = delegate.externalSessionMonitor
         try expect(!monitor.isStarted, "the monitor must be inert in a check until something drives it (hazard 6)")
 
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 340, height: 1240),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 1240),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.appearance = NSAppearance(named: .darkAqua)
-        let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 340, height: 1240))
+        let sidebar = WorkspaceSidebarView(frame: NSRect(x: 0, y: 0, width: 400, height: 1240))
         window.contentView = sidebar
         window.orderFrontOffscreenForChecks()
         defer { window.orderOut(nil) }
