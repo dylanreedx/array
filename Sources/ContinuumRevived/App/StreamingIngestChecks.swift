@@ -46,12 +46,18 @@ enum StreamingIngestChecks {
             governor.qaSetInteraction(nil)
             return (count, view)
         }
+        try expect(ManagedAgentTileNSView.cameraMotionParsesPerSecond == ManagedAgentTileNSView.viewParsesPerSecond,
+                   "the shipped camera-motion parse rate must equal the view rate (the throttle ships off)")
         let still = parses(moving: false, thread: "still").count
-        let moving = parses(moving: true, thread: "moving").count
-        try expect(moving <= Int(ManagedAgentTileNSView.cameraMotionParsesPerSecond) + 3,
-                   "a visible stream parsed \(moving) times in 1 s while the camera moved; at most \(Int(ManagedAgentTileNSView.cameraMotionParsesPerSecond) + 3)")
-        try expect(still >= moving * 2, "at rest it must parse at the view rate: \(still) at rest vs \(moving) in motion")
-        print("streaming ingest: a visible stream parsed \(still)x/s at rest and \(moving)x/s while the camera moved")
+        let shipped = parses(moving: true, thread: "shipped").count
+        try expect(shipped * 10 >= still * 7, "shipped default slowed a visible stream: \(shipped) in motion vs \(still) at rest")
+        let shippedRate = ManagedAgentTileNSView.cameraMotionParsesPerSecond
+        ManagedAgentTileNSView.cameraMotionParsesPerSecond = 10
+        defer { ManagedAgentTileNSView.cameraMotionParsesPerSecond = shippedRate }
+        let throttled = parses(moving: true, thread: "moving").count
+        try expect(throttled <= 13, "the mechanism at 10 Hz parsed \(throttled) times in 1 s while the camera moved")
+        try expect(still >= throttled * 2, "at rest it must parse at the view rate: \(still) at rest vs \(throttled) throttled")
+        print("streaming ingest: shipped off (\(shipped)x/s moving, \(still)x/s at rest); mechanism at 10 Hz gave \(throttled)x/s")
     }
 
     /// The supervisor's transcript is persisted and previewed, never drawn, yet it

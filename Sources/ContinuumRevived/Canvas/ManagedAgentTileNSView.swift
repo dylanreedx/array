@@ -5160,7 +5160,9 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     private var chunkStatusTimer: Timer?
     private var chunkSnapshotRefreshPending = false
     static let viewParsesPerSecond: Double = 30
-    static let cameraMotionParsesPerSecond: Double = 10
+    /// Off by default (same as at rest): a visible stream is never slowed. The
+    /// mechanism is witnessed at 10 Hz, pending a clean A/B on a quiet Mac.
+    nonisolated(unsafe) static var cameraMotionParsesPerSecond: Double = 30
     /// QA: turn-snapshot refreshes, however they were triggered.
     private(set) var qaTurnSnapshotRefreshCount = 0
     /// QA: status-row refreshes, however they were triggered.
