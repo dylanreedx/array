@@ -341,6 +341,19 @@ enum ManagedLeadPlanChecks {
         view.window?.orderFrontOffscreenForChecks()
         view.open()
         try expect(view.isOpen, "the plan did not open")
+        // The popover closes itself when its window loses key or the app goes
+        // inactive, which any other app or check running alongside can cause.
+        // That is focus, not the stream: reopen and carry on. Any other close
+        // (a repaint dropping the plan, its anchor moving) is the failure.
+        func streamClosedPlan() -> String? {
+            guard !view.isOpen else { return nil }
+            let reason = view.popover.qaLastSelfDismissal
+            if reason == "resignKey" || reason == "resignActive" {
+                view.window?.orderFrontOffscreenForChecks(); view.open()
+                return view.isOpen ? nil : "could not reopen after \(reason!)"
+            }
+            return reason ?? "closed by the plan itself"
+        }
         let settled = rows(view.presentation)
         let settledHeight = view.intrinsicContentSize.height
         let order = view.presentation?.steps.compactMap(\.ownerAgent) ?? []
@@ -387,7 +400,7 @@ enum ManagedLeadPlanChecks {
         if view.presentation?.steps.compactMap(\.ownerAgent) != order { failures.append("row order changed") }
         // 3. Height holds; repaints bounded by a steady cadence, not per event.
         if heightChanges > 0 || view.intrinsicContentSize.height != settledHeight { failures.append("height changed \(heightChanges)x during the burst") }
-        if !view.isOpen { failures.append("the burst closed the open plan") }
+        if let closed = streamClosedPlan() { failures.append("the burst closed the open plan (\(closed))") }
         let cadenceBound = Int((burstSeconds / AgentSupervisor.leadPlanActivityCadence).rounded(.up)) + 3
         if trace.count > cadenceBound { failures.append("drawer changed \(trace.count)x for 120 events (bound \(cadenceBound))") }
         if notifications > cadenceBound { failures.append("drawer recomputed \(notifications)x for 120 events (bound \(cadenceBound))") }
@@ -422,6 +435,7 @@ enum ManagedLeadPlanChecks {
         try expect(after.filter(\.isSection).map(\.title) == ["Working", "Done"], "sections after a finish: \(rows(view.presentation))\n\(dump())")
         try expect(after.compactMap(\.ownerAgent) == order.filter { $0 != done } + [done], "a finish reordered the others: \(rows(view.presentation))")
         try expect(heightChanges <= 1 && trace.count <= 2, "a finish took \(trace.count) changes / \(heightChanges) height changes\n\(dump())")
+        if let closed = streamClosedPlan() { throw WorkspaceAgentReportChecks.Failure(description: "lead-plan: the finish closed the open plan (\(closed))") }
         let ownerAfter = ownerCell(helpers[0])
         try expect(ownerAfter.minX == ownerBefore.minX && ownerAfter.width == ownerBefore.width,
                    "the owner column shifted when a row gained an age: \(ownerBefore) -> \(ownerAfter)")
