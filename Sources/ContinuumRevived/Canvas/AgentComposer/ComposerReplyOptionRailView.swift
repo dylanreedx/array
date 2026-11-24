@@ -25,10 +25,17 @@ final class ComposerReplyOptionRailView: NSView, TokenThemed, AgentPageZoomScala
         CGFloat(zoom.scaled(34))
     }
 
+    /// The plan drawer's rail: shorter chips, and the first answer is the
+    /// primary one (tinted). The composer's own rail leaves this off.
+    static func compactRailHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(30)) }
+    var compact = false {
+        didSet { if compact != oldValue { rebuild(); invalidateIntrinsicContentSize() } }
+    }
+
     private(set) var pageZoom: AgentPageZoom = .default
 
     /// This rail's reserved height at its own zoom.
-    var railHeight: CGFloat { Self.railHeight(zoom: pageZoom) }
+    var railHeight: CGFloat { compact ? Self.compactRailHeight(zoom: pageZoom) : Self.railHeight(zoom: pageZoom) }
 
     private let scrollView = NSScrollView(frame: .zero)
     private var scrollConstraints: [NSLayoutConstraint] = []
@@ -95,10 +102,10 @@ final class ComposerReplyOptionRailView: NSView, TokenThemed, AgentPageZoomScala
                 stack.addArrangedSubview(chip)
             }
         }
-        for option in newOptions {
+        for (i, option) in newOptions.enumerated() {
             // A chip minted after a zoom apply is born scaled: the rail's own
             // rung is handed to the initializer.
-            let chip = ComposerReplyOptionChipButton(option: option, zoom: pageZoom)
+            let chip = ComposerReplyOptionChipButton(option: option, zoom: pageZoom, style: !compact ? .standard : (i == 0 ? .primary : .compact))
             chip.target = self
             chip.action = #selector(chipPressed(_:))
             chip.applyTokens(theme: theme)
@@ -250,8 +257,11 @@ final class ComposerReplyOptionChipButton: NSButton {
     private var theme: TokenTheme = .dark
     private var tracking: NSTrackingArea?
     private(set) var pageZoom: AgentPageZoom
+    enum Style { case standard, compact, primary }
+    let style: Style
 
-    init(option: AgentReplyOption, zoom: AgentPageZoom = .default) {
+    init(option: AgentReplyOption, zoom: AgentPageZoom = .default, style: Style = .standard) {
+        self.style = style
         optionValue = option.label
         pageZoom = zoom
         super.init(frame: .zero)
@@ -285,7 +295,7 @@ final class ComposerReplyOptionChipButton: NSButton {
     override var intrinsicContentSize: NSSize {
         var size = super.intrinsicContentSize
         size.width += CGFloat(pageZoom.scaled(Space.m)) * 2
-        size.height = CGFloat(pageZoom.scaled(26))
+        size.height = CGFloat(pageZoom.scaled(style == .standard ? 26 : 22))
         return size
     }
 
@@ -330,6 +340,18 @@ final class ComposerReplyOptionChipButton: NSButton {
     private func applyFill() {
         // Option order is the reply's own order, not recommendation semantics:
         // every idle chip is equally emphasized and hover alone lifts the fill.
+        if style == .primary {
+            // The plan drawer's lead answer: the working tint, a shade deeper on hover.
+            let tint = AccentToken.accentWorking.color.nsColor(for: theme)
+            layer?.backgroundColor = tint.withAlphaComponent(hovered ? 0.28 : 0.18).cgColor
+            attributedTitle = NSAttributedString(string: optionValue, attributes: [
+                .font: font ?? NSFont.token(.caption, zoom: pageZoom), .foregroundColor: tint])
+            return
+        }
+        if style == .compact {
+            attributedTitle = NSAttributedString(string: optionValue, attributes: [
+                .font: font ?? NSFont.token(.caption, zoom: pageZoom), .foregroundColor: TextToken.textPrimary.color.nsColor(for: theme)])
+        }
         let surface = hovered ? AgentSurfaceRole.rowSelected.color : SurfaceToken.overlay.color
         layer?.backgroundColor = surface.cgColor(for: theme)
     }

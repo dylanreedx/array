@@ -122,6 +122,7 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         chevron.setAccessibilityElement(false)
         addSubview(chevron)
         optionRail.translatesAutoresizingMaskIntoConstraints = true
+        optionRail.compact = true
         optionRail.isHidden = true
         optionRail.onSelect = { [weak self] answer in self?.onChoose?(answer) }
         addSubview(optionRail)
@@ -216,7 +217,8 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
 
     // MARK: Layout
 
-    enum Ink: Equatable { case primary, secondary, accent(AccentToken) }
+    /// `pill`: live work only. The word is drawn on a tinted capsule.
+    enum Ink: Equatable { case primary, secondary, accent(AccentToken), pill(AccentToken) }
     enum Glyph: Equatable { case none, dot(AccentToken), ring(Bool) }
     struct DrawerRow: Equatable {
         var glyph: Glyph = .none
@@ -301,9 +303,9 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         var ended: TimeInterval?
         if case .helpers(let hs) = step.owner { ended = hs.compactMap(\.endedAgo).min() }
         switch p {
-        case .needsYou: return ("Needs you", .accent(.accentApproval))
+        case .needsYou: return ("Needs you", .pill(.accentApproval))
         case .failed: return (["Failed", ageText(ended)].compactMap { $0 }.joined(separator: " · "), .accent(.accentFailed))
-        case .working: return ("Running", .accent(.accentWorking))
+        case .working: return ("Running", .pill(.accentWorking))
         case .idle: return ("Idle", .secondary)
         case .done: return (["Done", ageText(ended)].compactMap { $0 }.joined(separator: " · "), .secondary)
         case .todo:
@@ -370,7 +372,7 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         var out: [(String, Ink)] = [(m.steps.isEmpty ? "Helpers" : "Plan · \(done) of \(m.steps.count) done", .secondary)]
         let attention = attentionCount(m)
         // Open, the decision is its own row; the header only counts it.
-        if let d = m.decision, m.collapsed { out.append((" · Needs you: \(d)", .accent(.accentApproval))) }
+        if let d = m.decision, m.collapsed { out += [(" · ", .secondary), ("Needs you", .pill(.accentApproval)), (": \(d)", .accent(.accentApproval))] }
         else if attention > 0 { out.append((" · \(attention) need\(attention == 1 ? "s" : "") you", .accent(.accentApproval))) }
         return out
     }
@@ -389,12 +391,16 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         if m.collapsed, !m.steps.isEmpty { header.track = phases; header.text[0].0 = "\(phases.filter { $0 == .done }.count) of \(m.steps.count) done" }
         if m.collapsed, m.decision == nil, let c = current(m) {
             let (word, ink) = stateWord(phases[c], step: m.steps[c])
-            header.text.append((" · " + (word.map { "\($0): " } ?? "Next: ") + m.steps[c].title,
-                                isAttention(phases[c]) ? ink : .secondary))
+            if case .pill = ink, let word {
+                header.text += [(" · ", .secondary), (word, ink), (": " + m.steps[c].title, .secondary)]
+            } else {
+                header.text.append((" · " + (word.map { "\($0): " } ?? "Next: ") + m.steps[c].title,
+                                    isAttention(phases[c]) ? ink : .secondary))
+            }
         }
         if !m.collapsed {
             if let d = m.decision {
-                rows.append(DrawerRow(glyph: .dot(.accentApproval), title: d, owner: "Lead", state: "Needs you", stateInk: .accent(.accentApproval)))
+                rows.append(DrawerRow(glyph: .dot(.accentApproval), title: d, owner: "Lead", state: "Needs you", stateInk: .pill(.accentApproval)))
                 if !m.options.isEmpty { railAfter = rows.count }
             }
             for h in attention.prefix(2) { rows.append(strayRow(h)) }
@@ -405,7 +411,7 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
             if let fold = foldText(folded) { rows.append(DrawerRow(lead: "", title: fold, titleInk: .secondary)) }
         }
         let leadColumn: CGFloat = 18
-        let railHeight = railAfter == nil ? 0 : ComposerReplyOptionRailView.railHeight(zoom: zoom)
+        let railHeight = railAfter == nil ? 0 : ComposerReplyOptionRailView.compactRailHeight(zoom: zoom)
         let height = 32 * z + CGFloat(rows.count) * 22 * z + railHeight + (rows.isEmpty ? 0 : 6 * z)
         let railY = railAfter.map { 32 * z + CGFloat($0) * 22 * z }
         return DrawerLayout(header: header, rows: rows, railAfter: railAfter, railY: railY, height: height, leadColumn: leadColumn * z)
@@ -418,7 +424,7 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         switch ink {
         case .primary: return TextToken.textPrimary.color.nsColor(for: theme)
         case .secondary: return TextToken.textSecondary.color.nsColor(for: theme)
-        case .accent(let a): return a.color.nsColor(for: theme)
+        case .accent(let a), .pill(let a): return a.color.nsColor(for: theme)
         }
     }
     /// Text on a row's midline: the baseline sits half a cap height below
@@ -447,6 +453,19 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         let value = NSLayoutManager().defaultBaselineOffset(for: font)
         baselineOffsets[font.pointSize] = value
         return value
+    }
+    /// A word on a tinted capsule: a full, even shape, one tint per live state.
+    /// Returns the width taken, padding included.
+    @discardableResult
+    private func pill(_ s: String, _ token: AccentToken, x: CGFloat, midY: CGFloat, maxX: CGFloat) -> CGFloat {
+        let z = CGFloat(zoom.factor)
+        let pad = 7 * z, h = 16 * z
+        let w = min(width(s), max(0, maxX - x - 2 * pad)) + 2 * pad
+        let r = NSRect(x: x, y: midY - h / 2, width: w, height: h)
+        token.color.nsColor(for: effectiveTokenTheme).withAlphaComponent(0.16).setFill()
+        NSBezierPath(roundedRect: r, xRadius: h / 2, yRadius: h / 2).fill()
+        line(s, x: x + pad, midY: midY, maxX: x + w - pad, ink: .accent(token))
+        return w
     }
     private func width(_ s: String) -> CGFloat {
         ceil((s as NSString).size(withAttributes: [.font: NSFont.token(.label, zoom: zoom)]).width)
@@ -496,7 +515,11 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
             x += n * (cell + 2 * z) + 8 * z
         }
         for (s, ink) in layout.header.text {
-            x += line(s, x: x, midY: headerMid, maxX: headerMax - 12 * z, ink: ink)
+            if case .pill(let token) = ink {
+                x += pill(s, token, x: x, midY: headerMid, maxX: headerMax - 12 * z)
+            } else {
+                x += line(s, x: x, midY: headerMid, maxX: headerMax - 12 * z, ink: ink)
+            }
         }
 
         let glyphX = inset + 3 * z
@@ -511,7 +534,13 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
             }
             var right = bounds.width - inset
             if let state = row.state {
-                line(state, x: right - min(width(state), 140 * z), midY: mid, maxX: right, ink: row.stateInk, alignRight: true)
+                if case .pill(let token) = row.stateInk {
+                    let w = min(width(state), 140 * z) + 14 * z
+                    pill(state, token, x: right - w, midY: mid, maxX: right)
+                } else {
+                    // Same right edge as a pill's text, so the column holds.
+                    line(state, x: right - 7 * z - min(width(state), 140 * z), midY: mid, maxX: right - 7 * z, ink: row.stateInk, alignRight: true)
+                }
             }
             // A fixed state column, so owners line up whether or not a row has a state.
             if row.owner != nil { right -= Self.stateColumn * z + 12 * z }
