@@ -544,7 +544,9 @@ private struct SettingsModelPickerRow: View {
                 SettingsRowLabel(title: row.field.label, help: items.isEmpty ? "Waiting for \(model.currentHarness.rawValue) to list its models." : row.help)
                 Spacer()
                 SettingsModelChoice(model: model, field: row.field, items: items)
-                    .frame(width: max(180, ChoiceButton.fittingWidth(forTitle: selectedTitle)), height: ChoiceButton.controlHeight)
+                    .frame(width: ChoiceButton.fittingWidth(forTitle: selectedTitle), height: ChoiceButton.controlHeight)
+                    // The button's own inset would pull its chevron in from the row's trailing edge.
+                    .padding(.trailing, -ChoiceButton.horizontalPadding(zoom: .default))
             }
             if let missing {
                 Label("\(model.currentHarness.rawValue) does not offer \(missing.id). Choose one of its models.",
@@ -567,6 +569,7 @@ private struct SettingsModelChoice: NSViewRepresentable {
         let button = ChoiceButton(title: "Model")
         button.setAccessibilityLabel("Model")
         button.setAccessibilityIdentifier("settings.agentModel")
+        button.restingFillsComposer = false
         return button
     }
 

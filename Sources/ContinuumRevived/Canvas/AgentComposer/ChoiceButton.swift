@@ -64,6 +64,8 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
         didSet { updatePresentation() }
     }
     var onSelection: ((ChoiceItem) -> Void)?
+    /// Whether the button rests on the composer fill. Off paints nothing at rest.
+    var restingFillsComposer = true
     /// A checklist row's accessory (`Only`, `…`) was pressed.
     var onAccessory: ((ChoiceItem, String) -> Void)?
     /// The focused row of the open list changed; nil when the pointer leaves it.
@@ -294,10 +296,10 @@ class ChoiceButton: NSControl, TokenThemed, AgentPageZoomScalable {
         leadingIcon.contentTintColor = BrandMark96.foreground(in: self)
         let focused = window?.firstResponder === self
         let accented = focused || presentedPopoverIsVisible
-        let background: TokenColor = (isHovered || presentedPopoverIsVisible)
-            ? AgentSurfaceRole.rowHover.color
-            : AgentSurfaceRole.composer.color
-        layer?.backgroundColor = background.cgColor(for: theme)
+        let engaged = isHovered || presentedPopoverIsVisible
+        let background: TokenColor = engaged ? AgentSurfaceRole.rowHover.color : AgentSurfaceRole.composer.color
+        // A button on a card (Settings) paints nothing at rest; the composer keeps its fill.
+        layer?.backgroundColor = (engaged || restingFillsComposer) ? background.cgColor(for: theme) : nil
         swatchStack.ringColour = background.nsColor(for: theme)
         layer?.borderWidth = accented ? Self.focusBorderWidth : 0
         layer?.borderColor = AgentLineRole.focusRing.color.cgColor(for: theme)
