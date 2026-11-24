@@ -3390,8 +3390,14 @@ private final class TitleBarView: NSView, TokenThemed, AgentCharacterRevisiting 
         let height = closeButtonWorldSize
         // Icon only, square, like the Terminal switch beside it.
         let width = height
-        let edge = agentStatus.flatMap { statusPillRect(for: $0, theme: theme)?.minX }
+        var edge = agentStatus.flatMap { statusPillRect(for: $0, theme: theme)?.minX }
             ?? min(qaDragHandleLeadingX, leadingBandControlX)
+        // A tile with a header accessory (a note's mode switch) keeps it whole:
+        // Share goes to its left, and gives way when there is no room.
+        if let accessory = accessoryView, !accessory.isHidden {
+            let accessoryTrailing = bounds.width - (Self.closeButtonTrailingInset + TileNSView.closeButtonSize + 34)
+            edge = min(edge, accessoryTrailing - max(160, accessory.fittingSize.width))
+        }
         let x = edge - gap - width
         control.isHidden = x - gap < titleLeadingX + Self.titleMinimumWidth * scale
         guard !control.isHidden else { return }

@@ -315,6 +315,29 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
         try expect(note.mode == .edit, "clicking Edit installs Edit")
         try type("e")
         try expect(saved == "abcde", "typing after Split → Edit reaches the saved text; saved \(saved.debugDescription)")
+
+        // Preview and back puts the caret where it was.
+        note.textView.setSelectedRange(NSRange(location: 2, length: 0))
+        try click(control, at: 1.0 / 6.0)
+        try expect(note.mode == .preview, "clicking Preview installs Preview")
+        try click(control, at: 5.0 / 6.0)
+        try expect(note.mode == .edit && note.textView.selectedRange() == NSRange(location: 2, length: 0),
+                   "Preview then Edit restores the caret; selection \(note.textView.selectedRange())")
+
+        // The title-bar Share button never sits over the mode control.
+        note.setTitleBarShareAction(true)
+        var shownAtSomeWidth = false
+        for width in [900, 760, 640, 560, 480] as [CGFloat] {
+            note.frame = NSRect(x: 40, y: 40, width: width, height: 300)
+            settle()
+            note.layoutSubtreeIfNeeded()
+            guard let share = note.qaTitleBarShareControl else { continue }
+            shownAtSomeWidth = true
+            let shareRect = note.convert(share.bounds, from: share)
+            let modeRect = note.convert(control.bounds, from: control)
+            try expect(!shareRect.intersects(modeRect), "at width \(width) the Share button \(shareRect) overlaps the mode control \(modeRect)")
+        }
+        try expect(shownAtSomeWidth, "the Share button must be visible at the widest width, or this proves nothing")
     }
 
     static func runNoteClickFocusSelfCheck() throws -> URL {
