@@ -2032,26 +2032,14 @@ enum ContinuumApp {
             NSApp.run()
             return
         }
-        // Plan drawer design round: every direction, light and dark, as PNGs in <dir>.
-        if let index = CommandLine.arguments.firstIndex(of: "--lead-plan-drawer-render") {
+        // The lead's plan line and popover in a real lead tile, light and dark, as PNGs in <dir>.
+        if let index = CommandLine.arguments.firstIndex(of: "--lead-plan-popover-render") {
             setbuf(stdout, nil)
             _ = NSApplication.shared
             let next = CommandLine.arguments.indices.contains(index + 1) ? CommandLine.arguments[index + 1] : nil
-            let directory = URL(fileURLWithPath: next.flatMap { $0.hasPrefix("-") ? nil : $0 } ?? NSTemporaryDirectory() + "plan-drawer-redesign")
+            let directory = URL(fileURLWithPath: next.flatMap { $0.hasPrefix("-") ? nil : $0 } ?? NSTemporaryDirectory() + "lead-plan-popover")
             Task { @MainActor in
-                do { try LeadPlanDrawerRender.render(to: directory); Foundation.exit(0) }
-                catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
-            }
-            NSApp.run()
-        }
-        // Plan UI rethink: four concepts in a real lead tile, light and dark, as PNGs in <dir>.
-        if let index = CommandLine.arguments.firstIndex(of: "--lead-plan-concepts-render") {
-            setbuf(stdout, nil)
-            _ = NSApplication.shared
-            let next = CommandLine.arguments.indices.contains(index + 1) ? CommandLine.arguments[index + 1] : nil
-            let directory = URL(fileURLWithPath: next.flatMap { $0.hasPrefix("-") ? nil : $0 } ?? NSTemporaryDirectory() + "plan-ui-rethink")
-            Task { @MainActor in
-                do { try await LeadPlanConceptsRender.render(to: directory); Foundation.exit(0) }
+                do { try await LeadPlanPopoverRender.render(to: directory); Foundation.exit(0) }
                 catch { fputs("FAIL: \(error)\n", stderr); Foundation.exit(1) }
             }
             NSApp.run()
@@ -2817,6 +2805,22 @@ enum ContinuumApp {
             Task { @MainActor in
                 do {
                     try await ManagedLeadPlanChecks.runModel()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+        // The plan line opens and closes its popover on a click, counts what
+        // needs the user exactly as the popover marks it, and a helper's row
+        // reveals that helper (2026-11-23).
+        if CommandLine.arguments.contains("--lead-plan-popover-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await ManagedLeadPlanChecks.runPopover()
                     Foundation.exit(0)
                 } catch {
                     fputs("FAIL: \(error)\n", stderr)

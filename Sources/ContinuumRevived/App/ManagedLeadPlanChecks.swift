@@ -57,11 +57,8 @@ enum ManagedLeadPlanChecks {
         try expect(view.presentation?.steps.map(\.state) == [.done, .running, .failed, .needsYou, .waiting], "incorrect live step states: \(String(describing: view.presentation))")
         try expect(view.presentation?.steps[1].owner == "\(supervisor.records[helper]!.humanDisplayName) · Fixture", "helper name/model missing")
         try expect(supervisor.records[lead]?.declaredStatus?.plan?[1].owner == helper.rawValue.uuidString, "helper name did not resolve to stable ID")
-        try expect(view.chevron.superview === view && view.chevron.image != nil, "disclosure must be an image view")
-        let expandedImage = view.chevron.image
-        try expect(view.accessibilityPerformPress() && view.presentation?.collapsed == true, "header did not collapse")
+        try expect(supervisor.setLeadPlanCollapsed(true, for: lead) && view.presentation?.collapsed == true, "plan did not collapse")
         try expect(view.presentation?.header == "Plan · 1 of 5 done · Needs you: Choose error copy", "collapsed urgency/order incorrect")
-        try expect(view.chevron.image !== expandedImage, "chevron did not change with disclosure")
         try await call(config, "array_status", ["now": "Still reviewing"])
         try expect(view.presentation?.steps.count == 5, "ordinary status erased plan")
 
@@ -85,8 +82,8 @@ enum ManagedLeadPlanChecks {
                     .write(to: stillsDir.appendingPathComponent("\(name)-\(label).png"))
             }
         }
-        _ = view.accessibilityPerformPress()
-        try expect(view.presentation?.collapsed == false, "drawer did not expand for roster checks")
+        _ = supervisor.setLeadPlanCollapsed(false, for: lead)
+        try expect(view.presentation?.collapsed == false, "plan did not expand for roster checks")
         try expect(view.presentation?.steps.contains { $0.isSection } == false,
                    "a plan that names every helper must not repeat them as a roster")
         try still("1-plan-up-to-date")
@@ -112,31 +109,9 @@ enum ManagedLeadPlanChecks {
         }
         try still("2-roster-live")
 
-        // B. Clicking an owner reveals that helper, through the real event path.
-        guard let layout = view.drawerLayout, let helperIndex = layout.rows.firstIndex(where: { $0.ownerAgent == helper }) else {
-            throw WorkspaceAgentReportChecks.Failure(description: "lead-plan: no drawer row for the helper")
-        }
-        guard let hostWindow = view.window else { throw WorkspaceAgentReportChecks.Failure(description: "lead-plan: drawer has no window") }
-        let ownerRect = view.drawerRowRect(helperIndex, in: layout)
-        let owner = view.convert(NSPoint(x: ownerRect.maxX - 70, y: ownerRect.midY), to: nil)
-        var revealed: [AgentID] = []
-        let originalReveal = tile.onRevealAgent
-        tile.onRevealAgent = { id, parent in revealed.append(id); originalReveal?(id, parent) }
-        func click(at point: NSPoint) {
-            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-                if let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
-                                                  timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: hostWindow.windowNumber,
-                                                  context: nil, eventNumber: 1, clickCount: 1, pressure: 1) { NSApp.sendEvent(event) }
-            }
-        }
-        hostWindow.orderFrontOffscreenForChecks()
-        click(at: owner)
-        try expect(revealed == [helper], "clicking the owner did not ask to reveal that helper: \(revealed); hit=\(String(describing: hostWindow.contentView?.hitTest(hostWindow.contentView!.convert(owner, from: nil))).prefix(120)) visible=\(hostWindow.isVisible) viewFrame=\(view.frame) inWin=\(owner) ownerRect=\(ownerRect) tile.onReveal=\(originalReveal != nil)")
-        let titleCell = view.convert(NSPoint(x: 40, y: view.drawerRowRect(helperIndex, in: layout).midY), to: nil)
-        click(at: titleCell)
-        try expect(revealed == [helper], "clicking a title must not reveal a helper")
+        // B. Revealing a helper from its row is `--lead-plan-popover-check`'s;
+        // here, the app can reveal that helper's tile.
         try expect(b.f.delegate.revealAgentFromInbox(helper.rawValue), "the app could not reveal that helper's tile")
-        tile.onRevealAgent = originalReveal
 
         // A. A plan nobody has touched for three days says so, and an ordinary status does not reset it.
         let threeDaysAgo = Date().addingTimeInterval(-3 * 86400)
@@ -159,22 +134,24 @@ enum ManagedLeadPlanChecks {
                                                 "options": ["Short and blunt", "Long and kind"]])
         try expect(view.presentation?.decision == "Which error copy ships?" && view.presentation?.options == ["Short and blunt", "Long and kind"],
                    "decision did not reach the drawer")
-        try expect(view.optionRail.qaOptions == ["Short and blunt", "Long and kind"] && !view.optionRail.isHidden, "chips not shown")
+        view.window?.orderFrontOffscreenForChecks()
+        view.open()
+        try expect(view.isOpen && view.list?.rail.qaOptions == ["Short and blunt", "Long and kind"] && view.list?.rail.isHidden == false, "chips not shown")
         try still("4-decision-chips")
-        try expect(view.optionRail.qaPressChip(titled: "Long and kind"), "chip could not be pressed")
+        try expect(view.list?.rail.qaPressChip(titled: "Long and kind") == true, "chip could not be pressed")
         try expect(tile.qaComposerDraftText == "Long and kind", "chip did not answer into the composer: \(tile.qaComposerDraftText)")
+        try expect(!view.isOpen, "answering did not close the plan")
         for bad: [String: Any] in [["now": "x", "options": ["a", "b"]], ["now": "x", "needsYou": "q", "options": ["only one"]],
                                    ["now": "x", "needsYou": "q", "options": ["a", "a"]], ["now": "x", "needsYou": "q", "options": ["a", String(repeating: "z", count: 41)]]] {
             let reply = try await WorkspaceAgentReportChecks.call(config, "array_status", bad)
             try expect(reply.isError, "bad options accepted: \(bad)")
         }
         try await call(config, "array_status", ["now": "Waiting on you", "needsYou": "Which error copy ships?"])
-        try expect(view.presentation?.options.isEmpty == true && view.optionRail.isHidden, "options outlived the status that offered them")
+        try expect(view.presentation?.options.isEmpty == true && view.glance?.options.isEmpty == true, "options outlived the status that offered them")
         try await call(config, "array_status", ["now": "Resolved"])
         try expect(view.presentation?.decision == nil, "decision stayed after needsYou cleared")
         // Put the drawer back as the rest of this check found it.
         try await call(config, "array_status", ["now": "Reviewing helper results", "plan": plan])
-        _ = view.accessibilityPerformPress()
 
         // Bounds and forgery: every refusal leaves the full declaration intact.
         let before = supervisor.records[lead]?.declaredStatus
@@ -273,7 +250,7 @@ enum ManagedLeadPlanChecks {
                    "six-step/80-character boundary or unstarted helper failed")
 
         // Real disk restore and a newly attached tile, not a Codable round trip.
-        try expect(view.presentation?.collapsed == true, "render did not leave collapsed state")
+        _ = supervisor.setLeadPlanCollapsed(true, for: lead)
         supervisor.stopAll()
         let restored = AgentSupervisor(store: AgentStore(smokeTest: false))
         restored.configureManagedMode(defaults: b.settings); restored.restore()
@@ -281,7 +258,7 @@ enum ManagedLeadPlanChecks {
         tile.detach(); tile.attach(agentID: lead, supervisor: restored)
         try expect(tile.qaLeadPlanView.presentation?.collapsed == true && restored.records[lead]?.declaredStatus?.plan == supervisor.records[lead]?.declaredStatus?.plan,
                    "plan/disclosure lost on relaunch")
-        try expect(tile.qaLeadPlanView.accessibilityPerformPress() && tile.qaLeadPlanView.presentation?.collapsed == false, "restored header did not expand")
+        _ = restored.setLeadPlanCollapsed(false, for: lead)
         let again = AgentSupervisor(store: AgentStore(smokeTest: false))
         again.configureManagedMode(defaults: b.settings); again.restore()
         defer { again.stopAll() }
@@ -291,7 +268,7 @@ enum ManagedLeadPlanChecks {
         let old = try JSONDecoder().decode(AgentRecord.self, from: JSONSerialization.data(withJSONObject: legacy))
         try expect(!old.leadPlanCollapsed, "old record default is not expanded")
         try expect(AgentReport.wordCount(ManagedLeadHookState.brief) <= 230 && ManagedLeadHookState.brief.contains("array_status"), "brief lacks plan or exceeds 230 words")
-        print("Managed lead plan passed: production MCP/store/tile, bounds, self-only, live helper states/watchdog, urgency, image disclosure, relaunch, free/helper suppression, light/dark renders")
+        print("Managed lead plan passed: production MCP/store/tile, bounds, self-only, live helper states/watchdog, urgency, relaunch, free/helper suppression, light/dark renders")
     }
 
     /// `--lead-plan-steady-check`. Live 2026-11-22 on 0.7.59: the drawer above a
@@ -344,6 +321,10 @@ enum ManagedLeadPlanChecks {
             view.presentation?.steps.filter { $0.ownerAgent != nil && $0.state == .running }.count == 4
         }
         try await Task.sleep(for: .milliseconds(400))
+        // The plan stays open through everything below: a stream must not close it.
+        view.window?.orderFrontOffscreenForChecks()
+        view.open()
+        try expect(view.isOpen, "the plan did not open")
         let settled = rows(view.presentation)
         let settledHeight = view.intrinsicContentSize.height
         let order = view.presentation?.steps.compactMap(\.ownerAgent) ?? []
@@ -390,6 +371,7 @@ enum ManagedLeadPlanChecks {
         if view.presentation?.steps.compactMap(\.ownerAgent) != order { failures.append("row order changed") }
         // 3. Height holds; repaints bounded by a steady cadence, not per event.
         if heightChanges > 0 || view.intrinsicContentSize.height != settledHeight { failures.append("height changed \(heightChanges)x during the burst") }
+        if !view.isOpen { failures.append("the burst closed the open plan") }
         let cadenceBound = Int((burstSeconds / AgentSupervisor.leadPlanActivityCadence).rounded(.up)) + 3
         if trace.count > cadenceBound { failures.append("drawer changed \(trace.count)x for 120 events (bound \(cadenceBound))") }
         if notifications > cadenceBound { failures.append("drawer recomputed \(notifications)x for 120 events (bound \(cadenceBound))") }
@@ -403,8 +385,9 @@ enum ManagedLeadPlanChecks {
         // ago moves to Done. The height grows once (a new section), the other
         // rows keep their order, and the owner column does not shift sideways.
         func ownerCell(_ id: AgentID) -> NSRect {
-            guard let layout = view.drawerLayout, let i = layout.rows.firstIndex(where: { $0.ownerAgent == id }) else { return .zero }
-            return view.drawerRowRect(i, in: layout)
+            guard let list = view.list, let i = list.glance.steps.firstIndex(where: { list.glance.helperID(of: $0) == id }) else { return .zero }
+            list.layoutSubtreeIfNeeded()
+            return NSRect(x: list.ownerColumnRight, y: list.rowRect(i).minY, width: list.bounds.width, height: list.rowRect(i).height)
         }
         let ownerBefore = ownerCell(helpers[0])
         trace.removeAll(); heightChanges = 0
@@ -425,6 +408,9 @@ enum ManagedLeadPlanChecks {
         try expect(ownerAfter.minX == ownerBefore.minX && ownerAfter.width == ownerBefore.width,
                    "the owner column shifted when a row gained an age: \(ownerBefore) -> \(ownerAfter)")
         try expect(after.first { $0.ownerAgent == done }?.note == "2 min ago", "finished helper lost its age: \(rows(view.presentation))")
+        try expect(view.isOpen && view.list?.glance.steps.first { view.list?.glance.helperID(of: $0) == done }?.phase == .done,
+                   "the open plan did not take the finish in place")
+        view.close()
 
         if let dir = ProcessInfo.processInfo.environment["CONTINUUM_PLAN_DRAWER_DIR"].map({ URL(fileURLWithPath: $0) }) {
             try stills(tile, view: view, to: dir, name: "steady")
@@ -609,30 +595,20 @@ enum ManagedLeadPlanChecks {
         for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
             let theme = NSAppearance(named: appearance)!
             NSApp.appearance = theme; window.appearance = theme; tile.appearance = theme
-            var images: [NSBitmapImageRep] = []
-            for collapsed in [false, true] {
-                if tile.qaLeadPlanView.presentation?.collapsed != collapsed { _ = tile.qaLeadPlanView.accessibilityPerformPress() }
-                tile.wakeChrome(); tile.layoutSubtreeIfNeeded(); window.layoutIfNeeded()
-                tile.qaCanvasTranscript?.flushPendingVisualUpdate()
-                try expect(tile.qaLeadPlanView.frame.height > 0, "plan has no layout height")
-                let plan = tile.qaLeadPlanView.convert(tile.qaLeadPlanView.bounds, to: tile)
-                let composer = tile.qaPageZoomComposeBackdrop.convert(tile.qaPageZoomComposeBackdrop.bounds, to: tile)
-                try expect(!plan.intersects(composer), "plan overlaps composer")
-                var result: Result<NSBitmapImageRep, Error>!
-                theme.performAsCurrentDrawingAppearance { result = Result { try UIProbe.bitmap(of: tile, id: "managed-lead-plan") } }
-                images.append(try result.get())
-            }
+            tile.wakeChrome(); tile.layoutSubtreeIfNeeded(); window.layoutIfNeeded()
+            tile.qaCanvasTranscript?.flushPendingVisualUpdate()
+            // The plan is a line inside the composer's status row, never a band of its own.
+            let line = tile.qaLeadPlanView
+            try expect(line.frame.height > 0 && line.frame.width > 0, "plan line has no layout size")
+            try expect(line.superview?.superview?.identifier?.rawValue == "agentTile.statusRow", "plan line is not in the status row")
+            let plan = line.convert(line.bounds, to: tile)
+            let composer = tile.qaPageZoomComposeBackdrop.convert(tile.qaPageZoomComposeBackdrop.bounds, to: tile)
+            try expect(composer.contains(plan), "plan line sits outside the compose area: \(plan) vs \(composer)")
+            var result: Result<NSBitmapImageRep, Error>!
+            theme.performAsCurrentDrawingAppearance { result = Result { try UIProbe.bitmap(of: tile, id: "managed-lead-plan") } }
+            let rep = try result.get()
             if let output {
-                let size = NSSize(width: 1280, height: 600)
-                let image = NSImage(size: size)
-                image.lockFocus()
-                for (i, rep) in images.enumerated() {
-                    let part = NSImage(size: rep.size); part.addRepresentation(rep)
-                    part.draw(in: NSRect(x: i * 640, y: 0, width: 640, height: 600))
-                }
-                let bitmap = NSBitmapImageRep(focusedViewRect: NSRect(origin: .zero, size: size))!
-                image.unlockFocus()
-                try bitmap.representation(using: .png, properties: [:])!.write(to: output.appendingPathComponent("lead-plan-built-\(name).png"))
+                try rep.representation(using: .png, properties: [:])!.write(to: output.appendingPathComponent("lead-plan-built-\(name).png"))
             }
         }
     }

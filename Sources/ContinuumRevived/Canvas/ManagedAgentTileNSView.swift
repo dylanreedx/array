@@ -860,10 +860,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             }
         }
         leadPlanObserverToken = supervisor.addLeadPlanObserver(for: agentID) { [weak self] in self?.refreshLeadPlan() }
-        leadPlanView.onToggle = { [weak self, weak supervisor] in
-            guard let self, let supervisor, let record = supervisor.records[agentID] else { return }
-            _ = supervisor.setLeadPlanCollapsed(!record.leadPlanCollapsed, for: agentID)
-        }
+        leadPlanView.leadID = agentID
         leadPlanView.onRevealOwner = { [weak self] helperID in self?.onRevealAgent?(helperID, agentID) }
         leadPlanView.onChoose = { [weak self] answer in self?.v2Composer?.acceptDecisionAnswer(answer) }
         refreshLeadPlan()
@@ -2273,7 +2270,6 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
     func detach() {
         if let leadPlanObserverToken { agentSource?.removeLeadPlanObserver(leadPlanObserverToken) }
         leadPlanObserverToken = nil
-        leadPlanView.onToggle = nil
         leadPlanView.update(nil)
         prepareStreamingMarkupForTeardown(final: true)
         // A detached tile follows nothing: no session file is read for it.
@@ -4024,6 +4020,14 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         composeColumn.edgeInsets = NSEdgeInsets(Inset.row, zoom: pageZoom)
         composeColumn.translatesAutoresizingMaskIntoConstraints = false
         compactStatusRow.identifier = NSUserInterfaceItemIdentifier("agentTile.statusRow")
+        // A lead's plan is a line in this row; its popover anchors to the row
+        // and stays inside the tile.
+        compactStatusRow.setPlanAccessory(leadPlanView)
+        leadPlanView.anchorHost = compactStatusRow
+        leadPlanView.placementFrame = { [weak self] in
+            guard let self, let window = self.window else { return nil }
+            return window.convertToScreen(self.convert(self.visibleRect, to: nil))
+        }
         composer.identifier = NSUserInterfaceItemIdentifier("agentTile.composer")
         footerRow.identifier = NSUserInterfaceItemIdentifier("agentTile.providerControls")
         composeBackdrop.addSubview(composeColumn)
@@ -4056,7 +4060,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         let transcriptInStack: NSView = slot ?? transcript
         let layout = NSStackView(views: [
             locationStatus, transcriptInStack, pendingDock, faceFlipBanner, sessionHandoffBanner,
-            leadPlanView, composeBackdrop,
+            composeBackdrop,
         ])
         layout.orientation = .vertical
         layout.spacing = 0
@@ -4097,7 +4101,6 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
             locationStatus.widthAnchor.constraint(equalTo: layout.widthAnchor),
             transcriptInStack.widthAnchor.constraint(equalTo: layout.widthAnchor),
             composeBackdrop.widthAnchor.constraint(equalTo: layout.widthAnchor),
-            leadPlanView.widthAnchor.constraint(equalTo: layout.widthAnchor),
             faceFlipBanner.widthAnchor.constraint(equalTo: layout.widthAnchor),
             sessionHandoffBanner.widthAnchor.constraint(equalTo: layout.widthAnchor),
             composeColumn.leadingAnchor.constraint(equalTo: composeBackdrop.leadingAnchor),
@@ -6018,6 +6021,7 @@ extension ManagedAgentTileNSView {
 
     private static func presentsChoices(_ view: NSView) -> Bool {
         if let button = view as? ChoiceButton, button.presentedPopoverIsVisible { return true }
+        if let plan = view as? AgentLeadPlanView, plan.isOpen { return true }
         return view.subviews.contains(where: presentsChoices)
     }
 }

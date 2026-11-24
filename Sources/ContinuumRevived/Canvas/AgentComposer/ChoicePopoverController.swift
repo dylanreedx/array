@@ -1,5 +1,6 @@
 import AppKit
 import ContinuumRevivedAgentUI
+import CoreImage
 
 @MainActor
 private final class ChoicePanel: NSPanel {
@@ -432,6 +433,13 @@ final class ChoicePopoverController {
     var isPresented: Bool { panel?.isVisible == true }
     /// Toggle triggers consume their closing click before it can reopen the menu.
     var dismissesOnAnchorClick = false
+    /// Arrive and leave with `ChoicePanelMotion` (fade, slight blur, short rise)
+    /// instead of appearing and vanishing. Off by default: a popover opts in.
+    var animatesPresentation = false
+    /// A panel still playing its exit. It is no longer this controller's: it
+    /// takes no clicks and is ordered out when the exit ends.
+    private(set) var qaLeavingPanel: NSPanel?
+    private var leavingRemoval: DispatchWorkItem?
     /// Optional ownership group for a cascading menu. Assign before presenting.
     var cascadeGroup: ChoicePopoverGroup?
     /// Why the panel last closed ITSELF, cleared on each present: a check can
@@ -465,6 +473,7 @@ final class ChoicePopoverController {
         onFocusChange: ((String?) -> Void)? = nil
     ) {
         dismiss()
+        finishLeaving()
         qaLastSelfDismissal = nil
         lastAccessibilityAnnouncementForQA = nil
         guard !items.isEmpty else { return }
@@ -617,6 +626,7 @@ final class ChoicePopoverController {
         window.addChildWindow(panel, ordered: .above)
         installDismissalObservers(for: window, anchor: view, takesFocus: takesFocus)
         panel.orderFront(nil)
+        if animatesPresentation { ChoicePanelMotion.enter(chrome) }
         if takesFocus {
             panel.makeKey()
             panel.makeFirstResponder(list)
@@ -654,6 +664,7 @@ final class ChoicePopoverController {
         onClose: (() -> Void)? = nil
     ) {
         dismiss()
+        finishLeaving()
         qaLastSelfDismissal = nil
         lastAccessibilityAnnouncementForQA = nil
         guard let window = view.window else { return }
@@ -696,6 +707,7 @@ final class ChoicePopoverController {
         window.addChildWindow(panel, ordered: .above)
         installDismissalObservers(for: window, anchor: view, takesFocus: takesFocus)
         panel.orderFront(nil)
+        if animatesPresentation { ChoicePanelMotion.enter(chrome) }
         if takesFocus {
             panel.makeKey()
             panel.makeFirstResponder(initialFirstResponder ?? content)
@@ -789,8 +801,25 @@ final class ChoicePopoverController {
         reframeIntrinsicPanel = nil
         removeDismissalObservers()
         if let panel {
-            parentWindow?.removeChildWindow(panel)
-            panel.orderOut(nil)
+            if animatesPresentation, let chrome = panel.contentView, ChoicePanelMotion.shouldAnimate {
+                // The controller lets go now; the panel plays its exit and is
+                // ordered out after it, taking no clicks meanwhile.
+                finishLeaving()
+                panel.ignoresMouseEvents = true
+                let parent = parentWindow
+                qaLeavingPanel = panel
+                let removal = DispatchWorkItem { [weak self, weak parent] in
+                    parent?.removeChildWindow(panel)
+                    panel.orderOut(nil)
+                    if self?.qaLeavingPanel === panel { self?.qaLeavingPanel = nil; self?.leavingRemoval = nil }
+                }
+                leavingRemoval = removal
+                ChoicePanelMotion.leave(chrome)
+                DispatchQueue.main.asyncAfter(deadline: .now() + ChoicePanelMotion.leaveDuration, execute: removal)
+            } else {
+                parentWindow?.removeChildWindow(panel)
+                panel.orderOut(nil)
+            }
         }
         let returnView = focusReturnView
         let window = parentWindow
@@ -807,6 +836,15 @@ final class ChoicePopoverController {
             window.makeFirstResponder(returnView)
         }
         onClose?()
+    }
+
+    /// Ends a previous panel's exit at once: a reopen never stacks on a fade.
+    private func finishLeaving() {
+        guard let work = leavingRemoval else { return }
+        leavingRemoval = nil
+        work.cancel()
+        work.perform()
+        qaLeavingPanel = nil
     }
 
     private func dismissItself(_ reason: String) {
@@ -1055,4 +1093,84 @@ final class ChoicePopoverController {
     var qaCompletionFooter: String? { completionContentView?.footerLabel.stringValue }
     var qaCompletionViewportHeight: CGFloat? { completionContentView?.scrollView.contentSize.height }
     var qaCompletionDocumentHeight: CGFloat? { completionContentView?.listView.frame.height }
+}
+
+/// How a choice panel arrives and leaves: it fades up from a slight blur while
+/// rising a few points into place, and leaves the same way, quicker. Timings
+/// are the hover card's (`HoverCardMotion`), so popovers and cards share one
+/// feel. Presentation only: every animation ends on the model's own values, so
+/// a synchronous read after `enter` sees the settled panel.
+@MainActor
+enum ChoicePanelMotion {
+    static let enterDuration: TimeInterval = HoverCardMotion.presentDuration
+    static let leaveDuration: TimeInterval = HoverCardMotion.dismissDuration
+    /// The rise, and the blur it starts from.
+    static let rise = CGFloat(Space.s)
+    static let blurRadius = CGFloat(Space.s)
+    static let enterKey = "choice-panel-enter"
+    static let leaveKey = "choice-panel-leave"
+
+    /// Injected so a witness can drive the reduced path without touching the
+    /// user's accessibility settings.
+    static var prefersReducedMotion: () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+    static var shouldAnimate: Bool { !prefersReducedMotion() }
+
+    static func enter(_ view: NSView) {
+        guard shouldAnimate, let layer = prepare(view) else { return }
+        layer.removeAnimation(forKey: leaveKey)
+        CATransaction.begin()
+        // A resting panel carries no filter: the blur is only for the arrival.
+        CATransaction.setCompletionBlock { [weak layer] in
+            MainActor.assumeIsolated {
+                guard let layer, layer.animation(forKey: enterKey) == nil, layer.animation(forKey: leaveKey) == nil else { return }
+                layer.filters = nil
+            }
+        }
+        layer.add(group(opacity: (0, 1), rise: (-rise, 0), blur: (blurRadius, 0), duration: enterDuration,
+                         timing: .easeOut, holds: false), forKey: enterKey)
+        CATransaction.commit()
+    }
+
+    static func leave(_ view: NSView) {
+        guard let layer = prepare(view) else { return }
+        layer.removeAnimation(forKey: enterKey)
+        layer.add(group(opacity: (1, 0), rise: (0, -rise / 2), blur: (0, blurRadius), duration: leaveDuration,
+                         timing: .easeIn, holds: true), forKey: leaveKey)
+    }
+
+    private static func prepare(_ view: NSView) -> CALayer? {
+        view.wantsLayer = true
+        view.layerUsesCoreImageFilters = true
+        guard let layer = view.layer else { return nil }
+        if layer.filters?.isEmpty ?? true, let blur = CIFilter(name: "CIGaussianBlur") {
+            blur.name = "blur"
+            blur.setValue(0, forKey: kCIInputRadiusKey)
+            layer.filters = [blur]
+        }
+        return layer
+    }
+
+    private static func group(opacity: (Float, Float), rise: (CGFloat, CGFloat), blur: (CGFloat, CGFloat),
+                              duration: TimeInterval, timing: CAMediaTimingFunctionName, holds: Bool) -> CAAnimationGroup {
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = opacity.0
+        fade.toValue = opacity.1
+        // The panel is not flipped: a negative y starts it below its place.
+        let move = CABasicAnimation(keyPath: "transform.translation.y")
+        move.fromValue = rise.0
+        move.toValue = rise.1
+        let soften = CABasicAnimation(keyPath: "filters.blur.inputRadius")
+        soften.fromValue = blur.0
+        soften.toValue = blur.1
+        let group = CAAnimationGroup()
+        group.animations = [fade, move, soften]
+        group.duration = duration
+        group.timingFunction = CAMediaTimingFunction(name: timing)
+        if holds {
+            // An exit holds its last frame until the panel is ordered out.
+            group.fillMode = .forwards
+            group.isRemovedOnCompletion = false
+        }
+        return group
+    }
 }

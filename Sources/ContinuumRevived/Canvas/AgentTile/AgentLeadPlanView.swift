@@ -3,9 +3,9 @@ import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 
-/// The plan drawer above a lead agent's composer: a checklist.
+/// A lead agent's plan: a line in the composer's status row that opens the plan.
 
-/// What the drawer draws: ONE list. Plan steps own their helpers; helpers the
+/// The plan as ONE list. Plan steps own their helpers; helpers the
 /// plan does not name are `strays`. Built from `LeadPlanPresentation`'s
 /// `entries` / `tail` (the model owns ordering, linking and ageing).
 struct LeadPlanDrawerModel: Equatable {
@@ -79,477 +79,263 @@ extension LeadPlanDrawerModel {
     }
 }
 
-/// Bounded rows. Draws the checklist using tokens;
-/// no per-step view tree, timers, or text measurement in layout.
+/// The resting line in the status row, beside the context meter: a pile of up
+/// to four helper orbs (the most pressing in front) and one sentence, "0 of 5 ·
+/// 1 running · 2 idle · 2 need you". A click opens the whole plan in a
+/// `ChoicePopoverController` panel above it; a second click, Escape or a click
+/// elsewhere closes it. Everything updates in place.
 @MainActor
 final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
-    var drawnContentFingerprint: Int {
-        var hash = Hasher()
-        hash.combine(zoom)
-        if let drawerLayout {
-            hash.combine(drawerLayout.rows.count)
-            hash.combine(drawerLayout.height)
-            hash.combine(drawerLayout.header.text.map(\.0).joined())
-            for row in drawerLayout.rows {
-                hash.combine(row.title); hash.combine(row.owner); hash.combine(row.state); hash.combine(row.lead); hash.combine("\(row.glyph)")
-            }
-        }
-        return hash.finalize()
-    }
     private(set) var presentation: LeadPlanPresentation?
-    /// The joined model the drawer draws (fixtures set it directly).
-    private(set) var drawer: LeadPlanDrawerModel?
-    private var fixtureDrawer = false
-    let chevron = NSImageView()
-    /// The lead's offered answers, in the composer's own chip style.
-    let optionRail = ComposerReplyOptionRailView(frame: .zero)
-    var onToggle: (() -> Void)?
-    /// Clicking a row's owner or title reveals that helper.
+    private(set) var glance: PlanGlance?
+    /// The lead this line belongs to; its own orb marks the steps it owns.
+    var leadID: AgentID?
+    /// Clicking a helper's row in the popover reveals that helper.
     var onRevealOwner: ((AgentID) -> Void)?
     /// Clicking an answer chip.
     var onChoose: ((String) -> Void)?
+    /// The view the popover anchors to. The status row, not this line: the
+    /// line's width follows its sentence, and a panel closes when its anchor's
+    /// frame changes.
+    weak var anchorHost: NSView?
+    /// Where the popover may go, in screen coordinates: the tile.
+    var placementFrame: (() -> NSRect?)?
+    /// The line's width changed or it appeared or went: the row re-fits.
+    var onWidthChange: (() -> Void)?
+    /// The most the row can give the line; it drops words to fit.
+    var widthBudget: CGFloat = .greatestFiniteMagnitude {
+        didSet { if widthBudget != oldValue { refit() } }
+    }
     var zoom: AgentPageZoom = .default {
-        didSet { relayoutDrawer(); invalidateIntrinsicContentSize(); needsLayout = true; applyTokens() }
+        didSet {
+            guard zoom != oldValue else { return }
+            orbs.forEach { $0.removeFromSuperview() }
+            orbs = []
+            rebuildPile()
+            refit()
+        }
     }
+    let popover = ChoicePopoverController()
+    private(set) var list: PlanListView?
+    private var orbs: [PlanOrbView] = []
+    private var parts: [(String, PlanGlance.Phase?)] = []
+    /// Set while the popover is closing in this pass of the event loop: the
+    /// panel's own monitor closes it on a mouse-down before that same click
+    /// reaches the line, and that click must not reopen it.
+    private var closedThisTurn = false
+    /// Checks only: every change the line actually takes.
+    var qaOnUpdate: ((LeadPlanPresentation?) -> Void)?
+
+    var isOpen: Bool { popover.isPresented }
+    var sentence: String { parts.map(\.0).joined(separator: " · ") }
+
     override var isFlipped: Bool { true }
-    override var intrinsicContentSize: NSSize {
-        NSSize(width: NSView.noIntrinsicMetric, height: drawerLayout?.height ?? 0)
-    }
     override init(frame: NSRect) {
         super.init(frame: frame)
+        wantsLayer = true
         translatesAutoresizingMaskIntoConstraints = false
-        chevron.imageScaling = .scaleNone
-        chevron.setAccessibilityElement(false)
-        addSubview(chevron)
-        optionRail.translatesAutoresizingMaskIntoConstraints = true
-        optionRail.compact = true
-        optionRail.isHidden = true
-        optionRail.onSelect = { [weak self] answer in self?.onChoose?(answer) }
-        addSubview(optionRail)
-        setContentHuggingPriority(.required, for: .vertical)
-        setContentCompressionResistancePriority(.required, for: .vertical)
+        setContentHuggingPriority(.required, for: .horizontal)
+        setContentCompressionResistancePriority(.required, for: .horizontal)
         setAccessibilityElement(true)
-        setAccessibilityRole(.disclosureTriangle)
+        setAccessibilityRole(.button)
+        popover.animatesPresentation = true
         isHidden = true
     }
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
-    /// Checks only: every change the drawer actually takes.
-    var qaOnUpdate: ((LeadPlanPresentation?) -> Void)?
+
+    var drawnContentFingerprint: Int {
+        var hash = Hasher()
+        hash.combine(zoom)
+        hash.combine(sentence)
+        hash.combine(isOpen)
+        for o in orbs { hash.combine("\(o.kind)"); hash.combine("\(o.phase)") }
+        return hash.finalize()
+    }
+
     func update(_ value: LeadPlanPresentation?) {
         guard value != presentation else { return }
         defer { qaOnUpdate?(value) }
-        let oldHeight = intrinsicContentSize.height
         presentation = value
-        isHidden = value == nil
-        if !fixtureDrawer {
-            drawer = value.map { LeadPlanDrawerModel(from: $0) }
-            relayoutDrawer()
+        glance = value.flatMap { p in leadID.map { PlanGlance(LeadPlanDrawerModel(from: p), leadID: $0) } }
+        let hide = glance == nil
+        if hide, isOpen { popover.dismiss() }
+        rebuildPile()
+        refit()
+        if isHidden != hide { isHidden = hide; onWidthChange?() }
+        if let glance, let list, isOpen {
+            list.apply(glance)
+            popover.resizeContent(to: list.preferredSize(maxWidth: popoverMaxWidth))
         }
-        if oldHeight != intrinsicContentSize.height { invalidateIntrinsicContentSize() }
-        setAccessibilityLabel(drawerLayout?.header.text.map(\.0).joined() ?? value?.header)
-        setAccessibilityValue(value?.collapsed == true ? "collapsed" : "expanded")
-        setAccessibilityHelp(value?.steps.map { "\($0.title), \($0.owner), \($0.state.rawValue)" }.joined(separator: "; "))
-        optionRail.setOptions(value?.collapsed == false ? (value?.options ?? []).map { AgentReplyOption(label: $0) } : [])
-        optionRail.isHidden = optionRail.qaOptions.isEmpty
-        applyTokens()
+    }
+
+    // MARK: The line
+
+    private var orbSide: CGFloat { PlanMetrics.orbSide(zoom) }
+    private var overlap: CGFloat { PlanMetrics.s(Space.s, zoom) + PlanMetrics.s(Space.xs, zoom) }
+    private var gap: CGFloat { PlanMetrics.s(Space.m, zoom) }
+    private var font: NSFont { PlanMetrics.meta(zoom) }
+    private var separator: String { " · " }
+    private var pileWidth: CGFloat { orbs.isEmpty ? 0 : CGFloat(orbs.count) * (orbSide - overlap) + overlap }
+    private var chevronSize: CGFloat { PlanMetrics.s(Space.l, zoom) }
+
+    private static func rank(_ p: PlanGlance.Phase) -> Int {
+        switch p { case .needsYou, .failed: 0; case .working: 1; case .idle: 2; default: 3 }
+    }
+
+    /// Up to four helpers, most pressing first; ties keep creation order, so
+    /// the pile only changes when a helper's state does.
+    private func rebuildPile() {
+        guard let glance else { orbs.forEach { $0.removeFromSuperview() }; orbs = []; return }
+        let ranked = glance.helpers.enumerated().filter { $0.element.phase != .done }
+            .sorted { (Self.rank($0.element.phase), $0.offset) < (Self.rank($1.element.phase), $1.offset) }
+            .prefix(4).map(\.element)
+        var next: [PlanOrbView] = []
+        for h in ranked {
+            let kind = PlanOrbView.Kind.agent(h.id, working: true)
+            if let o = orbs.first(where: { $0.kind == kind }) { o.phase = h.phase; next.append(o) }
+            else {
+                let o = PlanOrbView(kind: kind, side: orbSide, phase: h.phase)
+                addSubview(o)
+                if window != nil { o.show(now: Date()) }
+                next.append(o)
+            }
+        }
+        for o in orbs where !next.contains(where: { $0 === o }) { o.removeFromSuperview() }
+        orbs = next
         needsLayout = true
     }
 
-    /// Renders and design review only: draw `model` as-is.
-    func qaShowDrawer(_ model: LeadPlanDrawerModel) {
-        fixtureDrawer = true
-        drawer = model
-        isHidden = false
-        relayoutDrawer()
-        optionRail.setOptions(model.collapsed ? [] : model.options.map { AgentReplyOption(label: $0) })
-        optionRail.isHidden = optionRail.qaOptions.isEmpty
-        applyTokens()
+    private func candidates(_ g: PlanGlance) -> [[(String, PlanGlance.Phase?)]] {
+        let progress: (String, PlanGlance.Phase?) = ("\(g.done) of \(g.steps.count)", nil)
+        let attention: (String, PlanGlance.Phase?)? = g.needsYou > 0 ? ("\(g.needsYou) need\(g.needsYou == 1 ? "s" : "") you", .needsYou) : nil
+        var full = g.hasPlan ? [progress] : []
+        if g.working > 0 { full.append(("\(g.working) running", nil)) }
+        if g.idle > 0 { full.append(("\(g.idle) idle", nil)) }
+        if let attention { full.append(attention) }
+        // Narrower: what needs him survives longest, then progress.
+        guard g.hasPlan else {
+            // No plan: what needs him, else the helpers' own count.
+            let count: (String, PlanGlance.Phase?) = ("\(g.helpers.count) helper\(g.helpers.count == 1 ? "" : "s")", nil)
+            return [full.isEmpty ? [count] : full, [attention ?? count]]
+        }
+        return [full, [progress] + (attention.map { [$0] } ?? []), [attention ?? progress]]
+    }
+
+    private func width(of p: [(String, PlanGlance.Phase?)]) -> CGFloat {
+        var w = pileWidth + (orbs.isEmpty ? 0 : gap)
+        for (i, (s, phase)) in p.enumerated() {
+            w += phase == nil ? PlanInk.width(s, font) : PlanInk.pillWidth(s, font: font, zoom: zoom)
+            if i > 0 { w += PlanInk.width(separator, font) }
+        }
+        return ceil(w + gap + chevronSize)
+    }
+
+    private func refit() {
+        let before = intrinsicContentSize.width
+        if let g = glance {
+            let all = candidates(g)
+            parts = all.first { width(of: $0) <= widthBudget } ?? all.last ?? []
+        } else { parts = [] }
+        setAccessibilityLabel(glance.map { "Plan: " + candidates($0)[0].map(\.0).joined(separator: ", ") })
+        setAccessibilityValue(isOpen ? "open" : "closed")
         invalidateIntrinsicContentSize()
         needsLayout = true
+        needsDisplay = true
+        if intrinsicContentSize.width != before { onWidthChange?() }
     }
 
-    func applyTokens() {
-        // Same SF Symbol treatment as ProcessesDisclosureRow, also used by
-        // Array's choice menus. A real image view, never a drawn/text arrow.
-        let collapsed = drawer?.collapsed ?? presentation?.collapsed
-        chevron.image = CanvasSymbolImage.image(named: collapsed == true ? "chevron.right" : "chevron.down",
-                                                pointSize: CGFloat(zoom.scaled(10)), weight: .semibold)
-        chevron.contentTintColor = TextToken.textSecondary.color.nsColor(for: effectiveTokenTheme)
-        needsDisplay = true
+    /// The width it takes at its fullest, which the row charges first.
+    var naturalWidth: CGFloat { glance.map { width(of: candidates($0)[0]) } ?? 0 }
+
+    override var intrinsicContentSize: NSSize {
+        // The status row's content height (its 28 pt less 4 pt insets).
+        NSSize(width: parts.isEmpty ? 0 : width(of: parts),
+               height: AgentCompactStatusRowView.preferredHeight(zoom: zoom) - 2 * PlanMetrics.s(Space.s, zoom))
     }
-    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); applyTokens() }
+
     override func layout() {
         super.layout()
-        let frame = NSRect(x: bounds.width - CGFloat(zoom.scaled(30)), y: CGFloat(zoom.scaled(8)),
-                           width: CGFloat(zoom.scaled(14)), height: CGFloat(zoom.scaled(16)))
-        if chevron.frame != frame { chevron.frame = frame }
-        optionRail.applyPageZoom(zoom)
-        let z = CGFloat(zoom.factor)
-        let railY = drawerLayout?.railY ?? 34 * z
-        let railX = drawerLayout.map { 30 * z + $0.leadColumn } ?? 16 * z
-        let railFrame = NSRect(x: railX, y: railY, width: max(0, bounds.width - 32 * z), height: optionRail.railHeight)
-        if optionRail.frame != railFrame { optionRail.frame = railFrame }
-    }
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        // The image is part of the disclosure target, not a separate control.
-        // The answer chips are real buttons and keep their own clicks.
-        guard let hit = super.hitTest(point) else { return nil }
-        if !optionRail.isHidden, hit === optionRail || hit.isDescendant(of: optionRail) { return hit }
-        return self
-    }
-    override func mouseDown(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-        guard let layout = drawerLayout else { return }
-        if point.y <= headerHeight { _ = accessibilityPerformPress(); return }
-        for (i, row) in layout.rows.enumerated() {
-            if let owner = row.ownerAgent, drawerRowRect(i, in: layout).contains(point) { onRevealOwner?(owner); return }
+        var x: CGFloat = 0
+        for (i, o) in orbs.enumerated() {
+            o.frame = NSRect(x: x, y: (bounds.height - orbSide) / 2, width: orbSide, height: orbSide)
+            x += orbSide - overlap
+            // The front orb, the most pressing, draws on top.
+            o.layer?.zPosition = CGFloat(orbs.count - i)
         }
     }
-    override func accessibilityPerformPress() -> Bool {
-        guard presentation != nil || drawer != nil else { return false }
-        if fixtureDrawer, var d = drawer { d.collapsed.toggle(); qaShowDrawer(d); return true }
-        onToggle?()
-        return true
-    }
+
     override func draw(_ dirtyRect: NSRect) {
-        if let drawerLayout { drawDrawer(drawerLayout) }
-    }
-
-    // MARK: Layout
-
-    /// `pill`: live work only. The word is drawn on a tinted capsule.
-    enum Ink: Equatable { case primary, secondary, accent(AccentToken), pill(AccentToken) }
-    enum Glyph: Equatable { case none, dot(AccentToken), ring(Bool) }
-    struct DrawerRow: Equatable {
-        var glyph: Glyph = .none
-        /// A short left column: a step number or a band word.
-        var lead: String? = nil
-        var title: String
-        var titleInk: Ink = .primary
-        var owner: String? = nil
-        var ownerAgent: AgentID? = nil
-        var state: String? = nil
-        var stateInk: Ink = .secondary
-    }
-    struct DrawerHeader: Equatable {
-        /// Segmented progress, one cell per plan step.
-        var track: [LeadPlanDrawerModel.StepPhase] = []
-        var text: [(String, Ink)] = []
-        static func == (a: DrawerHeader, b: DrawerHeader) -> Bool {
-            a.track == b.track && a.text.map(\.0) == b.text.map(\.0)
-        }
-    }
-    struct DrawerLayout: Equatable {
-        var header: DrawerHeader
-        var rows: [DrawerRow]
-        /// Rows above the answer rail (the decision row).
-        var railAfter: Int? = nil
-        var railY: CGFloat? = nil
-        var height: CGFloat
-        var leadColumn: CGFloat = 0
-    }
-    private(set) var drawerLayout: DrawerLayout?
-    /// Most rows a drawer may ever show, header excluded. The budget.
-    static let drawerRowBudget = 6
-    /// Wide enough for "Failed · 12 min ago".
-    static let stateColumn: CGFloat = 104
-
-    private var headerHeight: CGFloat { 32 * CGFloat(zoom.factor) }
-    private var rowHeight: CGFloat { 22 * CGFloat(zoom.factor) }
-
-    private func relayoutDrawer() {
-        drawerLayout = drawer.map { Self.layout($0, zoom: zoom) }
-    }
-
-    func drawerRowRect(_ index: Int, in layout: DrawerLayout) -> NSRect {
-        let z = CGFloat(zoom.factor)
-        var y = headerHeight + CGFloat(index) * rowHeight
-        if let after = layout.railAfter, index >= after { y += optionRail.railHeight }
-        return NSRect(x: 0, y: y, width: bounds.width, height: 22 * z)
-    }
-
-    // MARK: Pure layout
-
-    private static func ageText(_ seconds: TimeInterval?) -> String? {
-        guard let s = seconds, s >= 60 else { return nil }
-        if s < 3600 { return "\(Int(s / 60)) min ago" }
-        if s < 86400 { return "\(Int(s / 3600))h ago" }
-        return "\(Int(s / 86400))d ago"
-    }
-    private static func owner(_ o: LeadPlanDrawerModel.Owner) -> (String, AgentID?) {
-        switch o {
-        case .lead: return ("Lead", nil)
-        case .you: return ("You", nil)
-        case .unavailable: return ("Helper unavailable", nil)
-        case .unstarted(let name): return ("\(name) · not started", nil)
-        case .helpers(let hs):
-            guard let h = hs.first(where: { !$0.stale }) ?? hs.first else { return ("Helper", nil) }
-            // The step title already says what the helper does; its name would
-            // repeat it. The model is the owner cell, still the reveal target.
-            return (h.model + (hs.count > 1 ? " +\(hs.count - 1)" : ""), h.id)
-        }
-    }
-    private static func glyph(_ p: LeadPlanDrawerModel.StepPhase) -> Glyph {
-        switch p {
-        case .needsYou: .dot(.accentApproval)
-        case .failed: .dot(.accentFailed)
-        case .working: .dot(.accentWorking)
-        case .done: .dot(.accentDone)
-        case .idle: .ring(true)
-        case .todo: .ring(false)
-        }
-    }
-    private static func stateWord(_ p: LeadPlanDrawerModel.StepPhase, step: LeadPlanDrawerModel.Step) -> (String?, Ink) {
-        var ended: TimeInterval?
-        if case .helpers(let hs) = step.owner { ended = hs.compactMap(\.endedAgo).min() }
-        switch p {
-        case .needsYou: return ("Needs you", .pill(.accentApproval))
-        case .failed: return (["Failed", ageText(ended)].compactMap { $0 }.joined(separator: " · "), .accent(.accentFailed))
-        case .working: return ("Running", .pill(.accentWorking))
-        case .idle: return ("Idle", .secondary)
-        case .done: return (["Done", ageText(ended)].compactMap { $0 }.joined(separator: " · "), .secondary)
-        case .todo:
-            // Its only helpers failed long ago: say so, quietly.
-            if case .helpers(let hs) = step.owner, !hs.isEmpty, hs.allSatisfy({ $0.stale }) {
-                return (["Failed", ageText(ended)].compactMap { $0 }.joined(separator: " · "), .secondary)
-            }
-            return (nil, .secondary)
-        }
-    }
-    private static func stepRow(_ m: LeadPlanDrawerModel, _ i: Int, lead: String?) -> DrawerRow {
-        let step = m.steps[i], p = m.phase(of: step)
-        let (owner, agent) = owner(step.owner)
-        let (state, ink) = stateWord(p, step: step)
-        return DrawerRow(glyph: glyph(p), lead: lead, title: step.title, titleInk: p == .done ? .secondary : .primary,
-                         owner: owner, ownerAgent: agent, state: state, stateInk: ink)
-    }
-    private static func strayRow(_ h: LeadPlanDrawerModel.Helper, lead: String? = nil) -> DrawerRow {
-        let p: LeadPlanDrawerModel.StepPhase
-        switch h.phase {
-        case .needsYou: p = .needsYou
-        case .failed: p = .failed
-        case .working: p = .working
-        case .idle: p = .idle
-        case .done: p = .done
-        }
-        let step = LeadPlanDrawerModel.Step(title: h.name, owner: .helpers([h]))
-        let (state, ink) = stateWord(p, step: step)
-        return DrawerRow(glyph: glyph(p), lead: lead, title: h.name, titleInk: .primary, owner: h.model, ownerAgent: h.id,
-                         state: state, stateInk: ink)
-    }
-    private static func isAttention(_ p: LeadPlanDrawerModel.StepPhase) -> Bool { p == .needsYou || p == .failed }
-    private static func attentionStrays(_ m: LeadPlanDrawerModel) -> [LeadPlanDrawerModel.Helper] {
-        m.strays.filter { !$0.stale && ($0.phase == .needsYou || $0.phase == .failed) }
-    }
-    /// "Also · 2 idle · 1 done 1h ago · 3 failed 5–6d ago": every helper the list
-    /// does not show, one line.
-    private static func foldText(_ hs: [LeadPlanDrawerModel.Helper], prefix: String? = "Also") -> String? {
-        var parts: [String] = []
-        let working = hs.filter { $0.phase == .working }.count
-        let idle = hs.filter { $0.phase == .idle }.count
-        let done = hs.filter { $0.phase == .done }
-        let stale = hs.filter { $0.stale }
-        if working > 0 { parts.append("\(working) running") }
-        if idle > 0 { parts.append("\(idle) idle") }
-        if !done.isEmpty { parts.append("\(done.count) done" + (ageText(done.compactMap(\.endedAgo).min()).map { " " + $0 } ?? "")) }
-        if !stale.isEmpty {
-            let days = stale.compactMap(\.endedAgo).map { Int($0 / 86400) }
-            let range = days.isEmpty ? "" : (days.min() == days.max() ? " \(days.min()!)d ago" : " \(days.min()!)–\(days.max()!)d ago")
-            parts.append("\(stale.count) failed\(range)")
-        }
-        return parts.isEmpty ? nil : ([prefix].compactMap { $0 } + parts).joined(separator: " · ")
-    }
-    private static func current(_ m: LeadPlanDrawerModel) -> Int? {
-        let phases = m.steps.map { m.phase(of: $0) }
-        return phases.firstIndex(where: isAttention) ?? phases.firstIndex(of: .working)
-            ?? phases.firstIndex(of: .idle) ?? phases.firstIndex(of: .todo)
-    }
-    private static func attentionCount(_ m: LeadPlanDrawerModel) -> Int {
-        m.steps.filter { isAttention(m.phase(of: $0)) }.count + attentionStrays(m).count + (m.decision == nil ? 0 : 1)
-    }
-    private static func headline(_ m: LeadPlanDrawerModel) -> [(String, Ink)] {
-        let done = m.steps.filter { m.phase(of: $0) == .done }.count
-        var out: [(String, Ink)] = [(m.steps.isEmpty ? "Helpers" : "Plan · \(done) of \(m.steps.count) done", .secondary)]
-        let attention = attentionCount(m)
-        // Open, the decision is its own row; the header only counts it.
-        if let d = m.decision, m.collapsed { out += [(" · ", .secondary), ("Needs you", .pill(.accentApproval)), (": \(d)", .accent(.accentApproval))] }
-        else if attention > 0 { out.append((" · \(attention) need\(attention == 1 ? "s" : "") you", .accent(.accentApproval))) }
-        return out
-    }
-
-    static func layout(_ m: LeadPlanDrawerModel, zoom: AgentPageZoom) -> DrawerLayout {
-        let z = CGFloat(zoom.factor)
-        var header = DrawerHeader()
-        var rows: [DrawerRow] = []
-        var railAfter: Int?
-        let budget = drawerRowBudget
-        let phases = m.steps.map { m.phase(of: $0) }
-        let attention = attentionStrays(m)
-        // The plan IS the list, numbered by plan position. What needs you sits
-        // above it; everything the plan does not name is one line.
-        header.text = headline(m)
-        if m.collapsed, !m.steps.isEmpty { header.track = phases; header.text[0].0 = "\(phases.filter { $0 == .done }.count) of \(m.steps.count) done" }
-        if m.collapsed, m.decision == nil, let c = current(m) {
-            let (word, ink) = stateWord(phases[c], step: m.steps[c])
-            if case .pill = ink, let word {
-                header.text += [(" · ", .secondary), (word, ink), (": " + m.steps[c].title, .secondary)]
-            } else {
-                header.text.append((" · " + (word.map { "\($0): " } ?? "Next: ") + m.steps[c].title,
-                                    isAttention(phases[c]) ? ink : .secondary))
-            }
-        }
-        if !m.collapsed {
-            if let d = m.decision {
-                rows.append(DrawerRow(glyph: .dot(.accentApproval), title: d, owner: "Lead", state: "Needs you", stateInk: .pill(.accentApproval)))
-                if !m.options.isEmpty { railAfter = rows.count }
-            }
-            for h in attention.prefix(2) { rows.append(strayRow(h)) }
-            // Never fold the plan itself: `array_status` caps it at six steps.
-            for i in m.steps.indices { rows.append(stepRow(m, i, lead: "\(i + 1)")) }
-            for h in m.strays where h.phase == .working && rows.count < budget { rows.append(strayRow(h, lead: "")) }
-            let folded = m.strays.filter { h in !attention.contains(h) && !rows.contains { $0.ownerAgent != nil && $0.ownerAgent == h.id } }
-            if let fold = foldText(folded) { rows.append(DrawerRow(lead: "", title: fold, titleInk: .secondary)) }
-        }
-        let leadColumn: CGFloat = 18
-        let railHeight = railAfter == nil ? 0 : ComposerReplyOptionRailView.compactRailHeight(zoom: zoom)
-        let height = 32 * z + CGFloat(rows.count) * 22 * z + railHeight + (rows.isEmpty ? 0 : 6 * z)
-        let railY = railAfter.map { 32 * z + CGFloat($0) * 22 * z }
-        return DrawerLayout(header: header, rows: rows, railAfter: railAfter, railY: railY, height: height, leadColumn: leadColumn * z)
-    }
-
-    // MARK: Drawing
-
-    private func color(_ ink: Ink) -> NSColor {
         let theme = effectiveTokenTheme
-        switch ink {
-        case .primary: return TextToken.textPrimary.color.nsColor(for: theme)
-        case .secondary: return TextToken.textSecondary.color.nsColor(for: theme)
-        case .accent(let a), .pill(let a): return a.color.nsColor(for: theme)
+        if isOpen {
+            // While its plan is open the line wears the row hover fill: full and even.
+            AgentSurfaceRole.rowHover.color.nsColor(for: theme).setFill()
+            let r = PlanMetrics.s(Space.s, zoom)
+            NSBezierPath(roundedRect: bounds.insetBy(dx: -r, dy: 0), xRadius: r, yRadius: r).fill()
         }
-    }
-    /// Text on a row's midline: the baseline sits half a cap height below
-    /// `midY`, so a glyph centred on `midY` is centred on the capitals. Returns
-    /// the drawn width.
-    @discardableResult
-    private func line(_ s: String, x: CGFloat, midY: CGFloat, maxX: CGFloat, ink: Ink, alignRight: Bool = false) -> CGFloat {
-        guard maxX > x, !s.isEmpty else { return 0 }
-        let font = NSFont.token(.label, zoom: zoom)
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.lineBreakMode = .byTruncatingTail
-        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color(ink), .paragraphStyle: paragraph]
-        let width = min(ceil((s as NSString).size(withAttributes: attrs).width), maxX - x)
-        let baseline = midY + font.capHeight / 2
-        // Where the text system actually puts the baseline in a line fragment
-        // (SF's line box is taller than ascender − descender).
-        let top = baseline - Self.baselineOffset(font)
-        let originX = alignRight ? maxX - width : x
-        (s as NSString).draw(with: NSRect(x: originX, y: top, width: width, height: ceil(Self.baselineOffset(font) - font.descender + 2)),
-                             options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine], attributes: attrs)
-        return width
-    }
-    private static var baselineOffsets: [CGFloat: CGFloat] = [:]
-    private static func baselineOffset(_ font: NSFont) -> CGFloat {
-        if let cached = baselineOffsets[font.pointSize] { return cached }
-        let value = NSLayoutManager().defaultBaselineOffset(for: font)
-        baselineOffsets[font.pointSize] = value
-        return value
-    }
-    /// A word on a tinted capsule: a full, even shape, one tint per live state.
-    /// Returns the width taken, padding included.
-    @discardableResult
-    private func pill(_ s: String, _ token: AccentToken, x: CGFloat, midY: CGFloat, maxX: CGFloat) -> CGFloat {
-        let z = CGFloat(zoom.factor)
-        let pad = 7 * z, h = 16 * z
-        let w = min(width(s), max(0, maxX - x - 2 * pad)) + 2 * pad
-        let r = NSRect(x: x, y: midY - h / 2, width: w, height: h)
-        token.color.nsColor(for: effectiveTokenTheme).withAlphaComponent(0.16).setFill()
-        NSBezierPath(roundedRect: r, xRadius: h / 2, yRadius: h / 2).fill()
-        line(s, x: x + pad, midY: midY, maxX: x + w - pad, ink: .accent(token))
-        return w
-    }
-    private func width(_ s: String) -> CGFloat {
-        ceil((s as NSString).size(withAttributes: [.font: NSFont.token(.label, zoom: zoom)]).width)
-    }
-    private func drawGlyph(_ g: Glyph, centerX: CGFloat, midY: CGFloat) {
-        let z = CGFloat(zoom.factor)
-        switch g {
-        case .none: return
-        case .dot(let a):
-            let d = 6 * z
-            a.color.nsColor(for: effectiveTokenTheme).setFill()
-            NSBezierPath(ovalIn: NSRect(x: centerX - d / 2, y: midY - d / 2, width: d, height: d)).fill()
-        case .ring(let strong):
-            let d = 6 * z
-            let path = NSBezierPath(ovalIn: NSRect(x: centerX - d / 2, y: midY - d / 2, width: d, height: d).insetBy(dx: 0.6 * z, dy: 0.6 * z))
-            path.lineWidth = 1.2 * z
-            (strong ? TextToken.textSecondary.color : LineToken.borderStrong.color).nsColor(for: effectiveTokenTheme).setStroke()
-            path.stroke()
+        var x = pileWidth + (orbs.isEmpty ? 0 : gap)
+        let mid = bounds.midY
+        for (i, (s, phase)) in parts.enumerated() {
+            if i > 0 { x += PlanInk.text(separator, x: x, midY: mid, maxX: bounds.maxX, font: font, color: PlanInk.secondary(theme)) }
+            if let phase { x += PlanInk.pill(s, phase, x: x, midY: mid, font: font, theme: theme, zoom: zoom) }
+            else { x += PlanInk.text(s, x: x, midY: mid, maxX: bounds.maxX, font: font, color: PlanInk.secondary(theme)) }
         }
+        guard let chevron = CanvasSymbolImage.image(named: isOpen ? "chevron.down" : "chevron.up",
+                                                    pointSize: PlanMetrics.s(10, zoom), weight: .semibold) else { return }
+        let tinted = NSImage(size: chevron.size, flipped: false) { rect in
+            chevron.draw(in: rect)
+            PlanInk.secondary(theme).set()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
+        let r = NSRect(x: bounds.maxX - chevronSize + (chevronSize - chevron.size.width) / 2,
+                       y: (mid - chevron.size.height / 2).rounded(), width: chevron.size.width, height: chevron.size.height)
+        tinted.draw(in: r, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
     }
-    private func drawDrawer(_ layout: DrawerLayout) {
-        let z = CGFloat(zoom.factor)
-        let theme = effectiveTokenTheme
-        let inset = 16 * z
-        SurfaceToken.tileBody.color.nsColor(for: theme).setFill(); bounds.fill()
-        LineToken.separator.color.nsColor(for: theme).setFill()
-        NSRect(x: inset, y: 0, width: max(0, bounds.width - inset * 2), height: z).fill()
-        let headerMid = headerHeight / 2
-        let headerMax = bounds.width - 36 * z
-        var x = inset
-        // Track: one rounded cell per step, all the same width.
-        if !layout.header.track.isEmpty {
-            let n = CGFloat(layout.header.track.count)
-            let cell = min(14 * z, (96 * z - (n - 1) * 2 * z) / n), h = 4 * z
-            for (i, p) in layout.header.track.enumerated() {
-                let r = NSRect(x: x + CGFloat(i) * (cell + 2 * z), y: headerMid - h / 2, width: cell, height: h)
-                let fill: NSColor = switch p {
-                case .done: AccentToken.accentDone.color.nsColor(for: theme)
-                case .working: AccentToken.accentWorking.color.nsColor(for: theme)
-                case .needsYou: AccentToken.accentApproval.color.nsColor(for: theme)
-                case .failed: AccentToken.accentFailed.color.nsColor(for: theme)
-                case .idle, .todo: LineToken.border.color.nsColor(for: theme)
-                }
-                fill.setFill()
-                NSBezierPath(roundedRect: r, xRadius: h / 2, yRadius: h / 2).fill()
-            }
-            x += n * (cell + 2 * z) + 8 * z
-        }
-        for (s, ink) in layout.header.text {
-            if case .pill(let token) = ink {
-                x += pill(s, token, x: x, midY: headerMid, maxX: headerMax - 12 * z)
-            } else {
-                x += line(s, x: x, midY: headerMid, maxX: headerMax - 12 * z, ink: ink)
-            }
-        }
 
-        let glyphX = inset + 3 * z
-        let leadX = inset + 14 * z
-        let titleX = leadX + layout.leadColumn
-        for (i, row) in layout.rows.enumerated() {
-            let rect = drawerRowRect(i, in: layout)
-            let mid = rect.midY
-            drawGlyph(row.glyph, centerX: glyphX, midY: mid)
-            if let lead = row.lead, !lead.isEmpty {
-                line(lead, x: leadX, midY: mid, maxX: titleX - 4 * z, ink: .secondary)
-            }
-            var right = bounds.width - inset
-            if let state = row.state {
-                if case .pill(let token) = row.stateInk {
-                    let w = min(width(state), 140 * z) + 14 * z
-                    pill(state, token, x: right - w, midY: mid, maxX: right)
-                } else {
-                    // Same right edge as a pill's text, so the column holds.
-                    line(state, x: right - 7 * z - min(width(state), 140 * z), midY: mid, maxX: right - 7 * z, ink: row.stateInk, alignRight: true)
-                }
-            }
-            // A fixed state column, so owners line up whether or not a row has a state.
-            if row.owner != nil { right -= Self.stateColumn * z + 12 * z }
-            if let owner = row.owner {
-                let w = min(width(owner), bounds.width * 0.34)
-                line(owner, x: right - w, midY: mid, maxX: right, ink: .secondary, alignRight: true)
-                right -= w + 12 * z
-            }
-            line(row.title, x: titleX, midY: mid, maxX: right, ink: row.titleInk)
-        }
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); applyTokens() }
+    func applyTokens() { needsDisplay = true }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        // The popover's own outside-click handling closed it on this very
+        // click: that click was the close.
+        if closedThisTurn { return }
+        toggle()
+    }
+    override func accessibilityPerformPress() -> Bool { toggle(); return glance != nil }
+
+    func toggle() { if isOpen { close() } else { open() } }
+
+    private var popoverMaxWidth: CGFloat {
+        let frame = placementFrame?() ?? window?.frame ?? .zero
+        return max(PlanMetrics.s(320, zoom), frame.width - 2 * PlanMetrics.s(Space.xl, zoom))
+    }
+
+    func open() {
+        guard let glance, window != nil else { return }
+        let list = PlanListView(glance, zoom: zoom)
+        list.onReveal = { [weak self] id in self?.close(); self?.onRevealOwner?(id) }
+        list.onChoose = { [weak self] answer in self?.close(); self?.onChoose?(answer) }
+        let surface = PlanPopoverSurfaceView(list)
+        surface.onCancel = { [weak self] in self?.close() }
+        let size = list.preferredSize(maxWidth: popoverMaxWidth)
+        let host = anchorHost ?? self
+        let anchor = host === self ? bounds : convert(bounds, to: host)
+        self.list = list
+        popover.pageZoom = zoom
+        popover.presentContent(surface, size: size, anchor: anchor, relativeTo: host, placementFrame: placementFrame?(),
+                               takesFocus: true, initialFirstResponder: surface, accessibilityLabel: "Plan",
+                               onClose: { [weak self] in self?.didClose() })
+        refit()
+    }
+
+    func close() { popover.dismiss() }
+
+    private func didClose() {
+        closedThisTurn = true
+        DispatchQueue.main.async { [weak self] in self?.closedThisTurn = false }
+        list = nil
+        refit()
     }
 }

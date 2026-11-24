@@ -590,6 +590,31 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
 
     /// What the agent left running, or nil when nothing is. Kept apart from the
     /// presentation: it changes on the process tracker's tick, not on a turn.
+    // MARK: - The lead's plan line
+
+    /// A lead's plan line (`AgentLeadPlanView`), right-aligned beside the
+    /// context meter. It is charged before the policy fits the rest, and given
+    /// what the location's floor and the ring leave over.
+    private(set) weak var planAccessory: AgentLeadPlanView?
+    private var fittingPlan = false
+
+    func setPlanAccessory(_ view: AgentLeadPlanView) {
+        guard planAccessory !== view else { return }
+        planAccessory?.removeFromSuperview()
+        planAccessory = view
+        let index = rootStack.arrangedSubviews.firstIndex(of: processesPill) ?? rootStack.arrangedSubviews.count
+        rootStack.insertArrangedSubview(view, at: index)
+        view.onWidthChange = { [weak self] in self?.planAccessoryChanged() }
+    }
+
+    /// The plan line appeared, went, or changed width: fit the row again.
+    func planAccessoryChanged() {
+        guard !fittingPlan, let presentation else { return }
+        applyQuotaElements(presentation)
+        rootStack.needsLayout = true
+        needsLayout = true
+    }
+
     func applyLastPrompt(_ text: String?) {
         guard lastPrompt != text else { return }
         lastPrompt = text
@@ -655,6 +680,16 @@ final class AgentCompactStatusRowView: NSView, TokenThemed, AgentPageZoomScalabl
                 let pill = quotaPills[element]
                 widths[element] = (pill?.isHidden ?? true) ? 0 : (pill?.fittingSize.width ?? 0)
             }
+        }
+
+        if let plan = planAccessory, !plan.isHidden {
+            let ring = presentation.enabledElements.contains(.contextMeter) ? contextGroup.fittingSize.width + rootStack.spacing : 0
+            let budget = max(0, available - CGFloat(pageZoom.scaled(48)) - rootStack.spacing - ring)
+            // Never sized from its own current width: `widthBudget` re-picks its words.
+            fittingPlan = true
+            plan.widthBudget = budget
+            fittingPlan = false
+            available -= min(plan.naturalWidth, plan.intrinsicContentSize.width) + rootStack.spacing
         }
 
         func fitting() -> [AgentStatusElement] {
