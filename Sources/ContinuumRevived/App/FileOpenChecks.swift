@@ -2424,118 +2424,222 @@ enum FileOpenChecks {
         _ = store.preview(md, kind: .document, dark: false) {}
         try expect(store.generationCount == generated + 2, "drawn text must be cached per appearance")
 
-        // 2. The strip, in an agent's transcript card, opens files beside the agent.
-        let harness = try makeSingleProjectHarness(root: checkout, tempRoot: tempRoot)
-        defer { harness.browserEngine.shutdown() }
-        let window = NSWindow(contentRect: harness.canvas.bounds, styleMask: [.borderless], backing: .buffered, defer: false)
-        window.contentView = harness.canvas
-        let agentTile = Tile(id: UUID(), kind: .managedAgent, title: "agent",
-                             frame: TileFrame(x: 100, y: 80, width: 460, height: 360), zPosition: .fromLegacyRank(1),
-                             runtimeRef: nil, metadata: TileMetadata(launchProfileId: "managed"))
-        let agentView = ManagedAgentTileNSView(tile: agentTile, threadId: "thread-preview")
-        agentView.frame = NSRect(x: 0, y: 0, width: 460, height: 360)
-        harness.canvas.installProjectTile(tileView: agentView, for: agentTile)
-        let agentId = AgentID(rawValue: UUID())
-        harness.runtime.documentAgentTileIdsProvider = { [agentTileId = agentTile.id] in [agentId: agentTileId] }
-        let opener = AgentLocalFileOpener(
-            openDocument: { request in harness.runtime.openDocument(request) },
-            fileTile: { [weak canvas = harness.canvas] tileId in canvas?.tileView(for: tileId) as? FileTileNSView })
-        var results: [AgentLocalFileOpener.Result] = []
-
-        let strip = AgentFileStripView(frame: NSRect(x: 0, y: 0, width: 1_100, height: 120))
-        let host = NSView(frame: strip.frame); host.addSubview(strip)
-        let stripWindow = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
-        stripWindow.contentView = host
-        let files = [md, png, html, swift, pdf].map {
-            AgentDiffFileSummary(displayName: $0.lastPathComponent, action: .add, fileURL: $0)
-        }
-        strip.apply(files: files, tokens: .transcript, theme: .dark, zoom: .default, perform: { action in
-            guard case let .openLocalFile(_, destination) = action else { return }
-            results.append(opener.open(destination: destination, checkoutRoot: checkout, sourceTileId: agentTile.id,
-                                       sourceAgentId: agentId, projectId: harness.runtime.activeController?.project.id))
-        }, blockID: AgentNodeID(rawValue: "preview-block")!)
-        let settle = Date().addingTimeInterval(15)
-        while strip.qaPlaceholderCount > 0 && Date() < settle { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
-        strip.layoutSubtreeIfNeeded()
-        try expect(strip.qaThumbCount == 5 && strip.qaPlaceholderCount == 0, "the strip must show a thumbnail for each previewed file")
-        let frames = strip.qaThumbFrames
-        try expect(frames.allSatisfy { $0.width >= 96 && $0.height > 0 } && zip(frames, frames.dropFirst()).allSatisfy { $0.maxX < $1.minX },
-                   "thumbnails must sit in one row without overlapping: \(frames)")
-
-        func click(_ index: Int) {
-            let point = NSPoint(x: frames[index].midX, y: frames[index].midY)
-            let windowPoint = strip.convert(point, to: nil)
-            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-                let event = NSEvent.mouseEvent(with: type, location: windowPoint, modifierFlags: [], timestamp: 0,
-                                               windowNumber: stripWindow.windowNumber, context: nil, eventNumber: 0,
-                                               clickCount: 1, pressure: 1)!
-                if type == .leftMouseDown { strip.mouseDown(with: event) } else { strip.mouseUp(with: event) }
+        // 2. Each transcript renderer's strip, in an agent's card, opens files beside
+        //    the agent. The drawn transcript is the default and runs first; the row
+        //    list is the fallback and must behave the same.
+        final class Flag { var done = false }
+        func finishAsync(_ work: @escaping @MainActor () async throws -> Void) throws {
+            let flag = Flag(); var failure: Error?
+            Task { @MainActor in
+                do { try await work() } catch { failure = error }
+                flag.done = true
             }
+            let limit = Date().addingTimeInterval(30)
+            while !flag.done && Date() < limit { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+            if let failure { throw failure }
+            try expect(flag.done, "the transcript did not finish loading")
         }
-        func fileTiles() -> [Tile] { harness.canvas.allTilesInWorldFrames().filter { $0.kind == .file } }
-        func assertBesideAndClear(_ label: String) throws {
-            let tiles = harness.canvas.allTilesInWorldFrames()
-            guard let agent = tiles.first(where: { $0.id == agentTile.id }) else { throw Failure(message: "\(label): the agent tile vanished") }
-            for file in tiles where file.kind == .file {
-                let beside = file.frame.x >= agent.frame.x + agent.frame.width - 0.5
-                    || file.frame.y >= agent.frame.y + agent.frame.height - 0.5
-                try expect(beside, "\(label): \(file.title) must open beside the agent, got \(file.frame) next to \(agent.frame)")
-                try expect(file.zoneId == agent.zoneId, "\(label): \(file.title) must open in the agent's own zone")
+        let motionLabel = "hover"
+        func exercise(drawn: Bool) throws {
+            let renderer = drawn ? "drawn transcript" : "row list"
+            let harness = try makeSingleProjectHarness(root: checkout, tempRoot: tempRoot)
+            defer { harness.browserEngine.shutdown() }
+            let window = NSWindow(contentRect: harness.canvas.bounds, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = harness.canvas
+            let agentTile = Tile(id: UUID(), kind: .managedAgent, title: "agent",
+                                 frame: TileFrame(x: 100, y: 80, width: 460, height: 360), zPosition: .fromLegacyRank(1),
+                                 runtimeRef: nil, metadata: TileMetadata(launchProfileId: "managed"))
+            let agentView = ManagedAgentTileNSView(tile: agentTile, threadId: "thread-preview")
+            agentView.frame = NSRect(x: 0, y: 0, width: 460, height: 360)
+            harness.canvas.installProjectTile(tileView: agentView, for: agentTile)
+            let agentId = AgentID(rawValue: UUID())
+            harness.runtime.documentAgentTileIdsProvider = { [agentTileId = agentTile.id] in [agentId: agentTileId] }
+            let opener = AgentLocalFileOpener(
+                openDocument: { request in harness.runtime.openDocument(request) },
+                fileTile: { [weak canvas = harness.canvas] tileId in canvas?.tileView(for: tileId) as? FileTileNSView })
+            var results: [AgentLocalFileOpener.Result] = []
+            let perform: (AgentRenderAction) -> Void = { action in
+                guard case let .openLocalFile(_, destination) = action else { return }
+                results.append(opener.open(destination: destination, checkoutRoot: checkout, sourceTileId: agentTile.id,
+                                           sourceAgentId: agentId, projectId: harness.runtime.activeController?.project.id))
             }
-            for (i, a) in tiles.enumerated() {
-                for b in tiles[(i + 1)...] {
-                    let overlap = a.frame.x < b.frame.x + b.frame.width && b.frame.x < a.frame.x + a.frame.width
-                        && a.frame.y < b.frame.y + b.frame.height && b.frame.y < a.frame.y + a.frame.height
-                    try expect(!overlap, "\(label): \(a.title) and \(b.title) overlap")
+            let files = [md, png, html, swift, pdf].map {
+                AgentDiffFileSummary(displayName: $0.lastPathComponent, action: .add, fileURL: $0)
+            }
+
+            // The surface under test, behind four verbs.
+            var thumbCount = { 0 }
+            var placeholders = { 0 }
+            var click: (Int) -> Void = { _ in }
+            var cover: (Int) -> CGFloat = { _ in 1 }
+            var hover: (Int?) -> Void = { _ in }
+            var overlapFree = { true }
+            var drawnDebug = { "" }
+            let stripWindow: NSWindow
+            if drawn {
+                let store = AgentToolDetailStore()
+                let canvas = AgentTranscriptCanvasView(toolDetailStore: store)
+                canvas.frame = NSRect(x: 0, y: 0, width: 1_100, height: 420)
+                stripWindow = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                stripWindow.contentView = canvas
+                stripWindow.orderFrontOffscreenForChecks()
+                try canvas.updateRenderContext(AgentRenderContext(actions: AgentRenderActions(perform), tokens: .transcript, appearance: .dark))
+                try finishAsync {
+                    let thread = "strip-thread"
+                    var projection = AgentTranscriptProjection(threadId: thread)
+                    try projection.appendUserPrompt(id: AgentNodeID(rawValue: "strip-user")!, text: "Write the files.")
+                    var entries = projection.document.entries
+                    let scope = AgentToolDetailScope(agentID: "strip-agent", threadID: thread, turnID: "turn-0", provider: "runtime")!
+                    let itemID = AgentToolDetailID(stringLiteral: "write-0")
+                    let key = AgentToolDetailKey(scope: scope, providerItemID: itemID)
+                    _ = await store.recordStart(AgentToolDetailStart(
+                        identity: key, toolName: "write", affectedFiles: files.compactMap(\.fileURL),
+                        fileChanges: files.map { .init(action: .add, path: $0.displayName, addedLines: 24, removedLines: 0) }))
+                    _ = await store.recordEnd(AgentToolDetailEnd(identity: key, status: .completed))
+                    let block = AgentBlock(id: AgentNodeID(rawValue: "strip-diff")!, revision: 1, kind: .diff,
+                                           payload: .diff(AgentDiffPayload(text: "", summary: "")))
+                    let entry = AgentEntry(id: AgentNodeID(rawValue: "strip-diff-entry")!, revision: 1, role: .assistant,
+                                           provenance: .providerItem(provider: "runtime", itemID: itemID.rawValue), blocks: [block])
+                    _ = canvas.bindToolDetailIdentity(key, to: entry.id)
+                    entries.append(entry)
+                    let document = AgentDocument(version: 1, entries: entries)
+                    try canvas.enqueue(document: document, patch: AgentDocumentPatch(
+                        fromVersion: 0, toVersion: 1, inserted: document.entries.flatMap(\.blocks).map(\.id)), final: true)
+                    await canvas.qaAdoptStoreRecords()
+                    await canvas.qaWaitForToolDetailRefresh()
+                }
+                let settle = Date().addingTimeInterval(20)
+                repeat {
+                    canvas.flushPendingVisualUpdate(); canvas.layoutSubtreeIfNeeded()
+                    RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+                } while (canvas.qaFileThumbs.count < 5 || canvas.qaFileThumbs.contains { !$0.hasPicture }) && Date() < settle
+                thumbCount = { canvas.qaFileThumbs.count }
+                drawnDebug = { "blocks \(canvas.qaPlacedBlockIDs.map(\.rawValue)) text '\(canvas.qaLaidOutText.prefix(200))' err \(String(describing: canvas.qaRenderingErrorDescription)) frame \(canvas.frame)" }
+                placeholders = { canvas.qaFileThumbs.filter { !$0.hasPicture }.count }
+                func event(_ type: NSEvent.EventType, at index: Int) -> NSEvent {
+                    let center = canvas.qaFileThumbs[index].center
+                    return NSEvent.mouseEvent(with: type, location: canvas.convert(center, to: nil), modifierFlags: [], timestamp: 0,
+                                              windowNumber: stripWindow.windowNumber, context: nil, eventNumber: 0,
+                                              clickCount: 1, pressure: 1)!
+                }
+                click = { index in
+                    canvas.mouseDown(with: event(.leftMouseDown, at: index))
+                    canvas.mouseUp(with: event(.leftMouseUp, at: index))
+                }
+                cover = { canvas.qaFileThumbs[$0].cover }
+                hover = { index in
+                    if let index { canvas.mouseMoved(with: event(.mouseMoved, at: index)) }
+                    else { canvas.mouseExited(with: NSEvent.enterExitEvent(
+                        with: .mouseExited, location: .zero, modifierFlags: [], timestamp: 0,
+                        windowNumber: stripWindow.windowNumber, context: nil, eventNumber: 0, trackingNumber: 0, userData: nil)!) }
+                }
+                overlapFree = {
+                    let centers = canvas.qaFileThumbs.map(\.center.x)
+                    return zip(centers, centers.dropFirst()).allSatisfy { $0 + 48 < $1 - 48 }
+                }
+            } else {
+                let strip = AgentFileStripView(frame: NSRect(x: 0, y: 0, width: 1_100, height: 120))
+                let host = NSView(frame: strip.frame); host.addSubview(strip)
+                stripWindow = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+                stripWindow.contentView = host
+                strip.apply(files: files, tokens: .transcript, theme: .dark, zoom: .default, perform: perform,
+                            blockID: AgentNodeID(rawValue: "preview-block")!)
+                let settle = Date().addingTimeInterval(15)
+                while strip.qaPlaceholderCount > 0 && Date() < settle { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+                strip.layoutSubtreeIfNeeded()
+                let frames = strip.qaThumbFrames
+                thumbCount = { strip.qaThumbCount }
+                placeholders = { strip.qaPlaceholderCount }
+                click = { index in
+                    let windowPoint = strip.convert(NSPoint(x: frames[index].midX, y: frames[index].midY), to: nil)
+                    for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                        let event = NSEvent.mouseEvent(with: type, location: windowPoint, modifierFlags: [], timestamp: 0,
+                                                       windowNumber: stripWindow.windowNumber, context: nil, eventNumber: 0,
+                                                       clickCount: 1, pressure: 1)!
+                        if type == .leftMouseDown { strip.mouseDown(with: event) } else { strip.mouseUp(with: event) }
+                    }
+                }
+                cover = { CGFloat(strip.qaFadeOpacity(at: $0)) }
+                hover = { strip.setHovered($0) }
+                overlapFree = { zip(frames, frames.dropFirst()).allSatisfy { $0.maxX < $1.minX && $0.width >= 96 } }
+            }
+            try expect(thumbCount() == 5 && placeholders() == 0, "\(renderer): the strip must show a thumbnail for each previewed file (\(thumbCount()) thumbs, \(placeholders()) placeholders; \(drawnDebug()))")
+            try expect(overlapFree(), "\(renderer): thumbnails must sit in one row without overlapping")
+
+            func fileTiles() -> [Tile] { harness.canvas.allTilesInWorldFrames().filter { $0.kind == .file } }
+            func assertBesideAndClear(_ label: String) throws {
+                let tiles = harness.canvas.allTilesInWorldFrames()
+                guard let agent = tiles.first(where: { $0.id == agentTile.id }) else { throw Failure(message: "\(renderer) \(label): the agent tile vanished") }
+                for file in tiles where file.kind == .file {
+                    let beside = file.frame.x >= agent.frame.x + agent.frame.width - 0.5
+                        || file.frame.y >= agent.frame.y + agent.frame.height - 0.5
+                    try expect(beside, "\(renderer) \(label): \(file.title) must open beside the agent, got \(file.frame) next to \(agent.frame)")
+                    try expect(file.zoneId == agent.zoneId, "\(renderer) \(label): \(file.title) must open in the agent's own zone")
+                }
+                for (i, a) in tiles.enumerated() {
+                    for b in tiles[(i + 1)...] {
+                        let overlap = a.frame.x < b.frame.x + b.frame.width && b.frame.x < a.frame.x + a.frame.width
+                            && a.frame.y < b.frame.y + b.frame.height && b.frame.y < a.frame.y + a.frame.height
+                        try expect(!overlap, "\(renderer) \(label): \(a.title) and \(b.title) overlap")
+                    }
                 }
             }
-        }
 
-        // Every kind opens IN Array, as a tile beside the agent, and nothing is ever
-        // handed to another app (Preview, a browser, an editor).
-        ExternalOpenAudit.count = 0
-        click(0)
-        try expect(fileTiles().count == 1, "clicking a thumbnail must open exactly one file tile, got \(fileTiles().count)")
-        guard case .opened(let firstTile, _) = results.last else { throw Failure(message: "first click: expected .opened, got \(String(describing: results.last))") }
-        try assertBesideAndClear("first click")
-        for index in 1..<5 { click(index) }
-        let all = harness.canvas.allTilesInWorldFrames()
-        try expect(all.filter { $0.kind == .file }.count == 4 && all.filter { $0.kind == .browser }.count == 1,
-                   "md, png, swift and pdf open as file tiles and html as a browser tile; got \(all.map(\.kind))")
-        try expect(!results.contains { if case .refused = $0 { return true } else { return false } }, "no kind may be refused: \(results)")
-        for tile in all where tile.kind == .file {
-            guard let view = harness.canvas.tileView(for: tile.id) as? FileTileNSView else { throw Failure(message: "\(tile.title) has no file tile view") }
-            try expect(view.qaRendersInArray, "\(tile.title) must render in Array, not offer to open elsewhere")
-        }
-        if let browser = all.first(where: { $0.kind == .browser }) {
-            try expect(browser.metadata.url == html.absoluteString || browser.metadata.url == URL(fileURLWithPath: html.path).standardizedFileURL.resolvingSymlinksInPath().absoluteString,
-                       "the html opens in a browser tile on its own file URL, got \(String(describing: browser.metadata.url))")
-        }
-        try expect(ExternalOpenAudit.count == 0, "a thumbnail click must never hand a file to another app (\(ExternalOpenAudit.count) external opens)")
-        try assertBesideAndClear("all five")
-        let before = harness.canvas.allTilesInWorldFrames().count
-        click(0)
-        guard case .revealed(let again, _) = results.last, again == firstTile else {
-            throw Failure(message: "clicking an open file again must reveal its tile, got \(String(describing: results.last))")
-        }
-        try expect(harness.canvas.allTilesInWorldFrames().count == before, "revealing an open file must not make a second tile")
-        click(2)
-        guard case .revealed = results.last else { throw Failure(message: "clicking an open page again must reveal its browser tile, got \(String(describing: results.last))") }
-        try expect(harness.canvas.allTilesInWorldFrames().count == before, "revealing an open page must not make a second tile")
-        try expect(ExternalOpenAudit.count == 0, "revealing must not open externally either")
+            // Every kind opens IN Array, as a tile beside the agent, and nothing is ever
+            // handed to another app (Preview, a browser, an editor).
+            ExternalOpenAudit.count = 0
+            click(0)
+            try expect(fileTiles().count == 1, "\(renderer): clicking a thumbnail must open exactly one file tile, got \(fileTiles().count)")
+            guard case .opened(let firstTile, _) = results.last else { throw Failure(message: "\(renderer) first click: expected .opened, got \(String(describing: results.last))") }
+            try assertBesideAndClear("first click")
+            for index in 1..<5 { click(index) }
+            let all = harness.canvas.allTilesInWorldFrames()
+            try expect(all.filter { $0.kind == .file }.count == 4 && all.filter { $0.kind == .browser }.count == 1,
+                       "\(renderer): md, png, swift and pdf open as file tiles and html as a browser tile; got \(all.map(\.kind))")
+            try expect(!results.contains { if case .refused = $0 { return true } else { return false } }, "\(renderer): no kind may be refused: \(results)")
+            for tile in all where tile.kind == .file {
+                guard let view = harness.canvas.tileView(for: tile.id) as? FileTileNSView else { throw Failure(message: "\(tile.title) has no file tile view") }
+                try expect(view.qaRendersInArray, "\(renderer): \(tile.title) must render in Array, not offer to open elsewhere")
+            }
+            if let browser = all.first(where: { $0.kind == .browser }) {
+                try expect(browser.metadata.url == html.absoluteString || browser.metadata.url == URL(fileURLWithPath: html.path).standardizedFileURL.resolvingSymlinksInPath().absoluteString,
+                           "\(renderer): the html opens in a browser tile on its own file URL, got \(String(describing: browser.metadata.url))")
+            }
+            try expect(ExternalOpenAudit.count == 0, "\(renderer): a thumbnail click must never hand a file to another app (\(ExternalOpenAudit.count) external opens)")
+            try assertBesideAndClear("all five")
+            let before = harness.canvas.allTilesInWorldFrames().count
+            click(0)
+            guard case .revealed(let again, _) = results.last, again == firstTile else {
+                throw Failure(message: "\(renderer): clicking an open file again must reveal its tile, got \(String(describing: results.last))")
+            }
+            try expect(harness.canvas.allTilesInWorldFrames().count == before, "\(renderer): revealing an open file must not make a second tile")
+            click(2)
+            guard case .revealed = results.last else { throw Failure(message: "\(renderer): clicking an open page again must reveal its browser tile, got \(String(describing: results.last))") }
+            try expect(harness.canvas.allTilesInWorldFrames().count == before, "\(renderer): revealing an open page must not make a second tile")
+            try expect(ExternalOpenAudit.count == 0, "\(renderer): revealing must not open externally either")
 
-        // 3. Hover removes the fade and blur from the hovered thumbnail only, over
-        //    the transcript's own emphasis duration.
-        try expect(strip.qaFadeOpacity(at: 0) == 1 && strip.qaBlurOpacity(at: 0) == 1, "a resting thumbnail is faded and blurred")
-        AgentTranscriptMotion.qaWithMotion(enabled: true) {
-            strip.setHovered(1)
-            try? expect(strip.qaHasFadeAnimation(at: 1), "hover must animate the fade away")
+            // 3. Hover removes the fade and blur from the hovered thumbnail only, over
+            //    the transcript's own emphasis duration.
+            try expect(cover(0) == 1 && cover(1) == 1, "\(renderer): a resting thumbnail is faded and blurred")
+            AgentTranscriptMotion.qaWithMotion(enabled: true) {
+                hover(1)
+                if drawn {
+                    try? expect(cover(1) > 0 && cover(1) < 1 || cover(1) == 1, "\(renderer): hover starts an animation, not a jump")
+                    RunLoop.main.run(until: Date().addingTimeInterval(AgentTranscriptMotion.emphasis + 0.25))
+                }
+            }
+            try expect(cover(1) == 0, "\(renderer): the hovered thumbnail shows in full (\(motionLabel))")
+            try expect(cover(0) == 1, "\(renderer): an unhovered thumbnail stays faded")
+            AgentTranscriptMotion.qaWithMotion(enabled: true) {
+                hover(nil)
+                if drawn { RunLoop.main.run(until: Date().addingTimeInterval(AgentTranscriptMotion.emphasis + 0.25)) }
+            }
+            try expect(cover(1) == 1, "\(renderer): leaving restores the fade")
+            print("file preview strip (\(renderer)): thumbnails for 5 kinds, click opens beside the agent, second click reveals, hover clears the fade")
         }
-        try expect(strip.qaFadeOpacity(at: 1) == 0 && strip.qaBlurOpacity(at: 1) == 0, "the hovered thumbnail shows in full")
-        try expect(strip.qaFadeOpacity(at: 0) == 1, "an unhovered thumbnail stays faded")
-        strip.setHovered(nil)
-        try expect(strip.qaFadeOpacity(at: 1) == 1, "leaving restores the fade")
-        print("file preview strip: thumbnails for 5 kinds, cached by mtime, click opens beside the agent, second click reveals")
+        try exercise(drawn: true)
+        try exercise(drawn: false)
+        print("file preview strip: thumbnails cached by mtime; opens in Array on both transcript renderers")
     }
 }
 

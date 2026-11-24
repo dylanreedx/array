@@ -20,8 +20,18 @@ final class AgentFileStripView: NSView, NSDraggingSource {
     private static func maxWidth(_ zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(240)) }
     private static func minWidth(_ zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(96)) }
     private static func placeholderWidth(_ zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(115)) }
+    /// One picture's width: its own proportions, clamped; a quiet fixed width
+    /// until the picture exists. Shared with the drawn transcript.
+    static func thumbWidth(aspect: CGFloat?, zoom: AgentPageZoom) -> CGFloat {
+        let natural = aspect.map { thumbHeight(zoom: zoom) * $0 } ?? placeholderWidth(zoom)
+        return min(maxWidth(zoom), max(minWidth(zoom), natural))
+    }
+    /// Gap between pictures.
+    static func thumbGap(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.m)) }
     /// How much of the picture's height the fade and blur cover, from the bottom.
-    private static let fadedShare: CGFloat = 0.55
+    static let fadedShare: CGFloat = 0.55
+    /// How opaque the fade is at the picture's bottom edge.
+    static let fadeEndAlpha: CGFloat = 0.8
     static let fadeKey = "file-strip-fade"
 
     private final class Thumb {
@@ -94,7 +104,7 @@ final class AgentFileStripView: NSView, NSDraggingSource {
             thumb.container.applyCorner(.artifact, zoom: zoom)
             thumb.container.borderWidth = CGFloat(LineWidth.hairline)
             thumb.container.borderColor = tokens.decorativeLine.color.cgColor(for: theme)
-            thumb.fade.colors = [surface.copy(alpha: 0) ?? surface, surface.copy(alpha: 0.8) ?? surface]
+            thumb.fade.colors = [surface.copy(alpha: 0) ?? surface, surface.copy(alpha: Self.fadeEndAlpha) ?? surface]
             thumb.preview = FilePreviewStore.shared.preview(url, kind: kind, dark: dark) { [weak self] in
                 self?.previewArrived()
             }
@@ -147,8 +157,7 @@ final class AgentFileStripView: NSView, NSDraggingSource {
         let height = Self.thumbHeight(zoom: zoom)
         var x: CGFloat = 0
         for thumb in thumbs.prefix(count) {
-            let natural = thumb.preview.map { height * $0.aspect } ?? Self.placeholderWidth(zoom)
-            let width = min(Self.maxWidth(zoom), max(Self.minWidth(zoom), natural))
+            let width = Self.thumbWidth(aspect: thumb.preview?.aspect, zoom: zoom)
             let frame = CGRect(x: x, y: 0, width: min(width, max(1, bounds.width - x)), height: height)
             thumb.frame = frame
             thumb.container.frame = frame

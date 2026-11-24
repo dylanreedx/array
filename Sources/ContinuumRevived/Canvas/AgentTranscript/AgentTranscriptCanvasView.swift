@@ -32,7 +32,7 @@ import ContinuumRevivedCore
 /// instead, read once per tile.
 /// Witness: `--transcript-canvas-check` (`TranscriptCanvasChecks`).
 @MainActor
-final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuItemValidation, CornerStyled,
+final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuItemValidation, NSDraggingSource, CornerStyled,
     DrawnCornerReporting, ToolRowLiveClockTicking, AgentCharacterRevisiting {
     // MARK: Switch
 
@@ -100,6 +100,8 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         /// Plan 110: another agent's character in an icon slot. A sprite layer
         /// covers `rect` while one shows; otherwise the mark's fallback icon draws.
         case character(CharacterMark, CGRect)
+        /// A created file's thumbnail in the Changes card's strip.
+        case fileThumb(FileThumb, CGRect)
 
         func shifted(dx: CGFloat, dy: CGFloat) -> Decoration {
             switch self {
@@ -107,6 +109,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
                 var moved = mark
                 moved.fallbackRect = mark.fallbackRect.offsetBy(dx: dx, dy: dy)
                 return .character(moved, rect.offsetBy(dx: dx, dy: dy))
+            case let .fileThumb(thumb, rect): return .fileThumb(thumb, rect.offsetBy(dx: dx, dy: dy))
             case let .fill(rect, color, radius): return .fill(rect.offsetBy(dx: dx, dy: dy), color, radius: radius)
             case let .stroke(rect, color, radius, width):
                 return .stroke(rect.offsetBy(dx: dx, dy: dy), color, radius: radius, width: width)
@@ -125,6 +128,18 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         let snapshot: AgentCharacterSnapshot?
         let fallback: NSImage?
         var fallbackRect: CGRect
+    }
+
+    /// What a drawn thumbnail needs: its picture when the store has one, and the
+    /// index of its hit control, which carries its hover state.
+    struct FileThumb {
+        let picture: FilePreviewPicture?
+    }
+
+    /// A thumbnail's hover identity: its block and where it sits in it.
+    struct ThumbKey: Hashable {
+        let blockID: AgentNodeID
+        let rect: CGRect
     }
 
     /// A clipped, independently scrolled part of a block: a code body or a tool's
@@ -382,6 +397,11 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     private var scrollIndicatorTimer: Timer?
 
     private var hoveredControl: ControlKey?
+    /// Thumbnail hover animation: the fade and blur clear over `emphasis`.
+    private struct ThumbHover { var from: CGFloat; var to: CGFloat; var start: CFTimeInterval }
+    private var thumbHovers: [ThumbKey: ThumbHover] = [:]
+    private var thumbHoverTimer: Timer?
+    private var pressPoint: NSPoint?
     private var pressedControl: ControlKey?
     private var pressedInside = false
     private var focusedControl: ControlKey?
@@ -1663,6 +1683,9 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
                     else { continue }
                     image.draw(in: mark.fallbackRect, from: .zero, operation: .sourceOver, fraction: 1,
                                respectFlipped: true, hints: nil)
+                case let .fileThumb(thumb, rect):
+                    guard rect.intersects(localVisible) else { continue }
+                    drawFileThumb(thumb, rect: rect, key: ThumbKey(blockID: item.blockID, rect: rect), in: context)
                 case let .image(attachmentID, rect, placeholder):
                     guard rect.intersects(localVisible) else { continue }
                     if let source = imageSources[attachmentID]?.image {
@@ -1691,6 +1714,114 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         drawScrollIndicator(in: context)
         qaLastDrawnLineCount = drawnLines
         qaLastDrawnControlCount = drawnControls
+    }
+
+    // MARK: File thumbnails (AgentFileStripView)
+
+    private func thumbHoverValue(_ key: ThumbKey) -> CGFloat {
+        guard let hover = thumbHovers[key] else { return 0 }
+        let t = AgentTranscriptMotion.shouldAnimate
+            ? min(1, max(0, (CACurrentMediaTime() - hover.start) / AgentTranscriptMotion.emphasis)) : 1
+        // The ease-out the sidebar's hover card uses.
+        let eased = 1 - (1 - t) * (1 - t)
+        return hover.from + (hover.to - hover.from) * CGFloat(eased)
+    }
+
+    /// Every drawn thumbnail in document order: its hit centre in view
+    /// coordinates, how much fade and blur still cover it (1 at rest, 0 while
+    /// hovered), and whether its picture has arrived.
+    var qaFileThumbs: [(center: NSPoint, cover: CGFloat, hasPicture: Bool)] {
+        qaPlaced.flatMap { item in
+            item.block.decorations.compactMap { decoration -> (NSPoint, CGFloat, Bool)? in
+                guard case let .fileThumb(thumb, rect) = decoration else { return nil }
+                return (NSPoint(x: insets.left + rect.midX, y: item.y + rect.midY - scrollOffset),
+                        1 - thumbHoverValue(ThumbKey(blockID: item.blockID, rect: rect)), thumb.picture != nil)
+            }
+        }
+    }
+
+    private func thumbKey(for key: ControlKey?) -> ThumbKey? {
+        guard let key, let control = control(for: key), case .perform(.openLocalFile) = control.action else { return nil }
+        return ThumbKey(blockID: key.blockID, rect: control.rect)
+    }
+
+    private func retargetThumbHover(from old: ControlKey?, to new: ControlKey?) {
+        let now = CACurrentMediaTime()
+        for (key, target) in [(thumbKey(for: old), CGFloat(0)), (thumbKey(for: new), CGFloat(1))] {
+            guard let key else { continue }
+            thumbHovers[key] = ThumbHover(from: thumbHoverValue(key), to: target, start: now)
+        }
+        guard AgentTranscriptMotion.shouldAnimate, thumbHoverTimer == nil else { return }
+        thumbHoverTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tickThumbHover() }
+        }
+    }
+
+    private func tickThumbHover() {
+        needsDisplay = true
+        let now = CACurrentMediaTime()
+        thumbHovers = thumbHovers.filter { _, hover in
+            now - hover.start < AgentTranscriptMotion.emphasis || hover.to > 0
+        }
+        if thumbHovers.values.allSatisfy({ CACurrentMediaTime() - $0.start >= AgentTranscriptMotion.emphasis }) {
+            thumbHoverTimer?.invalidate()
+            thumbHoverTimer = nil
+        }
+    }
+
+    private func drawFileThumb(_ thumb: FileThumb, rect: CGRect, key: ThumbKey, in context: CGContext) {
+        let radius = CGFloat(zoom.scaled(CornerRole.artifact.radius))
+        let path = CGPath(roundedRect: rect, cornerWidth: radius, cornerHeight: radius, transform: nil)
+        context.saveGState()
+        context.addPath(path)
+        context.clip()
+        if let picture = thumb.picture {
+            let cover = 1 - thumbHoverValue(key)
+            func fill(_ image: CGImage) {
+                let iw = CGFloat(image.width), ih = CGFloat(image.height)
+                let scale = max(rect.width / iw, rect.height / ih)
+                let target = CGRect(x: rect.midX - iw * scale / 2, y: rect.midY - ih * scale / 2,
+                                    width: iw * scale, height: ih * scale)
+                NSImage(cgImage: image, size: NSSize(width: iw, height: ih))
+                    .draw(in: target, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+            }
+            context.interpolationQuality = .high
+            fill(picture.image)
+            if cover > 0 {
+                let share = AgentFileStripView.fadedShare
+                let from = CGPoint(x: rect.midX, y: rect.minY + rect.height * (1 - share))
+                let to = CGPoint(x: rect.midX, y: rect.maxY)
+                context.setAlpha(cover)
+                // The blurred copy, only over the lower part.
+                context.beginTransparencyLayer(in: rect, auxiliaryInfo: nil)
+                fill(picture.blurred)
+                context.setBlendMode(.destinationIn)
+                if let mask = CGGradient(colorsSpace: CGColorSpaceCreateDeviceGray(),
+                                         colors: [CGColor(gray: 0, alpha: 0), CGColor(gray: 0, alpha: 1)] as CFArray,
+                                         locations: [0, 1]) {
+                    context.drawLinearGradient(mask, start: from, end: to, options: [.drawsBeforeStartLocation])
+                }
+                context.endTransparencyLayer()
+                // The fade into the card.
+                let surface = renderContext.tokens.artifactSurface.color.cgColor(for: theme)
+                if let fade = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
+                                         colors: [surface.copy(alpha: 0) ?? surface,
+                                                  surface.copy(alpha: AgentFileStripView.fadeEndAlpha) ?? surface] as CFArray,
+                                         locations: [0, 1]) {
+                    context.drawLinearGradient(fade, start: from, end: to, options: [])
+                }
+            }
+        } else {
+            // A quiet placeholder while the picture is made: no spinner.
+            context.setFillColor(AgentSurfaceRole.codeSubdued.color.cgColor(for: theme))
+            context.fill(rect)
+        }
+        context.restoreGState()
+        context.setStrokeColor(renderContext.tokens.decorativeLine.color.cgColor(for: theme))
+        context.setLineWidth(CGFloat(LineWidth.hairline))
+        context.addPath(CGPath(roundedRect: rect.insetBy(dx: CGFloat(LineWidth.hairline) / 2, dy: CGFloat(LineWidth.hairline) / 2),
+                               cornerWidth: radius, cornerHeight: radius, transform: nil))
+        context.strokePath()
     }
 
     static func aspectFit(_ size: CGSize, in rect: CGRect) -> CGRect {
@@ -1934,6 +2065,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         let hit = control(at: point)
         let key = hit.flatMap { $0.control.enabled ? $0.key : nil }
         if key != hoveredControl {
+            retargetThumbHover(from: hoveredControl, to: key)
             hoveredControl = key
             needsDisplay = true
         }
@@ -1944,6 +2076,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
 
     override func mouseExited(with event: NSEvent) {
         if hoveredControl != nil {
+            retargetThumbHover(from: hoveredControl, to: nil)
             hoveredControl = nil
             needsDisplay = true
         }
@@ -1962,6 +2095,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         let point = convert(event.locationInWindow, from: nil)
         if let hit = control(at: point), hit.control.enabled {
             pressedControl = hit.key
+            pressPoint = point
             pressedInside = true
             focusedControl = nil
             needsDisplay = true
@@ -1984,6 +2118,20 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     override func mouseDragged(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
         if let pressed = pressedControl {
+            if let start = pressPoint, hypot(point.x - start.x, point.y - start.y) > 4,
+               let control = control(for: pressed), case let .perform(.openLocalFile(_, destination)) = control.action {
+                // Past a click: hand the real file to whatever it is dropped on.
+                pressedControl = nil
+                needsDisplay = true
+                let url = URL(fileURLWithPath: destination)
+                let item = NSDraggingItem(pasteboardWriter: url as NSURL)
+                let size = NSSize(width: control.rect.width, height: control.rect.height)
+                item.setDraggingFrame(NSRect(x: point.x - size.width / 2, y: point.y - size.height / 2,
+                                             width: size.width, height: size.height),
+                                      contents: dragImage(size))
+                beginDraggingSession(with: [item], event: event, source: self)
+                return
+            }
             let inside = control(at: point)?.key == pressed
             if inside != pressedInside {
                 pressedInside = inside
@@ -2016,6 +2164,17 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         needsDisplay = true
         if isPointOverText(convert(event.locationInWindow, from: nil)) { _ = activateLink(at: index) }
     }
+
+    private func dragImage(_ size: NSSize) -> NSImage {
+        let color = AgentSurfaceRole.artifact.color.nsColor(for: theme)
+        return NSImage(size: size, flipped: false) { rect in
+            color.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: 6, yRadius: 6).fill()
+            return true
+        }
+    }
+
+    nonisolated func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation { .copy }
 
     /// The one dispatch for every drawn control.
     func perform(_ action: ControlAction) {
@@ -2473,6 +2632,7 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     /// Waits for the tool-detail snapshot in flight, whose landing re-lays out
     /// the presented rows.
     func qaWaitForToolDetailRefresh() async { await toolDetail.qaWaitForRefresh() }
+    func qaAdoptStoreRecords() async { await toolDetail.qaAdoptStoreRecords() }
 
     /// The tail carries the working gyro: a placed, unsettled tail row, and —
     /// once the view is in a window, where it can animate — the gyro layer

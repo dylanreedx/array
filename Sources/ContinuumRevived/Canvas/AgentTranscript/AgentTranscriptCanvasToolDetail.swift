@@ -259,6 +259,13 @@ final class AgentTranscriptCanvasToolDetail {
         onRefresh?()
     }
 
+    /// Witness only: takes in the records the store already holds, as a
+    /// transcript opened on a store another writer filled would.
+    func qaAdoptStoreRecords() async {
+        guard let store else { return }
+        apply(await store.record([], changesSince: storeRevision))
+    }
+
     /// Returns once every refresh requested so far has landed.
     func qaWaitForRefresh() async {
         while let running = refreshTask { await running.value }

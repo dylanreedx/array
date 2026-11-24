@@ -137,8 +137,9 @@ extension AgentTranscriptCanvasView {
 
     func proseBody(_ block: AgentBlock, isUser: Bool, width: CGFloat) -> Body {
         let leading = isUser ? UserPromptView.leadingInset(zoom: zoom) : 0
+        let trailing = isUser ? UserPromptView.trailingInset(zoom: zoom) : 0
         let vertical = isUser ? UserPromptView.verticalInset(zoom: zoom) : 0
-        let textWidth = max(1, width - leading)
+        let textWidth = max(1, width - leading - trailing)
         var body = Body()
         var y = vertical
         for (index, row) in AssistantProseView.rows(for: block, zoom: zoom).enumerated() {
@@ -160,9 +161,11 @@ extension AgentTranscriptCanvasView {
         }
         body.height = ceil(y + vertical)
         if isUser {
+            // The turn is one full, even tint (UserPromptView's `rule` view).
             body.builder.decorations.insert(.fill(
-                CGRect(x: 0, y: 0, width: UserPromptView.ruleWidth(zoom: zoom), height: body.height),
-                AgentLineRole.authorship.color.cgColor(for: theme), radius: 0), at: 0)
+                CGRect(x: 0, y: 0, width: width, height: body.height),
+                AgentSurfaceRole.artifact.color.cgColor(for: theme),
+                radius: CGFloat(zoom.scaled(CornerRole.artifact.radius))), at: 0)
         }
         return body
     }
@@ -678,7 +681,7 @@ extension AgentTranscriptCanvasView {
         body.builder.decorations.append(.text(countsLine, CGPoint(
             x: max(inset, width - inset - countsWidth), y: Self.centredBaseline(font: caption, top: 0, height: header))))
         let title = CTLineCreateWithAttributedString(Self.coreTextString(NSAttributedString(
-            string: "CHANGES", attributes: [.font: caption, .kern: 0.8, .foregroundColor: secondary])))
+            string: "Changes", attributes: [.font: caption, .foregroundColor: secondary])))
         body.builder.decorations.append(.text(title, CGPoint(x: inset, y: Self.centredBaseline(font: caption, top: 0, height: header))))
         var y = header
         let summary = diff.summary?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -694,7 +697,18 @@ extension AgentTranscriptCanvasView {
         let added = AccentToken.accentDone.color.nsColor(for: theme)
         let removed = AccentToken.accentFailed.color.nsColor(for: theme)
         let mono = NSFont.monospacedSystemFont(ofSize: NSFont.token(.label, zoom: zoom).pointSize, weight: .regular)
-        for file in diff.files.prefix(AgentDiffSummaryView.maximumVisibleFiles) {
+        var stripPlaced = false
+        let shownFiles = Array(diff.files.prefix(AgentDiffSummaryView.maximumVisibleFiles))
+        for file in shownFiles {
+            if AgentDiffSummaryView.previewKind(file) != nil {
+                // One strip holds every previewed file; it takes the place of the first.
+                if !stripPlaced {
+                    stripPlaced = true
+                    appendFileStrip(into: &body, files: shownFiles, blockID: block.id, top: y, width: width, inset: inset)
+                    y += AgentDiffSummaryView.stripHeight(shownFiles, zoom: zoom)
+                }
+                continue
+            }
             let barWidth = min(AgentDiffSummaryView.statBarWidth(zoom: zoom), width * 0.22)
             let barX = width - inset - barWidth
             let total = CGFloat(file.addedLineCount ?? 0) + CGFloat(file.removedLineCount ?? 0)
@@ -762,6 +776,41 @@ extension AgentTranscriptCanvasView {
                                               radius: CGFloat(zoom.scaled(CornerRole.artifact.radius))), at: 0)
         body.clips = true
         return body
+    }
+
+    /// `AgentFileStripView`, drawn: each previewed file's picture, its name under
+    /// it, and one hit area that opens it beside this agent.
+    func appendFileStrip(into body: inout Body, files: [AgentDiffFileSummary], blockID: AgentNodeID,
+                         top: CGFloat, width: CGFloat, inset: CGFloat) {
+        let height = AgentFileStripView.thumbHeight(zoom: zoom)
+        let row = AgentDiffSummaryView.fileRowHeight(zoom: zoom)
+        let captionFont = NSFont.monospacedSystemFont(ofSize: NSFont.token(.caption, zoom: zoom).pointSize, weight: .regular)
+        let captionTop = top + height + S(Space.s) / 2
+        let dark = theme == .dark
+        var x = inset
+        for file in files {
+            guard let url = file.fileURL, let kind = AgentDiffSummaryView.previewKind(file) else { continue }
+            let picture = FilePreviewStore.shared.preview(url, kind: kind, dark: dark) { [weak self] in
+                self?.invalidatePresentation(of: blockID)
+            }
+            let thumbWidth = min(AgentFileStripView.thumbWidth(aspect: picture?.aspect, zoom: zoom), max(1, width - inset - x))
+            let rect = CGRect(x: x, y: top, width: thumbWidth, height: height)
+            body.builder.decorations.append(.fileThumb(FileThumb(picture: picture), rect))
+            var caption = Self.line(url.lastPathComponent, font: captionFont, color: primary)
+            let room = thumbWidth + 2
+            if Self.width(of: caption) > room {
+                let ellipsis = CTLineCreateWithAttributedString(NSAttributedString(string: "\u{2026}", attributes: [.font: captionFont]))
+                if let truncated = CTLineCreateTruncatedLine(caption, Double(room), .middle, ellipsis) { caption = truncated }
+            }
+            // NSTextField paints text 2pt inside its frame; so does the card's header.
+            body.builder.decorations.append(.text(caption, CGPoint(
+                x: x + 2, y: Self.centredBaseline(font: captionFont, top: captionTop, height: row))))
+            body.builder.controls.append(Control(
+                rect: rect, title: url.lastPathComponent,
+                style: .region(hoverFill: nil, pressedFill: nil, radius: CGFloat(zoom.scaled(CornerRole.artifact.radius))),
+                action: .perform(.openLocalFile(blockID: blockID, destination: url.path))))
+            x += thumbWidth + AgentFileStripView.thumbGap(zoom: zoom)
+        }
     }
 
     // MARK: File attachments (FileReferenceRenderer)
