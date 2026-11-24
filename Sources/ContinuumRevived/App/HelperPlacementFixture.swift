@@ -192,12 +192,11 @@ final class HelperPlacementFixture {
 
     var zoneRect: TileFrame? { canvas.zonePlacement(for: zoneId).map(CanvasEngine.zoneWorldFrame) }
 
-    /// The real canvas, framed on the zone, offscreen, in the light appearance;
-    /// and beside it a labelled plan of the same world frames.
+    /// The real canvas, framed on the zone, offscreen, in the light and dark
+    /// appearances; and beside them a labelled plan of the same world frames.
     func renderStill(to directory: URL, name: String) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
-        window.appearance = NSAppearance(named: .aqua)
         window.contentView = canvas
         window.orderFrontOffscreenForChecks()
         defer { window.orderOut(nil) }
@@ -209,13 +208,15 @@ final class HelperPlacementFixture {
                 x: rect.x + rect.width / 2 - Double(canvas.bounds.width) / zoom / 2,
                 y: rect.y + rect.height / 2 - Double(canvas.bounds.height) / zoom / 2, zoom: zoom))
         }
-        canvas.layoutSubtreeIfNeeded()
-        CATransaction.flush()
-        canvas.display()
-        if let rep = canvas.bitmapImageRepForCachingDisplay(in: canvas.bounds) {
+        for (suffix, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+            window.appearance = NSAppearance(named: appearance)
+            canvas.layoutSubtreeIfNeeded()
+            CATransaction.flush()
+            canvas.display()
+            guard let rep = canvas.bitmapImageRepForCachingDisplay(in: canvas.bounds) else { continue }
             canvas.cacheDisplay(in: canvas.bounds, to: rep)
             try rep.representation(using: .png, properties: [:])?
-                .write(to: directory.appendingPathComponent("\(name)-canvas.png"), options: .atomic)
+                .write(to: directory.appendingPathComponent("\(name)-canvas-\(suffix).png"), options: .atomic)
         }
         try plan().write(to: directory.appendingPathComponent("\(name)-plan.png"), options: .atomic)
     }
