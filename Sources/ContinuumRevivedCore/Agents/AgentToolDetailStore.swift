@@ -1342,8 +1342,11 @@ public enum AgentToolDetailPresenter {
             let changeBasename = change.path.split(separator: "/").last.map(String.init) ?? change.path
             let matchIndex = availableURLs.firstIndex { $0.lastPathComponent == changeBasename }
             let name: String
+            var fileURL: URL?
             if let matchIndex {
-                name = abbreviatedFilePath(availableURLs.remove(at: matchIndex))
+                let url = availableURLs.remove(at: matchIndex)
+                fileURL = url
+                name = abbreviatedFilePath(url)
             } else {
                 name = change.path
             }
@@ -1352,11 +1355,12 @@ public enum AgentToolDetailPresenter {
                 addedLineCount: change.addedLines,
                 removedLineCount: change.removedLines,
                 countsAreLowerBound: change.countsAreLowerBound,
-                action: diffAction(change.action)
+                action: diffAction(change.action),
+                fileURL: fileURL
             ))
         }
         for url in availableURLs.prefix(max(0, maxObservableFiles - result.count)) {
-            result.append(AgentDiffFileSummary(displayName: abbreviatedFilePath(url)))
+            result.append(AgentDiffFileSummary(displayName: abbreviatedFilePath(url), fileURL: url))
         }
         return result
     }

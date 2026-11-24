@@ -221,6 +221,12 @@ public struct AgentDiffFileSummary: Codable, Equatable, Sendable {
     /// the same false precision as reporting +0/−0 for an unmeasured file.
     public var countsAreLowerBound: Bool
     public var action: AgentDiffFileAction?
+    /// The file's full location, host-local only. It is deliberately NOT in
+    /// `CodingKeys`: a summary that is persisted or synced keeps its
+    /// privacy-reduced `displayName`, and the URL exists only on the Mac that
+    /// wrote the file, composed from the tool-detail store at presentation time.
+    /// It lets a card offer to open, reveal or drag the file; it grants nothing.
+    public var fileURL: URL?
 
     /// Both counts measured. Kept as a computed property so no caller can set
     /// availability independently of the values it describes.
@@ -255,8 +261,10 @@ public struct AgentDiffFileSummary: Codable, Equatable, Sendable {
         addedLineCount: UInt? = nil,
         removedLineCount: UInt? = nil,
         countsAreLowerBound: Bool = false,
-        action: AgentDiffFileAction? = nil
+        action: AgentDiffFileAction? = nil,
+        fileURL: URL? = nil
     ) {
+        self.fileURL = fileURL
         self.displayName = displayName
         self.addedLineCount = addedLineCount
         self.removedLineCount = removedLineCount

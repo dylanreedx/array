@@ -152,6 +152,16 @@ extension UIProbeGeometry {
               semanticWritePayload.files.isEmpty else {
             throw GeometryError(message: "file-change card did not compose one abbreviated host-local write target")
         }
+        // The card must know WHICH file, not just a name: the chip opens,
+        // reveals and drags it. And the location must stay host-local — the
+        // encoded summary (what persists and syncs) carries no path.
+        let writtenSummary = writeList.qaPresentedDiffFiles(for: writeBlockID)?.first
+        guard writtenSummary?.fileURL == URL(fileURLWithPath: "/Users/private/project/Sources/Written.swift"),
+              let writtenSummary,
+              let encoded = try? JSONEncoder().encode(writtenSummary),
+              !String(decoding: encoded, as: UTF8.self).contains("/Users/private") else {
+            throw GeometryError(message: "file-change card lost the file's full location, or leaked it into the encoded summary")
+        }
         clock.advance(11)
         _ = await store.expireNow()
         guard expiringList.qaPresentedToolSummary(for: blockID) == "Completed" else {
