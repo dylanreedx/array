@@ -85,7 +85,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
 
         let hostBounds = hostView.bounds
         let contentHeight = CGFloat(92) + displayEntries.reduce(CGFloat.zero) { total, entry in
-            total + (entry.isSection ? 24 : 46)
+            total + (entry.isSection ? CommandCenterSectionCell.height : 46)
         }
         let availableWidth = max(0, hostBounds.width - 32)
         let availableHeight = max(0, hostBounds.height - 32)
@@ -1208,13 +1208,12 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         return ShortcutBindingStore().gestures(for: shortcut).first?.displayString
     }
 
-    func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool {
-        if case .section = entry(at: row) { return true }
-        return false
-    }
+    /// Not a group row: AppKit paints a group row with a tinted band and a rule under
+    /// it. Headings stay unselectable (`shouldSelectRow`) and sit on the surface.
+    func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool { false }
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        if case .section = entry(at: row) { return 24 }
+        if case .section = entry(at: row) { return CommandCenterSectionCell.height }
         return 46
     }
 
@@ -1605,74 +1604,225 @@ final class CommandCenterSurfaceView: NSView, CornerStyled {
     }
 }
 
-private final class CommandCenterSectionCell: NSTableCellView {
+final class CommandCenterSectionCell: NSTableCellView {
+    /// A section heading takes the quiet secondary label the sidebar's own headings
+    /// use (`SidebarSectionLabelView`): sentence case, no tint band, no rule, and
+    /// the same left edge as the row titles below it.
+    static let height: CGFloat = 28
+    /// The row icon's left edge: the 14pt glyph sits centred in its 18pt box at x 14.
+    static let leadingInset: CGFloat = 16
+
+    private let label = NSTextField(labelWithString: "")
+
     init(title: String) {
         super.init(frame: .zero)
-        let label = NSTextField(labelWithString: title.uppercased())
-        label.font = .systemFont(ofSize: 10.5, weight: .semibold)
-        label.textColor = .secondaryLabelColor
+        label.stringValue = Self.displayTitle(title)
+        label.font = .token(.label)
+        label.lineBreakMode = .byTruncatingTail
         label.translatesAutoresizingMaskIntoConstraints = false
         addSubview(label)
         NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 42),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.leadingInset),
             label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2)
+            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4)
         ])
+        applyColour()
+        setAccessibilityElement(false)
     }
 
     required init?(coder: NSCoder) { nil }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyColour()
+    }
+
+    private func applyColour() { label.textColor = TextToken.textSecondary.color.nsColor(in: self) }
+
+    /// The built-in categories are Title Case in the model ("Agents & Tiles"); every
+    /// other heading (a provider, a CLI, "Made by agents") is already as it should read.
+    static func displayTitle(_ title: String) -> String {
+        guard CommandCenterCategory(rawValue: title) != nil else { return title }
+        let words = title.split(separator: " ", omittingEmptySubsequences: false)
+        return words.enumerated().map { index, word in
+            index == 0 ? String(word) : word.first?.isLetter == true ? word.lowercased() : String(word)
+        }.joined(separator: " ")
+    }
 }
 
-private final class CommandCenterItemCell: NSTableCellView {
+/// One file in the Open file step. The row the @ menu draws for a file: name over its
+/// folder, the folder ending in "/", a kind icon; plus what ⌘K adds: the characters the
+/// query matched, and who made it and how long ago.
+struct PaletteFileRow {
+    var path: String
+    /// Offsets into the folder text the row shows (`folder`), then the name, as
+    /// `AgentCompletion.matchedPathIndices` gives them: into the whole relative path.
+    var matched: [Int] = []
+    var agent: AgentIdentityChipView.Identity?
+    var age: String?
+
+    var name: String { (path as NSString).lastPathComponent }
+    /// What the @ menu shows under a file: its folder with a trailing "/", "./" at the root.
+    var folder: String {
+        let parent = (path as NSString).deletingLastPathComponent
+        return parent.isEmpty || parent == "." ? "./" : parent + "/"
+    }
+    private var parentCount: Int {
+        let parent = (path as NSString).deletingLastPathComponent
+        return parent.isEmpty || parent == "." ? 0 : parent.count + 1
+    }
+    var nameMatches: Set<Int> { Set(matched.filter { $0 >= parentCount }.map { $0 - parentCount }) }
+    var folderMatches: Set<Int> { Set(matched.filter { $0 < parentCount - 1 }) }
+}
+
+final class CommandCenterItemCell: NSTableCellView {
+    static let rowHeight: CGFloat = 46
+    private let titleField = NSTextField(labelWithString: "")
+    private let subtitleField = NSTextField(labelWithString: "")
+    private var file: PaletteFileRow?
+    private var accessory: NSView?
+
     init(item: CommandCenterItem, shortcut: String? = nil, creationPreview: String? = nil) {
         super.init(frame: .zero)
-        let image = NSImageView(image: NSImage(systemSymbolName: item.iconSystemName, accessibilityDescription: nil) ?? NSImage())
-        image.contentTintColor = item.row.isSelectable ? .labelColor : .tertiaryLabelColor
-        image.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
-        image.translatesAutoresizingMaskIntoConstraints = false
-
-        let title = NSTextField(labelWithString: item.title)
-        title.font = .systemFont(ofSize: 13.5, weight: .medium)
-        title.textColor = item.row.isSelectable ? .labelColor : .tertiaryLabelColor
-        title.lineBreakMode = .byTruncatingTail
-
         let combinedSubtitle = [item.subtitle, creationPreview].compactMap { $0 }.joined(separator: " · ")
-        let subtitle = NSTextField(labelWithString: combinedSubtitle)
-        subtitle.font = .systemFont(ofSize: 11.5)
-        subtitle.textColor = .secondaryLabelColor
-        subtitle.lineBreakMode = .byTruncatingMiddle
-        subtitle.isHidden = combinedSubtitle.isEmpty
-
         let shortcutLabel = NSTextField(labelWithString: shortcut ?? "")
         shortcutLabel.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
         shortcutLabel.textColor = .secondaryLabelColor
         shortcutLabel.alignment = .right
         shortcutLabel.isHidden = shortcut == nil
         shortcutLabel.translatesAutoresizingMaskIntoConstraints = false
+        build(symbol: item.iconSystemName, selectable: item.row.isSelectable, trailing: shortcutLabel, trailingMinWidth: 34)
+        titleField.stringValue = item.title
+        titleField.textColor = item.row.isSelectable ? .labelColor : .tertiaryLabelColor
+        subtitleField.stringValue = combinedSubtitle
+        subtitleField.isHidden = combinedSubtitle.isEmpty
+        setAccessibilityLabel(item.title)
+        if !combinedSubtitle.isEmpty { setAccessibilityHelp(combinedSubtitle) }
+    }
 
-        let stack = NSStackView(views: [title, subtitle])
+    /// A plain row: used by design stills and previews that have no `CommandCenterItem`.
+    convenience init(symbol: String, title: String, subtitle: String?, shortcut: String?) {
+        self.init(item: CommandCenterItem(
+            row: .action(.newNote), category: .actions, title: title, subtitle: subtitle,
+            iconSystemName: symbol, aliases: [], isDefaultVisible: true, isSafeRecent: false, stableID: "plain:\(title)"), shortcut: shortcut)
+    }
+
+    /// A file in the Open file step. `accessory` is the agent identity when an agent made it.
+    init(file: PaletteFileRow) {
+        self.file = file
+        super.init(frame: .zero)
+        let trailing: NSView
+        if let agent = file.agent {
+            let chip = AgentIdentityChipView(frame: .zero)
+            chip.configure(agent, age: file.age ?? "")
+            accessory = chip
+            trailing = chip
+        } else {
+            let label = NSTextField(labelWithString: file.age ?? "")
+            label.font = .systemFont(ofSize: 11)
+            label.textColor = .secondaryLabelColor
+            label.alignment = .right
+            label.isHidden = file.age == nil
+            trailing = label
+        }
+        trailing.translatesAutoresizingMaskIntoConstraints = false
+        build(symbol: FileKindIcon.symbol(forPath: file.path), selectable: true, trailing: trailing, trailingMinWidth: 0)
+        refreshFileText()
+        let who = file.agent.map { ", made by \($0.name)" } ?? ""
+        setAccessibilityLabel(file.name + who)
+        setAccessibilityHelp(file.folder)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    /// The metrics every command-center row shares: icon 14pt in an 18pt box at 14,
+    /// text at 42, name 13.5 medium over a 11.5 line, 14pt trailing inset.
+    private func build(symbol: String, selectable: Bool, trailing: NSView, trailingMinWidth: CGFloat) {
+        let image = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: nil) ?? NSImage())
+        image.contentTintColor = selectable ? .labelColor : .tertiaryLabelColor
+        image.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
+        image.translatesAutoresizingMaskIntoConstraints = false
+
+        titleField.font = .systemFont(ofSize: 13.5, weight: .medium)
+        titleField.lineBreakMode = .byTruncatingTail
+        subtitleField.font = .systemFont(ofSize: 11.5)
+        subtitleField.textColor = .secondaryLabelColor
+        subtitleField.lineBreakMode = .byTruncatingMiddle
+
+        let stack = NSStackView(views: [titleField, subtitleField])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 1
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(image)
         addSubview(stack)
-        addSubview(shortcutLabel)
-        NSLayoutConstraint.activate([
+        addSubview(trailing)
+        var constraints = [
             image.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
             image.centerYAnchor.constraint(equalTo: centerYAnchor),
             image.widthAnchor.constraint(equalToConstant: 18),
             image.heightAnchor.constraint(equalToConstant: 18),
             stack.leadingAnchor.constraint(equalTo: image.trailingAnchor, constant: 10),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: shortcutLabel.leadingAnchor, constant: -10),
-            shortcutLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
-            shortcutLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-            shortcutLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 34),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailing.leadingAnchor, constant: -10),
+            trailing.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            trailing.centerYAnchor.constraint(equalTo: centerYAnchor),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor)
-        ])
-        setAccessibilityLabel(item.title)
-        if !combinedSubtitle.isEmpty { setAccessibilityHelp(combinedSubtitle) }
+        ]
+        if trailingMinWidth > 0 { constraints.append(trailing.widthAnchor.constraint(greaterThanOrEqualToConstant: trailingMinWidth)) }
+        NSLayoutConstraint.activate(constraints)
     }
 
-    required init?(coder: NSCoder) { nil }
+    override var backgroundStyle: NSView.BackgroundStyle {
+        didSet {
+            guard backgroundStyle != oldValue, file != nil else { return }
+            refreshFileText()
+            (accessory as? AgentIdentityChipView)?.isEmphasized = backgroundStyle == .emphasized
+        }
+    }
+
+    /// The name and folder with the matched characters one step heavier. Attributed
+    /// text is not recoloured by the selection, so the selected colours are chosen here.
+    private func refreshFileText() {
+        guard let file else { return }
+        let emphasized = backgroundStyle == .emphasized
+        let primary: NSColor = emphasized ? .alternateSelectedControlTextColor : .labelColor
+        let secondary: NSColor = emphasized ? .alternateSelectedControlTextColor.withAlphaComponent(0.8) : .secondaryLabelColor
+        func text(_ string: String, matched: Set<Int>, size: CGFloat, weight: NSFont.Weight, heavy: NSFont.Weight, colour: NSColor) -> NSAttributedString {
+            let out = NSMutableAttributedString(string: string, attributes: [
+                .font: NSFont.systemFont(ofSize: size, weight: weight), .foregroundColor: colour])
+            for index in matched where index < string.count {
+                out.addAttributes([.font: NSFont.systemFont(ofSize: size, weight: heavy), .foregroundColor: primary],
+                                  range: NSRange(location: index, length: 1))
+            }
+            return out
+        }
+        titleField.attributedStringValue = text(file.name, matched: file.nameMatches, size: 13.5, weight: .medium, heavy: .semibold, colour: file.matched.isEmpty ? primary : primary.withAlphaComponent(0.72))
+        subtitleField.attributedStringValue = text(file.folder, matched: file.folderMatches, size: 11.5, weight: .regular, heavy: .semibold, colour: secondary)
+    }
+}
+
+// MARK: - Design reference
+
+extension LaunchProfilePalette {
+    /// DESIGN ONLY: the real palette on its agent → model step, headless, so a new
+    /// step can be put beside it at the same state. Nothing in the app calls this.
+    static func designReferenceModelStep(host: NSWindow, query: String) -> NSView? {
+        AgentModelCatalog.shared.resetForQA(snapshot: AgentCatalogQAFixture.claude)
+        AgentModelCatalog.shared.resetForQA(snapshot: AgentCatalogQAFixture.codex)
+        let suite = "continuum.design.palette-reference.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else { return nil }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let palette = LaunchProfilePalette(defaults: defaults)
+        palette.show(near: host, profiles: [])
+        palette.enterAgentModelStep(harnesses: [.claudeCode, .codex], parent: .action(.newManagedAgent))
+        if !query.isEmpty {
+            palette.searchField?.stringValue = query
+            palette.applyFilter(query: query)
+        }
+        guard let view = palette.paletteView else { return nil }
+        objc_setAssociatedObject(view, "palette", palette, .OBJC_ASSOCIATION_RETAIN)
+        let rows = palette.displayEntries.reduce(CGFloat.zero) { $0 + ($1.isSection ? CommandCenterSectionCell.height : 46) }
+        view.frame.size.height = min(520, max(220, 92 + rows))
+        return view
+    }
 }
