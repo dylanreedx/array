@@ -223,6 +223,11 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             characters: keyCode == 36 ? "\r" : "", charactersIgnoringModifiers: keyCode == 36 ? "\r" : "", isARepeat: false, keyCode: keyCode) else { return false }
         return handleKeyEvent(event)
     }
+    /// QA: the list's document height and its visible (clip) height; a short list must not overflow.
+    var listHeightsForQA: (document: CGFloat, clip: CGFloat) {
+        paletteView?.layoutSubtreeIfNeeded()
+        return (tableView?.frame.height ?? 0, tableView?.enclosingScrollView?.contentView.bounds.height ?? 0)
+    }
     var isChoosingFileForQA: Bool { navigationLevel == .files }
     var fileRowsForQA: [PaletteFileRow] { displayEntries.compactMap { if case let .file(row) = $0 { return row }; return nil } }
     var sectionTitlesForQA: [String] { displayEntries.compactMap { if case let .section(title) = $0 { return title }; return nil } }
@@ -1601,11 +1606,13 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     /// Grow or shrink the surface to its rows, as `show` sizes it.
     private func resizeForEntries() {
         guard let paletteView, let host = paletteView.superview else { return }
-        // The list is exactly its rows (the table knows where its last row ends), so the gap
-        // above the footer is the same for one row as for many. 86 = search field, the gaps
-        // around the list, and the footer.
-        let rowsBottom = displayEntries.isEmpty ? 0 : (tableView?.rect(ofRow: displayEntries.count - 1).maxY ?? 0)
-        let contentHeight = CGFloat(86) + (displayEntries.isEmpty ? 2 * CommandCenterItemCell.rowHeight : rowsBottom)
+        // The panel is the chrome around the clip view (measured, not guessed) plus the
+        // table's own height, so a short list fits with nothing left to scroll.
+        paletteView.layoutSubtreeIfNeeded()
+        let clipHeight = tableView?.enclosingScrollView?.contentView.bounds.height ?? 0
+        let chrome = paletteView.frame.height - clipHeight
+        let tableHeight = displayEntries.isEmpty ? 2 * CommandCenterItemCell.rowHeight : (tableView?.frame.height ?? 0)
+        let contentHeight = chrome + tableHeight
         let height = min(520, contentHeight, max(0, host.bounds.height - 32))
         let top = paletteView.frame.maxY
         paletteView.frame = NSRect(x: paletteView.frame.minX, y: top - height, width: paletteView.frame.width, height: height)

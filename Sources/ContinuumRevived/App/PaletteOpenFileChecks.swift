@@ -111,11 +111,16 @@ enum PaletteOpenFileChecks {
                    "the fuzzy hit must carry match positions and its absolute path, got \(hit)")
         try expect(palette.sectionTitlesForQA == ["Files"], "search results sit under one Files header, got \(palette.sectionTitlesForQA)")
 
+        // A short list must fit its clip view exactly, or a scroller shows with nothing to scroll.
+        var heights = palette.listHeightsForQA
+        try expect(heights.document <= heights.clip + 0.5, "one-result list overflows its clip view: document \(heights.document) > clip \(heights.clip)")
         // A file at the project root is filed under the project's name, not "./".
         palette.typeForQA("notes.md")
         try pump(palette) { palette.fileRowsForQA.contains { $0.name == "notes.md" } }
         let rootFile = palette.fileRowsForQA.first { $0.name == "notes.md" }
         try expect(rootFile?.folder == f.pbRoot.lastPathComponent || rootFile?.folder != "./", "a root file's folder line is the project's name, got \(String(describing: rootFile?.folder))")
+        heights = palette.listHeightsForQA
+        try expect(heights.document <= heights.clip + 0.5, "root-file list overflows its clip view: document \(heights.document) > clip \(heights.clip)")
         // A query nothing matches says so, in the footer's own type.
         palette.typeForQA("qzxjwvk")
         try pump(palette) { palette.fileEmptyTextForQA != nil }
