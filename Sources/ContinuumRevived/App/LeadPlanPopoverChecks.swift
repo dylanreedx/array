@@ -232,6 +232,83 @@ extension ManagedLeadPlanChecks {
         try expect(supervisor.declareStatus(AgentDeclaredStatus(now: "Restarting the redesign", plan: supervisor.records[lead]?.declaredStatus?.plan,
                                                                 declaredAt: Date(), planDeclaredAt: Date()), for: lead), "status refused")
         try await AgentPresenceChecks.eventually("the count did not drop with the decision") { line.sentence.contains("1 needs you") }
-        print("Lead plan popover passed: in the status row, \(line.sentence); opens above the line inside the tile with the shared entrance; a second click closes it with the shared exit and does not reopen; Escape closes; stays open through a helper's change; an orb reveals its helper; a chip answers into the composer; chips start at the question; the count follows the decision")
+
+        // 10. The pile is an avatar stack: each front orb cuts an even gap out
+        // of the one behind it, at every rung, in both appearances, and again
+        // when helpers leave the pile.
+        let stills = ProcessInfo.processInfo.environment["CONTINUUM_LEAD_PLAN_ORB_CUT_DIR"].map { URL(fileURLWithPath: $0) }
+        var cuts: [String] = []
+        func cutPass(_ label: String) throws {
+            for percent in [100, 80] {
+                _ = tile.setPageZoom(AgentPageZoom(percent: percent))
+                tile.wakeChrome(); tile.layoutSubtreeIfNeeded(); line.layoutSubtreeIfNeeded()
+                for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+                    cuts.append("\(label)@\(percent)%/\(name): " + (try orbCut(line, appearance: appearance,
+                        still: stills?.appendingPathComponent("\(label)-\(percent)-\(name).png"))))
+                }
+            }
+            _ = tile.setPageZoom(.default)
+        }
+        try await AgentPresenceChecks.eventually("the pile did not hold four orbs") { line.qaPile.count == 4 }
+        try cutPass("pile4")
+        // Helpers finish until two are left: the cut follows the new pile.
+        for h in line.glance?.helpers ?? [] where line.qaPile.count > 2 && h.phase != .done {
+            supervisor.qaDeliver(.turnStarted(threadId: AgentSupervisor.threadId(for: h.id), turnId: "t9"), to: h.id, now: Date())
+            supervisor.qaDeliver(.turnCompleted(threadId: AgentSupervisor.threadId(for: h.id), turnId: "t9", outcome: .completed,
+                                                errorMessage: nil), to: h.id, now: Date())
+            supervisor.qaDeliver(.sessionStateChanged(.ready), to: h.id, now: Date())
+            _ = supervisor.fileReport(AgentReport(summary: "Done"), for: h.id, at: Date())
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        try await AgentPresenceChecks.eventually("the pile did not shrink to two orbs: \(line.qaPile.count)") { line.qaPile.count == 2 }
+        try cutPass("pile2")
+        print("Lead plan orb cut: " + cuts.joined(separator: "; "))
+
+        print("Lead plan popover passed: in the status row, \(line.sentence); opens above the line inside the tile with the shared entrance; a second click closes it with the shared exit and does not reopen; Escape closes; stays open through a helper's change; an orb reveals its helper; a chip answers into the composer; chips start at the question; the count follows the decision; each orb in the pile cuts an even gap out of the one behind it")
+    }
+
+    /// Renders the line and, for each orb and the one behind it, reads the
+    /// band just outside the front orb's circle (its ring's outer edge) out to
+    /// the knockout gap, where it overlaps the rear orb: every pixel there must
+    /// be clear. The rear orb must still paint beyond the band.
+    static func orbCut(_ line: AgentLeadPlanView, appearance: NSAppearance.Name, still: URL?) throws -> String {
+        let theme = NSAppearance(named: appearance)!
+        let previous = NSApp.appearance
+        defer { NSApp.appearance = previous; line.window?.appearance = nil }
+        NSApp.appearance = theme; line.window?.appearance = theme
+        line.window?.contentView?.layoutSubtreeIfNeeded(); line.layoutSubtreeIfNeeded()
+        let pile = line.qaPile
+        try expect(pile.count >= 2, "orb cut: the pile has \(pile.count) orbs")
+        var result: Result<NSBitmapImageRep, Error>!
+        theme.performAsCurrentDrawingAppearance { result = Result { try UIProbe.bitmap(of: line, id: "lead-plan-orb-cut") } }
+        let rep = try result.get()
+        if let still {
+            try FileManager.default.createDirectory(at: still.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try rep.representation(using: .png, properties: [:])!.write(to: still)
+        }
+        let scale = CGFloat(rep.pixelsWide) / line.bounds.width
+        let gap = PlanMetrics.s(SwarmPose.knockout, line.zoom)
+        func alpha(_ px: Int, _ py: Int) -> CGFloat { rep.colorAt(x: px, y: py)?.alphaComponent ?? 0 }
+        var worst: CGFloat = 0, rearInk = 0, sampled = 0
+        for i in 1..<pile.count {
+            let front = pile[i - 1].frame, rear = pile[i].frame
+            let fc = CGPoint(x: front.midX, y: front.midY), rc = CGPoint(x: rear.midX, y: rear.midY)
+            let r = front.width / 2
+            for py in Int(rear.minY * scale)..<Int(ceil(rear.maxY * scale)) {
+                for px in Int(rear.minX * scale)..<Int(ceil(rear.maxX * scale)) {
+                    let p = CGPoint(x: (CGFloat(px) + 0.5) / scale, y: (CGFloat(py) + 0.5) / scale)
+                    let df = hypot(p.x - fc.x, p.y - fc.y), dr = hypot(p.x - rc.x, p.y - rc.y)
+                    guard dr < r - 0.5 else { continue }
+                    // Half a device pixel of antialiasing at each edge of the band.
+                    if df > r + 0.5 / scale, df < r + gap - 0.5 / scale {
+                        worst = max(worst, alpha(px, py)); sampled += 1
+                    } else if df > r + gap + 1, alpha(px, py) > 0.5 { rearInk += 1 }
+                }
+            }
+        }
+        try expect(sampled > 0, "orb cut: no pixels in the gap band (gap \(gap) pt at \(scale)x)")
+        try expect(rearInk > 0, "orb cut: the rear orbs painted nothing outside the gap")
+        try expect(worst < 0.1, "orb cut: the rear orb paints inside the gap around the front orb (alpha \(String(format: "%.2f", worst)) over \(sampled) px)")
+        return "gap \(String(format: "%.2f", gap)) pt clear over \(sampled) px (max alpha \(String(format: "%.2f", worst)))"
     }
 }

@@ -268,6 +268,25 @@ final class PlanOrbView: NSView {
 
     override var intrinsicContentSize: NSSize { NSSize(width: side, height: side) }
 
+    /// In a pile: everything except the orb in front (`front`, in this orb's
+    /// own coordinates) grown by `gap`, so the front orb's whole circle and a
+    /// thin gap of canvas show and this one is clipped along that arc.
+    func cut(by front: NSRect?, gap: CGFloat) {
+        guard let layer else { return }
+        guard let front else { layer.mask = nil; return }
+        let mask = (layer.mask as? CAShapeLayer) ?? CAShapeLayer()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        mask.fillRule = .evenOdd
+        mask.frame = bounds
+        let path = CGMutablePath()
+        path.addRect(bounds.insetBy(dx: -side, dy: -side))
+        path.addEllipse(in: front.insetBy(dx: -gap, dy: -gap))
+        mask.path = path
+        CATransaction.commit()
+        layer.mask = mask
+    }
+
     func show(now: Date) {
         needsLayout = true
         guard case let .agent(id, working) = kind else { return }

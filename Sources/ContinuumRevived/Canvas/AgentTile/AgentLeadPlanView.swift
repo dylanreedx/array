@@ -261,8 +261,15 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
             x += orbSide - overlap
             // The front orb, the most pressing, draws on top.
             o.layer?.zPosition = CGFloat(orbs.count - i)
+            // ...and cuts a clean, even gap out of the one behind it, as the
+            // inbox swarm's front card does (`SwarmPose.knockout`).
+            o.cut(by: i == 0 ? nil : orbs[i - 1].frame.offsetBy(dx: -o.frame.minX, dy: -o.frame.minY),
+                  gap: PlanMetrics.s(SwarmPose.knockout, zoom))
         }
     }
+
+    /// Checks only: the pile, front first.
+    var qaPile: [PlanOrbView] { orbs }
 
     override func draw(_ dirtyRect: NSRect) {
         let theme = effectiveTokenTheme
