@@ -249,11 +249,13 @@ func runAgentMessageCardChecks() async throws {
         throw Failure(message: "the delegation must create a child with a tile")
     }
     let childId = AgentID(rawValue: childUUID)
-    // A delegated child is named from its first prompt; that prompt is now an
-    // envelope, and the name must still be the words, never the markup.
+    // A delegated child's first prompt is an envelope, and its name must never
+    // be the markup. With no title, a helper is no longer named from its brief
+    // at all (bacd2a195): it is "Helper agent N" until a generated name lands.
     let childName = supervisor.records[childId]?.humanDisplayName ?? ""
-    try expect(childName.hasPrefix("Audit the parser") && !childName.contains("<") && !childName.contains("array-agent"),
-               "the child must be named by its task's words, not by the envelope: \(childName)")
+    try expect(!childName.isEmpty && !childName.contains("<") && !childName.contains("array-agent")
+               && (childName.hasPrefix("Helper agent") || childName.hasPrefix("Audit the parser")),
+               "the child must be named by the fallback or its task's words, never the envelope: \(childName)")
     let messagedRow = ArrayWorkspaceTool.messageLine(targetName: childName)
     guard let childView = canvas.tileView(for: childTile) as? ManagedAgentTileNSView else {
         throw Failure(message: "the child's tile is not a managed-agent tile")
@@ -321,7 +323,7 @@ func runAgentMessageCardChecks() async throws {
         ((try? toolRows(parentView)) ?? []).contains { $0.title == messagedRow }
     }
     let parentTitles = try toolRows(parentView).map(\.title)
-    try expect(parentRowsDrawn && messagedRow.hasPrefix("Messaged Audit the parser"),
+    try expect(parentRowsDrawn && messagedRow.hasPrefix("Messaged ") && messagedRow.contains(childName),
                "the parent's row must read '\(messagedRow)', got \(parentTitles)")
     let messageRow = try toolRows(parentView).first { $0.title == messagedRow }
     try expect(messageRow?.summary.hasPrefix("Rerun the failing leg.") == true,
