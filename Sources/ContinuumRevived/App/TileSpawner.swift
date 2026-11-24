@@ -8350,6 +8350,10 @@ final class TileSpawner {
         try expect(browserRuntime.webView.url?.isFileURL == true, "network-lite check must load a real local fixture in WKWebView")
         try expect(waitUntil { browserRuntime.networkLiteEvents.contains { $0.kind == BrowserNetworkLiteEventKind.navigationStarted.rawValue } }, "network-lite navigation start event did not reach app buffer")
 
+        // A file page now loads through `loadFileURL` (b705bc719), whose `isLoading` is
+        // false until WebKit has started, so the wait above can return before the
+        // commit and finish events land. Wait for them: they must still arrive.
+        _ = waitUntil { browserRuntime.networkLiteEvents.contains { $0.kind == BrowserNetworkLiteEventKind.committed.rawValue || $0.kind == BrowserNetworkLiteEventKind.finished.rawValue } }
         let events = browserRuntime.networkLiteEvents
         let eventKinds = events.map(\.kind)
         guard let startIndex = eventKinds.firstIndex(of: BrowserNetworkLiteEventKind.navigationStarted.rawValue) else {
@@ -8368,7 +8372,7 @@ final class TileSpawner {
             && mainNavigationStarted
             && mainNavigationFinishedOrCommitted
         try expect(mainNavigationStarted, "network-lite log did not capture the fixture main navigation start URL")
-        try expect(mainNavigationFinishedOrCommitted, "network-lite log did not capture a committed or finished event after start")
+        try expect(mainNavigationFinishedOrCommitted, "network-lite log did not capture a committed or finished event after start; events: \(events.map { "\($0.kind)|\($0.url)|\($0.errorDescription ?? "-")" })")
         try expect(noFakeStatusCodes, "network-lite log invented a status code for a file/data navigation")
         try expect(realWKWebViewNavigationEvents, "network-lite log did not use real WKWebView delegate events")
 
