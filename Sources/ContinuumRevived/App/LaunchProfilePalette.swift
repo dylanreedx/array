@@ -15,13 +15,28 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     /// already carries the dispatch identity and the agent id is not a tile id —
     /// a closed agent has no tile, which is the whole reason this row exists.
     var onOpenTilelessAgent: ((UUID) -> Bool)?
+    /// The Open file step. The palette owns the step's look and keys; the app owns the
+    /// index and the open itself, so a file only ever opens through `openProjectFile`.
+    var onSearchFiles: ((String, @escaping @MainActor ([PaletteFileRow]) -> Void) -> Void)?
+    /// The step's resting sections: files agents made, then recent files.
+    var onFileSections: (() -> [(title: String, rows: [PaletteFileRow])])?
+    var onOpenFile: ((PaletteFileRow, PaletteFileAction) -> Bool)?
     var onClose: (() -> Void)?
+
+    enum PaletteFileAction { case openBesideAgent, reveal, copy }
 
     static let rootAccessibilityIdentifier = "ContinuumLaunchProfilePaletteRoot"
 
     private var paletteView: NSView?
     private var tableView: NSTableView?
     private var searchField: NSTextField?
+    private var footerLabel: NSTextField?
+    private var fileSearchToken = 0
+    private var fileSearchResults: [PaletteFileRow] = []
+    /// A search is out for the typed query; a key pressed meanwhile waits for it, so it never acts on the stale list.
+    private var fileSearchPending = false
+    private var deferredFileAction: PaletteFileAction?
+    private static let recentFilesDefaultsKey = "continuum.commandCenter.recentFiles"
 
     private var rows: [LaunchPaletteRow] = []
     private var rootRows: [LaunchPaletteRow] = []
@@ -37,9 +52,13 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     private weak var previousFirstResponder: NSResponder?
     private weak var previousFirstResponderWindow: NSWindow?
 
+    private static let standardFooter = "Type to search · ↑↓ Select · Return Open · Esc Close"
+    private static let fileFooter = "↑↓ Select · Return Open next to agent · ⌘Return Reveal in Finder · ⌥Return Copy file · Esc Back"
+
     private enum NavigationLevel {
         case root
         case agentModels
+        case files
     }
 
     private var navigationLevel = NavigationLevel.root
@@ -97,6 +116,8 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         let topInset = max(24, min(72, hostBounds.height * 0.10))
         let y = max(16, hostBounds.maxY - size.height - topInset)
         paletteView.frame = NSRect(origin: NSPoint(x: x, y: y), size: size)
+        paletteView.layoutSubtreeIfNeeded()
+        tableView?.sizeLastColumnToFit()
         host.makeFirstResponder(searchField)
     }
 
@@ -108,6 +129,10 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     func handleKeyEvent(_ event: NSEvent) -> Bool {
         guard isVisible, event.type == .keyDown else { return false }
         let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if navigationLevel == .files, event.keyCode == 36 || event.keyCode == 76, !modifiers.contains(.control) {
+            if modifiers.contains(.command) { commitFile(.reveal); return true }
+            if modifiers.contains(.option) { commitFile(.copy); return true }
+        }
         if modifiers.contains(.command) || modifiers.contains(.control) || modifiers.contains(.option) {
             return false
         }
@@ -171,6 +196,11 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         agentModelParent = .action(.newManagedAgent)
         rootQuery = ""
         navigationLevel = .root
+        fileSearchToken += 1
+        fileSearchPending = false
+        deferredFileAction = nil
+        fileSearchResults.removeAll()
+        footerLabel = nil
         filtered.removeAll()
         displayEntries.removeAll()
         filesystemCreationPreview = nil
@@ -181,9 +211,24 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
 
     var searchTextForQA: String { searchField?.stringValue ?? "" }
     var isChoosingAgentModelForQA: Bool { navigationLevel == .agentModels }
+    /// QA: type into the search field as the user would.
+    func typeForQA(_ text: String) { searchField?.stringValue = text; applyFilter(query: text) }
+    /// QA: a real key event through the production key handler.
+    @discardableResult
+    func keyForQA(keyCode: UInt16, modifiers: NSEvent.ModifierFlags = []) -> Bool {
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0, windowNumber: 0, context: nil,
+            characters: keyCode == 36 ? "\r" : "", charactersIgnoringModifiers: keyCode == 36 ? "\r" : "", isARepeat: false, keyCode: keyCode) else { return false }
+        return handleKeyEvent(event)
+    }
+    var isChoosingFileForQA: Bool { navigationLevel == .files }
+    var fileRowsForQA: [PaletteFileRow] { displayEntries.compactMap { if case let .file(row) = $0 { return row }; return nil } }
+    var sectionTitlesForQA: [String] { displayEntries.compactMap { if case let .section(title) = $0 { return title }; return nil } }
+    var footerTextForQA: String { footerLabel?.stringValue ?? "" }
     var filteredDisplayNamesForQA: [String] { filtered.map(\.displayName) }
 
     var selectedDisplayNameForQA: String? {
+        if let tableView, case let .file(file) = entry(at: tableView.selectedRow) { return file.name }
         guard let tableView, case let .item(item) = entry(at: tableView.selectedRow) else { return nil }
         switch item.row {
         case let .action(action): return action.displayName
@@ -945,6 +990,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         column.title = "Command"
         column.width = 640
         column.resizingMask = .autoresizingMask
+        table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         table.addTableColumn(column)
 
         let scroll = NSScrollView()
@@ -954,7 +1000,8 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         scroll.borderType = .noBorder
         scroll.drawsBackground = false
 
-        let footer = NSTextField(labelWithString: "Type to search · ↑↓ Select · Return Open · Esc Close")
+        let footer = NSTextField(labelWithString: Self.standardFooter)
+        footerLabel = footer
         footer.font = .systemFont(ofSize: 10.5, weight: .medium)
         footer.textColor = .secondaryLabelColor
         footer.alignment = .center
@@ -1172,6 +1219,8 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         switch entry {
         case let .section(title):
             return CommandCenterSectionCell(title: title)
+        case let .file(file):
+            return CommandCenterItemCell(file: file)
         case let .item(item):
             return CommandCenterItemCell(
                 item: item,
@@ -1218,6 +1267,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     }
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
+        if case .file = entry(at: row) { return true }
         guard case let .item(item) = entry(at: row) else { return false }
         return item.row.isSelectable
     }
@@ -1230,6 +1280,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     }
 
     private func applyFilter(query: String) {
+        if navigationLevel == .files { applyFileFilter(query: query); return }
         let storedRecentIDs = defaults.stringArray(forKey: Self.recentDefaultsKey) ?? []
         let recentIDs = navigationLevel == .root
             ? LaunchPaletteModel.sanitizeRecentIDs(storedRecentIDs, rows: rows)
@@ -1339,8 +1390,13 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     private func commitSelection() {
         guard let table = tableView else { return }
         let row = table.selectedRow
+        if navigationLevel == .files { commitFile(.openBesideAgent); return }
         guard case let .item(presented) = entry(at: row) else { return }
         let selected = presented.row
+        if navigationLevel == .root, selected == .action(.openFile), onSearchFiles != nil {
+            enterFileStep()
+            return
+        }
         if navigationLevel == .root, selected == .action(.newManagedAgent) {
             enterAgentModelStep(harnesses: Self.plainAgentHarnesses(defaults: defaults), parent: selected)
             return
@@ -1461,11 +1517,111 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         applyFilter(query: "")
     }
 
+    private func isSelectableEntry(_ entry: CommandCenterDisplayEntry) -> Bool {
+        switch entry {
+        case let .item(item): return item.row.isSelectable
+        case .file: return true
+        case .section: return false
+        }
+    }
+
+    /// The Open file step: a search over the project's files with the files agents made
+    /// and the recent ones resting under an empty query.
+    private func enterFileStep() {
+        guard let searchField else { return }
+        rootQuery = searchField.stringValue
+        navigationLevel = .files
+        searchField.placeholderString = "Open a file…"
+        searchField.stringValue = ""
+        footerLabel?.stringValue = Self.fileFooter
+        applyFilter(query: "")
+        resizeForEntries()
+    }
+
+    private func applyFileFilter(query: String) {
+        let trimmed = query.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty {
+            fileSearchToken += 1
+            fileSearchPending = false
+            deferredFileAction = nil
+            let sections = (onFileSections?() ?? []).filter { !$0.rows.isEmpty }
+            displayEntries = sections.flatMap { [CommandCenterDisplayEntry.section($0.title)] + $0.rows.map(CommandCenterDisplayEntry.file) }
+            reloadFileEntries()
+            return
+        }
+        fileSearchToken += 1
+        let token = fileSearchToken
+        fileSearchPending = true
+        onSearchFiles?(trimmed) { [weak self] rows in
+            guard let self, self.navigationLevel == .files, token == self.fileSearchToken else { return }
+            self.fileSearchPending = false
+            self.fileSearchResults = rows
+            self.displayEntries = rows.isEmpty ? [] : [.section("Files")] + rows.map(CommandCenterDisplayEntry.file)
+            self.reloadFileEntries()
+            if let action = self.deferredFileAction { self.deferredFileAction = nil; self.commitFile(action) }
+        }
+    }
+
+    private func reloadFileEntries() {
+        tableView?.reloadData()
+        if let first = displayEntries.indices.first(where: { if case .file = displayEntries[$0] { return true }; return false }) {
+            tableView?.selectRowIndexes(IndexSet(integer: first), byExtendingSelection: false)
+        } else {
+            tableView?.deselectAll(nil)
+        }
+        resizeForEntries()
+    }
+
+    /// Grow or shrink the surface to its rows, as `show` sizes it.
+    private func resizeForEntries() {
+        guard let paletteView, let host = paletteView.superview else { return }
+        // Search field and its gap above, the rows and the 2pt between them, the footer below.
+        let contentHeight = CGFloat(86) + displayEntries.reduce(CGFloat.zero) { total, entry in
+            total + (entry.isSection ? CommandCenterSectionCell.height : CommandCenterItemCell.rowHeight) + 2
+        }
+        let height = min(520, max(150, contentHeight), max(0, host.bounds.height - 32))
+        let top = paletteView.frame.maxY
+        paletteView.frame = NSRect(x: paletteView.frame.minX, y: top - height, width: paletteView.frame.width, height: height)
+        paletteView.layoutSubtreeIfNeeded()
+        tableView?.sizeLastColumnToFit()
+    }
+
+    private func commitFile(_ action: PaletteFileAction) {
+        if fileSearchPending { deferredFileAction = action; return }
+        guard navigationLevel == .files, let table = tableView, case let .file(file) = entry(at: table.selectedRow) else {
+            NSSound.beep()
+            return
+        }
+        let succeeded = onOpenFile?(file, action) ?? false
+        if succeeded { recordRecentFile(file) }
+        close(restoreFocus: true)
+    }
+
+    /// Recent files, newest first, as `timestamp|path`.
+    private func recordRecentFile(_ file: PaletteFileRow) {
+        guard let path = file.absolutePath else { return }
+        var stored = (defaults.stringArray(forKey: Self.recentFilesDefaultsKey) ?? []).filter { !$0.hasSuffix("|" + path) }
+        stored.insert("\(Int(Date().timeIntervalSince1970))|\(path)", at: 0)
+        defaults.set(Array(stored.prefix(12)), forKey: Self.recentFilesDefaultsKey)
+    }
+
+    /// The recent files the app asks for, newest first.
+    func recentFiles(limit: Int = 6) -> [(path: String, openedAt: Date)] {
+        (defaults.stringArray(forKey: Self.recentFilesDefaultsKey) ?? []).prefix(limit).compactMap { entry in
+            guard let bar = entry.firstIndex(of: "|"), let stamp = TimeInterval(entry[..<bar]) else { return nil }
+            return (String(entry[entry.index(after: bar)...]), Date(timeIntervalSince1970: stamp))
+        }
+    }
+
     private func navigateBackOrClose() {
-        guard navigationLevel == .agentModels, let searchField else {
+        guard navigationLevel != .root, let searchField else {
             close(restoreFocus: true)
             return
         }
+        fileSearchToken += 1
+        fileSearchPending = false
+        deferredFileAction = nil
+        footerLabel?.stringValue = Self.standardFooter
         navigationLevel = .root
         rows = rootRows
         searchField.placeholderString = "Search Array…"
@@ -1481,7 +1637,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         repeat {
             next += delta
             guard displayEntries.indices.contains(next) else { return }
-            if case let .item(item) = displayEntries[next], item.row.isSelectable {
+            if isSelectableEntry(displayEntries[next]) {
                 table.selectRowIndexes(IndexSet(integer: next), byExtendingSelection: false)
                 table.scrollRowToVisible(next)
                 return
@@ -1507,6 +1663,7 @@ private enum CommandCenterDisplayEntry {
     /// the fixed category enum (.plans/10-command-center-absorbs-sidebar.md).
     case section(String)
     case item(CommandCenterItem)
+    case file(PaletteFileRow)
 
     var isSection: Bool {
         if case .section = self { return true }
@@ -1660,6 +1817,8 @@ struct PaletteFileRow {
     var matched: [Int] = []
     var agent: AgentIdentityChipView.Identity?
     var age: String?
+    /// Where the file is on disk; `path` is what the row shows (relative to the project when it is inside it).
+    var absolutePath: String?
 
     var name: String { (path as NSString).lastPathComponent }
     /// What the @ menu shows under a file: its folder with a trailing "/", "./" at the root.
@@ -1804,6 +1963,23 @@ final class CommandCenterItemCell: NSTableCellView {
 // MARK: - Design reference
 
 extension LaunchProfilePalette {
+    /// DESIGN ONLY: the real palette on its Open file step, headless, fed fixture rows,
+    /// so the stills show the production view rather than a copy of it.
+    static func designFileStep(host: NSWindow, query: String, sections: [(title: String, rows: [PaletteFileRow])], results: [PaletteFileRow]) -> NSView? {
+        let suite = "continuum.design.palette-files.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else { return nil }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let palette = LaunchProfilePalette(defaults: defaults)
+        palette.onSearchFiles = { _, deliver in deliver(results) }
+        palette.onFileSections = { sections }
+        palette.show(near: host, profiles: [])
+        palette.enterFileStep()
+        if !query.isEmpty { palette.typeForQA(query) }
+        guard let view = palette.paletteView else { return nil }
+        objc_setAssociatedObject(view, "palette", palette, .OBJC_ASSOCIATION_RETAIN)
+        return view
+    }
+
     /// DESIGN ONLY: the real palette on its agent → model step, headless, so a new
     /// step can be put beside it at the same state. Nothing in the app calls this.
     static func designReferenceModelStep(host: NSWindow, query: String) -> NSView? {

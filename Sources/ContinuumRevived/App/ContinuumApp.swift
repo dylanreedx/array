@@ -1471,6 +1471,17 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--palette-open-file-check") {
+            do {
+                _ = NSApplication.shared
+                try PaletteOpenFileChecks.run()
+                print("ContinuumRevivedPaletteOpenFileChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
         if CommandLine.arguments.contains("--palette-agent-harness-check") {
             do {
                 _ = NSApplication.shared
@@ -9325,6 +9336,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var agentActivityChangeBase = ActivityLogSnapshot.empty
     private var profilePalette: LaunchProfilePalette?
     private var paletteContextTileId: UUID?
+    private let paletteFileIndex = AgentFileIndex()
+    /// Where "Copy file" writes and what "Reveal in Finder" calls: injectable so a check never touches the user's pasteboard or Finder.
+    var paletteFilePasteboard: NSPasteboard = .general
+    var paletteRevealInFinder: ([URL]) -> Void = { NSWorkspace.shared.activateFileViewerSelecting($0) }
     private var paletteContextZoneId: UUID?
     /// The in-window Settings modal while it is open; nil once it closes.
     private var settingsModal: SettingsModal?
@@ -14894,7 +14909,85 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             self?.paletteContextTileId = nil
             self?.paletteContextZoneId = nil
         }
+        configureOpenFileStep(palette)
         return palette
+    }
+
+    // MARK: - Command Center: Open file
+
+    private func configureOpenFileStep(_ palette: LaunchProfilePalette) {
+        palette.onSearchFiles = { [weak self] query, deliver in
+            guard let self, let project = self.activeProject else { deliver([]); return }
+            let root = URL(fileURLWithPath: project.rootPath, isDirectory: true)
+            let context = AgentCompletionContext(
+                agentID: AgentID(rawValue: UUID()), backend: .claudeCode, checkoutRoot: root,
+                gitRoot: root, arrayProjectRoot: root, trustState: .trusted)
+            let index = self.paletteFileIndex
+            Task { @MainActor in
+                let found = await index.suggestions(for: AgentCompletionQuery(
+                    trigger: "@", text: query, replacementRange: NSRange(location: 0, length: 0), context: context))
+                deliver(found.filter { !$0.title.hasSuffix("/") }.prefix(12).map { completion in
+                    let relative = completion.detail ?? completion.title
+                    return PaletteFileRow(path: relative, matched: completion.matchedPathIndices,
+                                          absolutePath: root.appendingPathComponent(relative).path)
+                })
+            }
+        }
+        palette.onFileSections = { [weak self, weak palette] in
+            guard let self else { return [] }
+            let rootPath = self.activeProject?.rootPath
+            let made = self.agentSupervisor.agentMadeFiles.recent(limit: 6).map { entry -> PaletteFileRow in
+                let record = self.agentSupervisor.records[AgentID(rawValue: entry.agentID)]
+                return PaletteFileRow(
+                    path: Self.paletteFileDisplayPath(entry.path, projectRoot: rootPath), matched: [],
+                    agent: record.map { .init(agentID: entry.agentID, name: $0.displayName, model: $0.model,
+                                              identityColor: $0.identityColor, characterName: $0.characterName) },
+                    age: Self.paletteFileAge(since: entry.madeAt), absolutePath: entry.path)
+            }
+            let madePaths = Set(made.compactMap(\.absolutePath))
+            let recent = (palette?.recentFiles(limit: 8) ?? []).filter {
+                !madePaths.contains($0.path) && FileManager.default.fileExists(atPath: $0.path)
+            }.prefix(5).map {
+                PaletteFileRow(path: Self.paletteFileDisplayPath($0.path, projectRoot: rootPath), matched: [],
+                               age: Self.paletteFileAge(since: $0.openedAt), absolutePath: $0.path)
+            }
+            return [("Made by agents", made), ("Recent", Array(recent))]
+        }
+        palette.onOpenFile = { [weak self] file, action in
+            guard let self, let path = file.absolutePath else { return false }
+            let url = URL(fileURLWithPath: path)
+            switch action {
+            case .reveal:
+                self.paletteRevealInFinder([url])
+                return true
+            case .copy:
+                // A file on the pasteboard, so it pastes into Mail or Slack as an attachment.
+                self.paletteFilePasteboard.clearContents()
+                return self.paletteFilePasteboard.writeObjects([url as NSURL])
+            case .openBesideAgent:
+                // Beside the tile the palette was opened from: the asking agent's own.
+                let placement: WorkspaceRuntime.FileOpenPlacement = self.paletteContextTileId.map { .beside(tileId: $0) } ?? .automatic
+                if case .failure = self.openProjectFile(path: path, placement: placement) { return false }
+                return true
+            }
+        }
+    }
+
+    nonisolated static func paletteFileDisplayPath(_ path: String, projectRoot: String?) -> String {
+        if let projectRoot {
+            let prefix = projectRoot.hasSuffix("/") ? projectRoot : projectRoot + "/"
+            if path.hasPrefix(prefix) { return String(path.dropFirst(prefix.count)) }
+        }
+        let home = NSHomeDirectory() + "/"
+        return path.hasPrefix(home) ? "~/" + path.dropFirst(home.count) : path
+    }
+
+    nonisolated static func paletteFileAge(since date: Date, now: Date = Date()) -> String {
+        let seconds = max(0, now.timeIntervalSince(date))
+        if seconds < 60 { return "now" }
+        if seconds < 3600 { return "\(Int(seconds / 60))m" }
+        if seconds < 86_400 { return "\(Int(seconds / 3600))h" }
+        return seconds < 172_800 ? "yesterday" : "\(Int(seconds / 86_400))d"
     }
 
     // Go-live Phase 4: the friends-alpha feedback channel. The public issues
@@ -26074,6 +26167,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     /// M1.4: the detach-sweep leg needs a real agent record bound to a tile, and
     /// then needs to read the supervisor's observer counts back.
     var qaAgentSupervisor: AgentSupervisor { agentSupervisor }
+    /// QA: ⌘K through the production opener, so the palette carries the app's own wiring.
+    func qaProfilePaletteAfterOpening() -> LaunchProfilePalette? { openProfilePalette(); return profilePalette }
     func qaBindAgentComposerState(_ view: ManagedAgentTileNSView) {
         view.bindV2ComposerState(draftStore: agentComposerDraftStore, promptHistory: agentPromptHistory,
                                  attachmentStore: agentComposerAttachmentStore)

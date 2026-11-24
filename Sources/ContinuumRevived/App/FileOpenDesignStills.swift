@@ -132,64 +132,26 @@ enum FileOpenDesignStills {
 
     // MARK: card
 
-    nonisolated(unsafe) private static var retained: [AnyObject] = []
-    private static let rowHeight: CGFloat = CommandCenterItemCell.rowHeight
     private static let cardWidth: CGFloat = 660
-    private static let footerText = "↑↓ Select · Return Open next to agent · ⌘Return Reveal in Finder · ⌥Return Copy file · Esc Back"
 
+    private static func paletteRow(_ row: Row) -> PaletteFileRow {
+        PaletteFileRow(
+            path: row.path, matched: row.matched,
+            agent: row.agent.map { .init(agentID: $0.id, name: $0.name, model: $0.model, identityColor: $0.color, characterName: nil) },
+            age: row.age, absolutePath: "/fixture/" + row.path)
+    }
+
+    /// The production Open file step, built by the real palette with fixture rows.
     private static func card(query: String, sections: [(String?, [Row])]) -> NSView {
-        var entries: [Any] = []
-        for (title, rows) in sections where !rows.isEmpty {
-            if let title { entries.append(title) }
-            entries.append(contentsOf: rows)
-        }
-        let body = entries.reduce(CGFloat.zero) { $0 + ($1 is String ? CommandCenterSectionCell.height : rowHeight) + 2 }
-        let height = min(520, 92 + body)
-        let card = CommandCenterSurfaceView(frame: NSRect(x: 0, y: 0, width: cardWidth, height: height))
-
-        // The same search field the palette builds.
-        let search = NSSearchField()
-        search.placeholderString = "Open a file…"
-        search.stringValue = query
-        search.focusRingType = .none
-        search.isBezeled = false
-        search.drawsBackground = false
-        search.font = .systemFont(ofSize: 16, weight: .medium)
-        search.frame = NSRect(x: 18, y: height - 14 - 28, width: cardWidth - 36, height: 28)
-        card.addSubview(search)
-
-        let table = NSTableView()
-        table.headerView = nil
-        table.rowHeight = rowHeight
-        table.intercellSpacing = NSSize(width: 0, height: 2)
-        table.backgroundColor = .clear
-        table.selectionHighlightStyle = .regular
-        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("c"))
-        column.width = cardWidth - 16
-        column.resizingMask = .autoresizingMask
-        table.addTableColumn(column)
-        let source = Source(entries: entries, query: query, rowHeight: rowHeight)
-        table.dataSource = source
-        table.delegate = source
-        retained.append(source)
-        objc_setAssociatedObject(card, "table", table, .OBJC_ASSOCIATION_RETAIN)
-        objc_setAssociatedObject(card, "select", entries.firstIndex(where: { !($0 is String) }) ?? 0, .OBJC_ASSOCIATION_RETAIN)
-        // Palette layout: scroll top = search bottom + 10, scroll bottom = footer top + 8.
-        let scroll = NSScrollView(frame: NSRect(x: 8, y: 34, width: cardWidth - 16, height: height - 14 - 28 - 10 - 34))
-        scroll.drawsBackground = false
-        scroll.borderType = .noBorder
-        scroll.hasVerticalScroller = false
-        table.frame = NSRect(x: 0, y: 0, width: cardWidth - 16, height: body)
-        scroll.documentView = table
-        card.addSubview(scroll)
-
-        let footer = NSTextField(labelWithString: footerText)
-        footer.font = .systemFont(ofSize: 10.5, weight: .medium)
-        footer.textColor = .secondaryLabelColor
-        footer.alignment = .center
-        footer.frame = NSRect(x: 14, y: 10, width: cardWidth - 28, height: 16)
-        card.addSubview(footer)
-        return card
+        let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 700), styleMask: [.borderless], backing: .buffered, defer: false)
+        host.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 700))
+        let resting = sections.compactMap { title, rows in title.map { ($0, rows.map(paletteRow)) } }
+        let results = query.isEmpty ? [] : (sections.first?.1 ?? []).map(paletteRow)
+        let view = LaunchProfilePalette.designFileStep(host: host, query: query, sections: resting, results: results) ?? NSView()
+        view.removeFromSuperview()
+        objc_setAssociatedObject(view, "host", host, .OBJC_ASSOCIATION_RETAIN)
+        view.frame.size.width = cardWidth
+        return view
     }
 
     /// The current ⌘K agent → model step, built by the real palette.
@@ -282,27 +244,5 @@ enum FileOpenDesignStills {
         return rep
     }
 
-    // MARK: table
 
-    private final class Source: NSObject, NSTableViewDataSource, NSTableViewDelegate {
-        let entries: [Any]; let query: String; let rowHeight: CGFloat
-        init(entries: [Any], query: String, rowHeight: CGFloat) { self.entries = entries; self.query = query; self.rowHeight = rowHeight }
-        func numberOfRows(in tableView: NSTableView) -> Int { entries.count }
-        func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool { false }
-        func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { !(entries[row] is String) }
-        func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-            entries[row] is String ? CommandCenterSectionCell.height : rowHeight
-        }
-        func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-            switch entries[row] {
-            case let title as String: return CommandCenterSectionCell(title: title)
-            case let file as Row:
-                return CommandCenterItemCell(file: PaletteFileRow(
-                    path: file.path, matched: file.matched,
-                    agent: file.agent.map { .init(agentID: $0.id, name: $0.name, model: $0.model, identityColor: $0.color, characterName: nil) },
-                    age: file.age))
-            default: return nil
-            }
-        }
-    }
 }
