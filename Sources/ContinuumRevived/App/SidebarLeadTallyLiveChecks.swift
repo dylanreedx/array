@@ -43,6 +43,10 @@ enum SidebarLeadTallyLiveChecks {
             f.inbox.restoreParentFolds([uuid(0): true])
             f.inbox.reload(rows: rows)
             f.inbox.layoutForQA()
+            if let dir = ProcessInfo.processInfo.environment["ARRAY_STILLS_DIR"] {
+                try SidebarParityCapture.capture(
+                    f.inbox, to: URL(fileURLWithPath: dir).appendingPathComponent("lead-tally-\(tag).png"))
+            }
             guard let tally = f.inbox.sidebarTallies[uuid(0)] else {
                 throw Failure(description: "lead tally: \(tag): the lead has no tally")
             }

@@ -44,6 +44,16 @@ enum SidebarHoverCardOverlayChecks {
             try expect(cards().isEmpty, "\(tag): a hover under Settings must not draw a card")
             try expect(host.subviews.last is SettingsOverlayView, "\(tag): nothing may sit above Settings")
 
+            // Reviewer still: `ARRAY_STILLS_DIR` names where to write it.
+            if let dir = ProcessInfo.processInfo.environment["ARRAY_STILLS_DIR"] {
+                host.layoutSubtreeIfNeeded()
+                SidebarParityCapture.pump()
+                if let rep = host.bitmapImageRepForCachingDisplay(in: host.bounds) {
+                    host.cacheDisplay(in: host.bounds, to: rep)
+                    try rep.representation(using: .png, properties: [:])?
+                        .write(to: URL(fileURLWithPath: dir).appendingPathComponent("hover-card-under-settings-\(tag).png"))
+                }
+            }
             modal.close()
             _ = inbox.hoverRowForQA(id: nil)
             try expect(inbox.hoverRowForQA(id: lead), "\(tag): hover must work after Settings closes")
