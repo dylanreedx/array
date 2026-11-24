@@ -2921,6 +2921,60 @@ enum FileOpenChecks {
             print("file preview strip: a restore that lands on a parked tile still draws on return")
         }
         try parkedDuringRead()
+        // 9. Follow-ups on a restored transcript: a finished Bash step keeps its name and command,
+        //    and a created file's count reads plainly ("+16"), never "≥ +16 −0" or "+4 −?".
+        func restoredFollowups() throws {
+            let sessionRoot = checkout.appendingPathComponent("outputs/followups", isDirectory: true)
+            try fileManager.createDirectory(at: sessionRoot, withIntermediateDirectories: true)
+            let created = sessionRoot.appendingPathComponent("created.md")
+            let body = (1...16).map { "line \($0)" }.joined(separator: "\n")
+            try Data(body.utf8).write(to: created)
+            var lines: [String] = []
+            func line(_ object: [String: Any]) {
+                if let data = try? JSONSerialization.data(withJSONObject: object), let text = String(data: data, encoding: .utf8) { lines.append(text) }
+            }
+            line(["type": "user", "timestamp": "2026-11-24T05:41:01.000Z", "message": ["role": "user", "content": "Run a command and write a file."]])
+            line(["type": "assistant", "timestamp": "2026-11-24T05:41:02.000Z", "message": ["role": "assistant", "content": [
+                ["type": "tool_use", "id": "toolu_bash_1", "name": "Bash", "input": ["command": "ls -la followup-folder", "description": "List the followup folder"]]]]])
+            line(["type": "user", "timestamp": "2026-11-24T05:41:03.000Z", "message": ["role": "user", "content": [
+                ["type": "tool_result", "tool_use_id": "toolu_bash_1", "content": "total 0"]]]])
+            line(["type": "assistant", "timestamp": "2026-11-24T05:41:04.000Z", "message": ["role": "assistant", "content": [
+                ["type": "tool_use", "id": "toolu_write_1", "name": "Write", "input": ["file_path": created.path, "content": body]]]]])
+            line(["type": "user", "timestamp": "2026-11-24T05:41:05.000Z", "message": ["role": "user", "content": [
+                ["type": "tool_result", "tool_use_id": "toolu_write_1", "content": "File created successfully at: \(created.path)"]]]])
+            line(["type": "assistant", "timestamp": "2026-11-24T05:41:06.000Z", "message": ["role": "assistant", "content": [["type": "text", "text": "Followups closing text."]]]])
+            let transcript = ClaudeSessionTranscriptReader.parse(lines: lines, threadId: "followup-thread")
+            let tile = ManagedAgentTileNSView(tile: Tile(
+                id: UUID(), kind: .managedAgent, title: "followups", frame: TileFrame(x: 0, y: 0, width: 760, height: 760),
+                zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata(launchProfileId: "managed")))
+            tile.frame = NSRect(x: 0, y: 0, width: 760, height: 760)
+            let window = NSWindow(contentRect: tile.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = tile
+            window.orderFrontOffscreenForChecks()
+            defer { window.orderOut(nil) }
+            guard let canvas = tile.qaCanvasTranscript else { throw Failure(message: "the restored tile has no drawn transcript") }
+            canvas.bindToolDetailAgent(AgentID(rawValue: UUID()))
+            tile.renderRehydratedPreviousSession(transcript)
+            let settle = Date().addingTimeInterval(20)
+            repeat {
+                tile.layoutSubtreeIfNeeded(); canvas.flushPendingVisualUpdate(); canvas.layoutSubtreeIfNeeded()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            } while (!canvas.qaLaidOutText.contains("Followups closing text.") || canvas.toolDetail.qaHeldRecordCount < 2
+                    || canvas.qaChangesCards.first?.files.isEmpty ?? true) && Date() < settle
+            let text = canvas.qaLaidOutText
+            let tools = canvas.qaToolCalls
+            let bash = tools.first { ($0.presentedToolNameText ?? $0.name) == "Bash" || $0.name == "Bash" }
+            try expect(bash != nil && (bash?.presentedShell?.command.contains("followup-folder") ?? false),
+                       "a restored finished Bash step must keep its name and command; held \(canvas.toolDetail.qaHeldRecordCount) records, tool rows: \(tools.map { "\($0.name)|\($0.presentedToolNameText ?? "-")|\($0.presentedShell?.command ?? "-")|\($0.summary ?? "-")" })")
+            let cards = canvas.qaChangesCards
+            try expect(cards.count == 1 && cards[0].files.count == 1, "the created file must draw one card, got \(cards.map { $0.files.count })")
+            let headline = AgentDiffSummaryView.countsText(cards[0].files)
+            let stat = AgentDiffSummaryView.statText(cards[0].files[0], added: .green, removed: .red, unavailable: .gray).string
+            try expect(headline == "1 file · +16" && stat == "+16",
+                       "a created file's count must read plainly; headline '\(headline)', row '\(stat)'")
+            print("file preview strip: a restored Bash step keeps its name and command; a created file's count reads plainly")
+        }
+        try restoredFollowups()
         try exercise(drawn: true)
         try exercise(drawn: false)
         print("file preview strip: thumbnails cached by mtime; opens in Array on both transcript renderers")

@@ -643,7 +643,11 @@ final class AgentDiffSummaryView: NSView, CornerStyled {
         }
         let noun = files.count == 1 ? "file" : "files"
         guard !measured.isEmpty else { return "\(files.count) \(noun) · line counts unavailable" }
-        let stat = "\(sawLowerBound ? "≥ " : "")+\(additions) −\(removals)"
+        // A created file has nothing it replaced: its count is the lines it holds,
+        // read plainly ("+16"), never as a floor over "−0" or "−?".
+        let stat = measured.allSatisfy(\.isCreation)
+            ? "+\(additions)"
+            : "\(sawLowerBound ? "≥ " : "")+\(additions) −\(removals)"
         let unmeasured = files.count - measured.count
         guard unmeasured > 0 else { return "\(files.count) \(noun) · \(stat)" }
         let unmeasuredNoun = unmeasured == 1 ? "file" : "files"
@@ -764,6 +768,10 @@ final class AgentDiffSummaryView: NSView, CornerStyled {
             case .rename: return caption("renamed")
             default: return caption("counts unavailable")
             }
+        }
+        if file.isCreation, let count = file.addedLineCount {
+            return NSAttributedString(
+                string: "+\(count)", attributes: [.font: font, .foregroundColor: added])
         }
         let result = NSMutableAttributedString()
         if file.countsAreLowerBound { result.append(caption("≥ ")) }
@@ -886,3 +894,8 @@ final class AgentOpenReviewButton: NSButton {
     }
 }
 
+
+extension AgentDiffFileSummary {
+    /// The operation made the file: it replaced nothing, so it has no removed count.
+    fileprivate var isCreation: Bool { action == .add || action == .write }
+}

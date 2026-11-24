@@ -267,10 +267,10 @@ enum FileCardChecks {
         let write = AgentDiffPayload(
             text: "write", summary: "Write",
             files: [.init(displayName: "new.swift", addedLineCount: 12, action: .write)])
-        guard card(write).fileStatLabels.first?.stringValue == "+12 −?" else {
+        guard card(write).fileStatLabels.first?.stringValue == "+12" else {
             throw fail("write: '\(card(write).fileStatLabels.first?.stringValue ?? "missing")'")
         }
-        guard card(write).countsLabel.stringValue == "1 file · ≥ +12 −0" else {
+        guard card(write).countsLabel.stringValue == "1 file · +12" else {
             throw fail("write aggregate: '\(card(write).countsLabel.stringValue)'")
         }
 

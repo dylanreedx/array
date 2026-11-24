@@ -1814,6 +1814,14 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         }
     }
 
+    /// Every tool row the transcript draws, as presented (name, summary, shell).
+    var qaToolCalls: [AgentToolCallPayload] {
+        qaPlaced.compactMap { item in
+            if case let .toolCall(payload)? = item.block.presented { return payload }
+            return nil
+        }
+    }
+
     /// Every drawn thumbnail in document order: its hit centre in view
     /// coordinates, how much fade and blur still cover it (1 at rest, 0 while
     /// hovered), and whether its picture has arrived.
