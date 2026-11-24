@@ -2860,20 +2860,30 @@ final class CanvasNSView: NSView, TokenThemed {
         guard !contextualAgentLineage.isEmpty, let overlay = agentLineageOverlay else { return }
         overlay.frame = bounds
         let gutter = CGFloat(TileGapResolver.resolvedGap(defaults: autoLayoutDefaults)) * CGFloat(viewport.zoom)
-        let segments = contextualAgentLineage.compactMap { relation -> DocumentRelationshipOverlayView.Segment? in
+        var entries = contextualAgentLineage.compactMap { relation -> (parent: UUID, segment: DocumentRelationshipOverlayView.Segment)? in
             guard let parent = tileView(for: relation.parentTileID),
                   let child = tileView(for: relation.childTileID) else { return nil }
             let obstacles = tileLayers.flatMap { $0.tileViews }
                 .filter { $0.key != relation.parentTileID && $0.key != relation.childTileID }
                 .map { overlay.convert($0.value.bounds, from: $0.value) }
-            return .init(
+            return (relation.parentTileID, .init(
                 source: overlay.convert(parent.bounds, from: parent),
                 target: overlay.convert(child.bounds, from: child),
                 emphasized: true,
                 obstacles: obstacles,
                 gutter: gutter
-            )
+            ))
         }
+        // One route per lead: if any of its edges needs the gutter, all of them
+        // take it, so sibling arrows drop into their targets' top edges alike.
+        let gutterLeads = Set(entries.compactMap { entry -> UUID? in
+            if case .polyline? = DocumentRelationshipOverlayView.route(for: entry.segment) { return entry.parent }
+            return nil
+        })
+        for index in entries.indices where gutterLeads.contains(entries[index].parent) {
+            entries[index].segment.forcesGutter = true
+        }
+        let segments = entries.map(\.segment)
         overlay.show(segments: segments)
     }
 

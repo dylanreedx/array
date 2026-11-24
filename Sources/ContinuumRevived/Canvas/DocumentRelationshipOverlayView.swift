@@ -14,6 +14,9 @@ final class DocumentRelationshipOverlayView: NSView {
         var obstacles: [CGRect] = []
         /// Vertical clearance above the row for the detour (the tile gap, zoomed).
         var gutter: CGFloat = 0
+        /// Draw the gutter polyline even when the cubic clears: siblings of one
+        /// lead must all enter their targets on the same edge.
+        var forcesGutter = false
     }
 
     enum Route: Equatable {
@@ -94,7 +97,7 @@ final class DocumentRelationshipOverlayView: NSView {
                 control1: CGPoint(x: start.x + direction * handle, y: start.y),
                 control2: CGPoint(x: end.x - direction * handle, y: end.y),
                 end: end)
-            if crosses(cubic, obstacles: segment.obstacles) {
+            if segment.forcesGutter || crosses(cubic, obstacles: segment.obstacles) {
                 let y = min(source.minY, target.minY) - segment.gutter / 2
                 return .polyline([
                     CGPoint(x: source.midX, y: source.minY), CGPoint(x: source.midX, y: y),
@@ -161,7 +164,7 @@ final class DocumentRelationshipOverlayView: NSView {
     }
 
     /// True when the cubic's bounding box, inset by 1 pt, meets any obstacle.
-    private static func crosses(_ route: Route, obstacles: [CGRect]) -> Bool {
+    static func crosses(_ route: Route, obstacles: [CGRect]) -> Bool {
         guard !obstacles.isEmpty else { return false }
         let xs = route.points.map(\.x), ys = route.points.map(\.y)
         guard let minX = xs.min(), let maxX = xs.max(), let minY = ys.min(), let maxY = ys.max() else { return false }

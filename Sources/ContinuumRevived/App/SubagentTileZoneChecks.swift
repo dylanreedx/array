@@ -160,6 +160,13 @@ enum SubagentTileZoneChecks {
                 canvas.layoutSubtreeIfNeeded()
                 let paths = canvas.qaLineagePathPointsInCanvasSpace
                 try expect(paths.count == 3, "3 helpers: expected 3 painted lineage paths, got \(paths.count)")
+                // Siblings of one lead arrive on the same edge: all drop in from the top here.
+                let arrivals = paths.map { pts -> Bool in
+                    guard pts.count >= 2 else { return false }
+                    return abs(pts[pts.count - 1].x - pts[pts.count - 2].x) < 0.5
+                }
+                try expect(arrivals.allSatisfy { $0 },
+                           "3 helpers: every lineage edge must drop into its helper's top edge; vertical arrivals \(arrivals)")
                 for (pathIndex, points) in paths.enumerated() {
                     let child = fixture.helperTiles[pathIndex]
                     for (id, _) in frames where id != fixture.leadTile && id != child {
