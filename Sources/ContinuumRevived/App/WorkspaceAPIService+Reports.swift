@@ -19,6 +19,7 @@ extension WorkspaceAPIService {
             guard supervisor.fileReport(report, for: agentId), let object = Self.jsonObject(AgentReportResult(recorded: true)) else {
                 return .error(WorkspaceAPIError(code: .unsupported, message: "The report could not be recorded."))
             }
+            postReportOnAssignedCards(agentId)
             return .result(object)
         }
     }

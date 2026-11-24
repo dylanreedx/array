@@ -112,6 +112,9 @@ final class KanbanColumnView: NSView, TokenThemed {
     /// id so a re-render during a drag does not destroy the view under the
     /// pointer. Returns the views it removed, so the tile can animate a card
     /// leaving this lane (`KanbanTileNSView.animateBoardChange`).
+    /// Tasks `BoardUpkeep` found stale; their cards say so on the meta line.
+    var staleCardIDs: Set<UUID> = []
+
     @discardableResult
     func setCards(_ cards: [BoardCard], assigneeName: @escaping (AgentID) -> String?) -> [KanbanCardView] {
         measurementCards.removeAll(keepingCapacity: true)
@@ -121,15 +124,16 @@ final class KanbanColumnView: NSView, TokenThemed {
             let name: String? = card.assignees.isEmpty ? nil : card.assignees.map { assigneeName($0) ?? "Unavailable agent" }.joined(separator: ", ")
             measurementCards[card.id] = (card, name)
             if let view = existing.removeValue(forKey: card.id) {
-                view.update(card: card, assigneeName: name)
+                view.update(card: card, assigneeName: name, stale: staleCardIDs.contains(card.id))
                 next.append(view)
             } else {
                 let view = KanbanCardView(card: card, assigneeName: name)
+                if staleCardIDs.contains(card.id) { view.update(card: card, assigneeName: name, stale: true) }
                 cardsContainer.addSubview(view)
                 next.append(view)
             }
             cardHeights[card.id] = KanbanCardView.height(
-                for: card, assigneeName: name, width: measuredCardWidth)
+                for: card, assigneeName: name, stale: staleCardIDs.contains(card.id), width: measuredCardWidth)
         }
         for orphan in existing.values {
             orphan.removeFromSuperview()
@@ -252,7 +256,7 @@ final class KanbanColumnView: NSView, TokenThemed {
                 y += previewGapHeight + Self.cardSpacing
             }
             if cardHeights[view.cardId] == nil, let (card, name) = measurementCards[view.cardId] {
-                cardHeights[view.cardId] = KanbanCardView.height(for: card, assigneeName: name, width: cardWidth)
+                cardHeights[view.cardId] = KanbanCardView.height(for: card, assigneeName: name, stale: staleCardIDs.contains(card.id), width: cardWidth)
             }
             let height = cardHeights[view.cardId] ?? KanbanCardView.minimumHeight
             targets.append((view, NSRect(x: Self.contentInset, y: y, width: cardWidth, height: height)))

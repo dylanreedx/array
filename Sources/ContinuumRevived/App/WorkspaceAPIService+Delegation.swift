@@ -79,6 +79,23 @@ extension WorkspaceAPIService {
             return .error(WorkspaceAPIError(code: code, message: message, approvalRequestId: approvalRequestId))
         }
 
+        // `BoardUpkeep`: the task this delegation works on, resolved before any
+        // effect, so a wrong id creates nothing. A helper may hand on only a
+        // task it is itself assigned to.
+        var delegatedCard: DelegatedCard?
+        if let cardId = request.cardId {
+            switch resolveDelegatedCard(cardId: cardId, boardId: request.boardId, record: record) {
+            case let .failure(error): return completion(fail(error.code, error.message))
+            case let .success(card):
+                if record.parentAgentID != nil,
+                   card.runtime.board(id: card.boardId)?.card(cardId)?.assignees.contains(agentId) != true {
+                    return completion(fail(.permissionDenied, BoardUpkeep.helperRefusal))
+                }
+                delegatedCard = card
+            }
+        } else if request.boardId != nil {
+            return completion(fail(.invalidRequest, "boardId is only used with cardId."))
+        }
         if supervisor.chooserRequiresPlan(for: agentId) {
             return completion(fail(.permissionDenied, ManagedChooser.planRequired))
         }
@@ -243,6 +260,8 @@ extension WorkspaceAPIService {
         // unless this call states its own.
         let contract = prepared?.contract ?? retryContract
         if let contract { prompt += "\n\n" + contract.promptText }
+        let cardLine = delegatedCard.map { BoardUpkeep.delegatedCardLine(title: $0.title, boardId: $0.boardId, cardId: $0.cardId) }
+        if let cardLine { prompt += "\n\n" + cardLine }
         if request.readOnly == true && supervisor.chooserEnabled(for: agentId) {
             prompt += "\n\nRead-only helper: investigate or review; do not edit checkout files."
         }
@@ -278,6 +297,7 @@ extension WorkspaceAPIService {
                 op.steps.creation = .succeeded
                 op.childAgentId = childId
             }
+            if let delegatedCard { adoptDelegatedCard(delegatedCard, child: childId, lead: agentId) }
             // The child's first turn is agent-started too: it continues the chain.
             recordMessageChain(target: childId, hops: messageChainHops(for: agentId) + 1)
             let child = supervisor.records[childId]
@@ -436,6 +456,7 @@ extension WorkspaceAPIService {
         if let retryOf = request.retryOf, request.contract == nil,
            supervisor.canContinueSessionForRetry(retryOf, harness: childHarness, model: requestedModel, effort: request.effort) {
             var resumePrompt = request.task
+            if let cardLine { resumePrompt += "\n\n" + cardLine }
             if supervisor.continueSessionForRetry(retryOf, prompt: resumePrompt) {
                 return completion(created(retryOf, continued: true))
             }

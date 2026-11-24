@@ -126,6 +126,27 @@ Witnesses: `--helper-liveness-check` (the real switch both ways; with it off the
 lead's stream equals a run with classification inert) and `--helper-watchdog-check`
 (off).
 
+The stale board task nudge (`BoardUpkeep`, 2026-11-23) is an internal agent
+message too, so it has no path ID: it adds no Mac banner, sound, badge, phone
+push, widget or Live Activity sender, and Settings has no switch for it.
+- Trigger: a sweep every 5 minutes (and after each helper run ends) finds a
+  task in a working column (between a board's first and last column) whose
+  assignees are all not working, and nothing has touched it for 20 minutes
+  (every assignee finished, stopped or gone) or 4 hours (otherwise). A task
+  with no assignee is the user's and never stale.
+- Recipient: the assignee's parent (its lead), or the lead that delegated the
+  task with `cardId` when the helper is gone. An assignee with no lead gets the
+  quiet "Stale" mark on the board tile and no message.
+- Delivery: one message per stale episode, on the existing agent-message path
+  (queued behind a running lead turn, a new turn for an idle lead), sent as the
+  helper. A task touched again and gone stale again is a new episode. The
+  record of sent nudges is in memory, so a relaunch may send one more for a
+  task still stale. A refused send is retried at the next sweep.
+- Quiet outcomes: inside the grace period, a working assignee, no lead, or
+  a gone lead send nothing. Array never moves the task, and never to Done.
+Witness: `--board-upkeep-check` (one nudge per stale card across two sweeps,
+nothing inside the grace period, the tile's stale mark).
+
 Helper completion wakes (0.7.41) are internal agent messages, using the existing
 supervisor send/composer queue. They add no direct Mac banner, sound, badge,
 phone push, widget or Live Activity sender. The per-lead setting that once disabled

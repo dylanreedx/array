@@ -80,6 +80,11 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
 
     /// Child CLI; omission inherits the parent.
     public var harness: String?
+    /// A board task this delegation works on (`BoardUpkeep`): the child is
+    /// assigned to it, it moves to Doing, and the child's first prompt names it.
+    /// `boardId` narrows the search; omitted, every board of the project is read.
+    public var cardId: UUID?
+    public var boardId: UUID?
 
     public init(
         task: String,
@@ -94,8 +99,12 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
         placement: Placement? = nil,
         presentationPolicy: WorkspacePresentationPolicy = .defaultExplicitOpen,
         idempotencyKey: String? = nil,
-        harness: String? = nil
+        harness: String? = nil,
+        cardId: UUID? = nil,
+        boardId: UUID? = nil
     ) {
+        self.cardId = cardId
+        self.boardId = boardId
         self.retryOf = retryOf
         self.mode = mode
         self.harness = harness
@@ -112,7 +121,7 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case effort, contract, task, readOnly, mode, retryOf, title, provider, model, placement, presentationPolicy, presentation, idempotencyKey, harness
+        case effort, contract, task, readOnly, mode, retryOf, title, provider, model, placement, presentationPolicy, presentation, idempotencyKey, harness, cardId, boardId
     }
 
     /// Tolerant of the model-facing shape (`presentation`, short names, any
@@ -133,6 +142,8 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
         presentationPolicy = try WorkspacePresentationPolicy.decodeCanonicalOrShort(
             from: c, canonical: .presentationPolicy, short: .presentation)
         idempotencyKey = try c.decodeIfPresent(String.self, forKey: .idempotencyKey)
+        cardId = try c.decodeIfPresent(UUID.self, forKey: .cardId)
+        boardId = try c.decodeIfPresent(UUID.self, forKey: .boardId)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -150,6 +161,8 @@ public struct AgentDelegateRequest: Codable, Equatable, Sendable {
         try c.encodeIfPresent(placement, forKey: .placement)
         try c.encode(presentationPolicy, forKey: .presentationPolicy)
         try c.encodeIfPresent(idempotencyKey, forKey: .idempotencyKey)
+        try c.encodeIfPresent(cardId, forKey: .cardId)
+        try c.encodeIfPresent(boardId, forKey: .boardId)
     }
 }
 

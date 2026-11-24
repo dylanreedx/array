@@ -1802,6 +1802,7 @@ run_app_check .build/debug/Array --orchestration-plan-check
 run_app_check .build/debug/Array --orchestration-request-lifecycle-check
 run_app_check .build/debug/Array --orchestration-request-policy-check
 run_app_check .build/debug/Array --part-contract-check
+run_app_check .build/debug/Array --board-upkeep-check
 run_app_check .build/debug/Array --helper-worktree-check
 run_app_check .build/debug/Array --helper-tile-lifecycle-check
 run_app_check .build/debug/Array --helper-tile-cap-check

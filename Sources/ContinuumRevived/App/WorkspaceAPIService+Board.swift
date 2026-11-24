@@ -123,6 +123,11 @@ extension WorkspaceAPIService {
             grants: grants[agentId] ?? [], currentGeneration: revocationGeneration(for: agentId)) else {
             return .error(WorkspaceAPIError(code: .permissionDenied, message: "This agent may not change that project's boards."))
         }
+        // `BoardUpkeep`: a helper keeps its own task current and nothing else.
+        let isHelper = record.parentAgentID != nil
+        if isHelper, !BoardUpkeep.helperOperations.contains(request.op) {
+            return .error(WorkspaceAPIError(code: .permissionDenied, message: BoardUpkeep.helperRefusal))
+        }
         guard !request.idempotencyKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               request.idempotencyKey.utf8.count <= 128 else {
             return .error(WorkspaceAPIError(code: .invalidRequest, message: "idempotencyKey is required and must be at most 128 bytes."))
@@ -142,6 +147,9 @@ extension WorkspaceAPIService {
               let board = boardRuntime.board(id: request.boardId),
               boardRuntime.boardIndexEntries().contains(where: { $0.id == request.boardId }) else {
             return .error(WorkspaceAPIError(code: .notFound, message: "No board with that id exists in this agent's project."))
+        }
+        if isHelper, request.cardId.flatMap({ board.card($0) })?.assignees.contains(agentId) != true {
+            return .error(WorkspaceAPIError(code: .permissionDenied, message: BoardUpkeep.helperRefusal))
         }
         let stale = request.expectedRevision != board.revision
         let canRebase = (request.op == .create || request.op == .move)
@@ -462,6 +470,9 @@ extension WorkspaceAPIService {
             request = try Self.decoder.decode(BoardManageRequest.self, from: JSONSerialization.data(withJSONObject: payload))
         } catch {
             return .error(WorkspaceAPIError(code: .invalidRequest, message: "The board change could not be decoded: \(error.localizedDescription)"))
+        }
+        if record.parentAgentID != nil {
+            return .error(WorkspaceAPIError(code: .permissionDenied, message: BoardUpkeep.helperRefusal))
         }
         guard !request.idempotencyKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               request.idempotencyKey.utf8.count <= 128 else {

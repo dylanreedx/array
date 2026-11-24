@@ -55,8 +55,10 @@ extension ManagedModeChecks {
         try expect(b.supervisor.records[helper]?.parentAgentID == lead, "the helper must name the lead as parent")
         let helperTools = try listedTools(claudeServer(b, helper))
         try expectAllDeferred(helperTools, "a helper's launch")
-        // A helper gets the lean start: the four tools it needs and nothing else.
-        let leanTools: Set<String> = ["array_report", "array_status", "array_workspace_context", "array_message_agent"]
+        // A helper gets the lean start: the tools it needs and nothing else,
+        // including the board pair that keeps its own task current.
+        let leanTools: Set<String> = ["array_report", "array_status", "array_workspace_context", "array_message_agent",
+                                      "array_board_query", "array_board_apply"]
         try expect(names(helperTools) == leanTools,
                    "a helper must be offered exactly \(leanTools.sorted()); it was offered \(names(helperTools).count) tools: \(names(helperTools).sorted())")
         try expect(names(leadTools).count > 30, "the lead must keep the full tool list")

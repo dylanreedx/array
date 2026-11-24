@@ -51,11 +51,14 @@ public struct AgentPollLimiter {
     }
 }
 
-/// The lean start a helper gets: four tools and one short text.
+/// The lean start a helper gets: six tools and one short text. The board pair
+/// lets it keep its own task current (`BoardUpkeep`); the host limits a
+/// helper's board changes to tasks it is assigned to.
 public enum HelperLeanStart {
-    public static let tools = ["array_report", "array_status", "array_workspace_context", "array_message_agent"]
+    public static let tools = ["array_report", "array_status", "array_workspace_context", "array_message_agent",
+                               "array_board_query", "array_board_apply"]
     public static let environmentKey = "ARRAY_WORKSPACE_TOOL_ALLOWLIST"
     /// One text for both channels (Claude's MCP instructions, Codex's namespace note).
     public static let instructions =
-        "You are a helper running in a tile on the user's Array canvas. Do the task you were given, then call array_report (mcp__array_workspace__array_report; load it with tool search if deferred) with a summary and any check that failed or that you could not run. array_status posts what you are doing, array_message_agent messages another agent, array_workspace_context says who and where you are. Your lead gets your result by itself: never poll."
+        "You are a helper running in a tile on the user's Array canvas. Do the task you were given, then call array_report (mcp__array_workspace__array_report; load it with tool search if deferred) with a summary and any check that failed or that you could not run. array_status posts what you are doing, array_message_agent messages another agent, array_workspace_context says who and where you are. If your task names a board card, keep it current with array_board_apply (op comment). Your lead gets your result by itself: never poll."
 }

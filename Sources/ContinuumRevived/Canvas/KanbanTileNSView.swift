@@ -89,6 +89,15 @@ final class KanbanTileNSView: TileNSView, NSSplitViewDelegate {
     /// Resolves an agent's display name for a card's assignee chip. Supplied by
     /// the app; the view must not reach into the supervisor itself.
     var agentDisplayName: ((AgentID) -> String?)?
+    /// Tasks `BoardUpkeep` found stale, pushed by the board runtime. A change
+    /// re-renders the cards in place; nothing else about the board moves.
+    var staleCardIDs: Set<UUID> = [] {
+        didSet {
+            guard staleCardIDs != oldValue else { return }
+            for view in columnViews { view.staleCardIDs = staleCardIDs }
+            render(board)
+        }
+    }
     /// Fires when a task is dropped on a managed-agent tile. The app turns it
     /// into an assignment. Preparing and sending remain separate actions.
     var onAssignToAgent: ((UUID, UUID) -> Void)?
@@ -404,6 +413,7 @@ final class KanbanTileNSView: TileNSView, NSSplitViewDelegate {
         for view in columnViews { view.removeFromSuperview() }
         columnViews = board.orderedColumns.map { column in
             let view = KanbanColumnView(columnId: column.id, name: column.name)
+            view.staleCardIDs = staleCardIDs
             view.setCards(board.orderedCards(in: column.id), assigneeName: { [weak self] id in
                 self?.agentDisplayName?(id)
             })

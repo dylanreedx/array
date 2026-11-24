@@ -421,7 +421,8 @@
       "promptGuidelines": [
         "Query immediately before applying and pass its revision as expectedRevision.",
         "Reuse the identical idempotencyKey only when recovering the same uncertain call; a different intent needs a new key.",
-        "Move a task to Done only when the work is actually complete. Array moves an attached leftmost task one lane right when its send is accepted, but never completes it automatically."
+        "Move a task to Done only when the work is actually complete. Array moves an attached leftmost task one lane right when its send is accepted, but never completes it automatically.",
+        "A helper may comment, edit and assign only on tasks it is assigned to; create, move, unassign and delete stay with its lead."
       ],
       "parameters": {
         "type": "object",
@@ -591,7 +592,8 @@
         "If the result is partial with retryOp 'agent.reveal', the child EXISTS: call array_reveal_agent with its childAgentId; do not delegate again.",
         "On cancelled or outcome_unknown, call array_get_operation with the operationId (or your idempotencyKey) before doing anything else.",
         "Optionally pass harness (Claude Code, Codex or Pi) and an exact fully qualified model from that harness's live catalogue. Omit both to inherit; a different harness without model uses its own catalogue default. Unready or exhausted harnesses and unknown models are refused; no silent CLI fallback.",
-        "Continue independent work or end your turn: Array delivers the helper's result to you by itself, as a message when you are idle or inside the turn you are running. Never poll, sleep or message the helper to check on it."
+        "Continue independent work or end your turn: Array delivers the helper's result to you by itself, as a message when you are idle or inside the turn you are running. Never poll, sleep or message the helper to check on it.",
+        "Pass cardId when the work has a board task: Array assigns the helper, moves the task to Doing, names it in the helper's first prompt and posts its report there. It never moves the task to Done."
       ],
       "parameters": {
         "type": "object",
@@ -626,6 +628,14 @@
           "retryOf": {
             "type": "string",
             "description": "Failed/stopped child of yours to continue; carries its brief, effort, contract, changed files and report."
+          },
+          "cardId": {
+            "type": "string",
+            "description": "Board task id (array_board_query) this helper works on. Optional."
+          },
+          "boardId": {
+            "type": "string",
+            "description": "The card's board, to narrow the lookup. Only with cardId."
           },
           "contract": {
             "type": "object",

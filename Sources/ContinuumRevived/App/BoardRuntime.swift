@@ -160,10 +160,20 @@ final class BoardRuntime {
             }
         }
         tileConfigurator?(view)
+        view.staleCardIDs = staleCardIDs
         if let board = board(id: boardId) {
             view.setTitleBarIdentity(title: board.title)
             view.render(board)
         }
+    }
+
+    /// The tasks `BoardUpkeep` last found stale on this project's boards,
+    /// pushed to every open tile and to each tile that attaches later.
+    private(set) var staleCardIDs: Set<UUID> = []
+    func setStaleCards(_ ids: Set<UUID>) {
+        guard ids != staleCardIDs else { return }
+        staleCardIDs = ids
+        for entries in views.values { for entry in entries { entry.view?.staleCardIDs = ids } }
     }
 
     func detach(_ view: KanbanTileNSView) {

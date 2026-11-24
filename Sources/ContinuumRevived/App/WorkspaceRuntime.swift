@@ -143,6 +143,9 @@ final class WorkspaceRuntime {
         mountedControllers.contains { $0.project.id == projectId }
     }
 
+    /// The projects of the mounted scene that have a live controller.
+    var mountedProjectIds: [UUID] { mountedControllers.map(\.project.id) }
+
     /// The controllers of the mounted scene, not of warm ones: every live
     /// controller of a project this scene acquired or has a zone for.
     private var mountedControllers: [ZoneRuntimeController] {

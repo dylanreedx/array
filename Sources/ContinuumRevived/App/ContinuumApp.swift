@@ -4587,6 +4587,20 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        if CommandLine.arguments.contains("--board-upkeep-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await BoardUpkeepChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         if CommandLine.arguments.contains("--part-contract-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -26440,6 +26454,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         agentSupervisor.recordArchiveSharedAgents = {
             try SharedAreaLocalStore.boundAgentIDs(applicationSupportRoot: collaborationRoot)
         }
+        // `BoardUpkeep`: reports and run ends land on the helper's task; a
+        // timer marks tasks nobody is working on as stale.
+        workspaceAPI.startBoardUpkeep()
         workspaceAPI.shortReportsEnabled = { [weak self] in
             AgentShortReportConfig.enabled(defaults: self?.settingsDefaults ?? .standard)
         }

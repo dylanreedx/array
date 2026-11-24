@@ -204,6 +204,17 @@ final class WorkspaceAPIService {
     var browserGateInstallations: [UUID: BrowserGateInstallation] = [:]
     var browserLeaseLedger: BrowserLeaseLedger?
     private var browserLeaseEventObserver: UUID?
+    /// `BoardUpkeep`: the lead that delegated each task, for a helper that is
+    /// gone by the time its task goes stale; the stale episodes already nudged;
+    /// the tasks the last sweep found stale. In memory: a relaunch may nudge a
+    /// still-stale task once more.
+    var delegatedCardLeads: [UUID: AgentID] = [:]
+    var boardUpkeepNudged: Set<String> = []
+    var boardUpkeepNudgeCount = 0
+    var staleCardIDs: Set<UUID> = []
+    var boardUpkeepObserver: UUID?
+    var boardUpkeepTimer: Timer?
+    var boardUpkeepNow: () -> Date = Date.init
 
     @discardableResult
     func installBrowserLeaseLedger(_ ledger: BrowserLeaseLedger) -> Bool {
@@ -293,6 +304,8 @@ final class WorkspaceAPIService {
             if let browserLeaseEventObserver {
                 supervisor.removeDeliveredEventObserver(browserLeaseEventObserver)
             }
+            if let boardUpkeepObserver { supervisor.removeDeliveredEventObserver(boardUpkeepObserver) }
+            boardUpkeepTimer?.invalidate()
         }
     }
 

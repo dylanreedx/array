@@ -66,6 +66,7 @@ check --board-library-check
 check --board-model-check
 check --board-task-workflow-check
 check --board-tile-lifecycle-check
+check --board-upkeep-check
 check --border-census-check
 check --bring-to-front-focus-check
 check --browser-action-queue-check
@@ -649,6 +650,7 @@ leg run_app_check .build/debug/Array --board-interaction-check
 leg run_app_check .build/debug/Array --board-library-check
 leg run_app_check .build/debug/Array --board-task-workflow-check
 leg run_app_check .build/debug/Array --board-tile-lifecycle-check
+leg run_app_check .build/debug/Array --board-upkeep-check
 leg run_app_check .build/debug/Array --border-census-check
 leg run_app_check .build/debug/Array --bring-to-front-focus-check
 leg run_app_check .build/debug/Array --browser-action-queue-check

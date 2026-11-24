@@ -47,7 +47,7 @@ final class KanbanCardView: NSView, TokenThemed {
             grip.isHidden = isReadOnly
             assignButton.toolTip = isReadOnly ? nil : "Choose an agent, or drag this task onto an agent tile"
             toolTip = isReadOnly ? "Click to read this task" : "Click for task details · Drag to move or assign to an agent"
-            if let shown { update(card: shown.card, assigneeName: shown.assignee) }
+            if let shown { update(card: shown.card, assigneeName: shown.assignee, stale: shown.stale) }
             window?.invalidateCursorRects(for: self)
         }
     }
@@ -119,9 +119,9 @@ final class KanbanCardView: NSView, TokenThemed {
 
     // MARK: - Content
 
-    private var shown: (card: BoardCard, assignee: String?)?
-    func update(card: BoardCard, assigneeName: String?) {
-        shown = (card, assigneeName)
+    private var shown: (card: BoardCard, assignee: String?, stale: Bool)?
+    func update(card: BoardCard, assigneeName: String?, stale: Bool = false) {
+        shown = (card, assigneeName, stale)
         if titleField.stringValue != card.title, !isEditing {
             titleField.stringValue = card.title
         }
@@ -133,17 +133,20 @@ final class KanbanCardView: NSView, TokenThemed {
         assignButton.imagePosition = .imageLeading
         assignButton.title =  (assigneeName ?? (card.assignee == nil ? (isReadOnly ? "Unassigned" : "Assign agent") : "Unavailable agent")) + (isReadOnly ? "" : "  ▾")
         assignButton.setAccessibilityLabel(assigneeName.map { "Assigned agent: " + $0 } ?? "Assign agent")
-        let meta = Self.metaText(for: card, assigneeName: assigneeName)
+        let meta = Self.metaText(for: card, assigneeName: assigneeName, stale: stale)
         metaLabel.stringValue = meta ?? ""
         metaLabel.isHidden = meta == nil
-        setAccessibilityLabel(Self.accessibilityLabel(for: card, assigneeName: assigneeName))
+        metaLabel.toolTip = stale ? "Nobody assigned to this task is working on it" : nil
+        setAccessibilityLabel(Self.accessibilityLabel(for: card, assigneeName: assigneeName, stale: stale))
         needsLayout = true
     }
 
     /// The quiet second line. Nil means "this task has nothing extra", and the
     /// card renders one line shorter.
-    static func metaText(for card: BoardCard, assigneeName: String?) -> String? {
+    static func metaText(for card: BoardCard, assigneeName: String?, stale: Bool = false) -> String? {
         var parts: [String] = []
+        // `BoardUpkeep`: quiet, first, in the same caption as everything else.
+        if stale { parts.append("Stale") }
         if !card.comments.isEmpty { parts.append("\(card.comments.count) comment\(card.comments.count == 1 ? "" : "s")") }
         if !card.attachments.isEmpty { parts.append("\(card.attachments.count) image\(card.attachments.count == 1 ? "" : "s")") }
         if !card.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { parts.append("Notes") }
@@ -151,9 +154,10 @@ final class KanbanCardView: NSView, TokenThemed {
         return parts.isEmpty ? nil : parts.joined(separator: "  ")
     }
 
-    static func accessibilityLabel(for card: BoardCard, assigneeName: String?) -> String {
+    static func accessibilityLabel(for card: BoardCard, assigneeName: String?, stale: Bool = false) -> String {
         var label = card.title.isEmpty ? "Untitled task" : card.title
         if let assigneeName { label += ", assigned to \(assigneeName)" }
+        if stale { label += ", stale" }
         if !card.body.isEmpty { label += ", has notes" }
         return label
     }
@@ -163,7 +167,7 @@ final class KanbanCardView: NSView, TokenThemed {
     /// Height for a given width. Measured HERE and cached by the lane, never
     /// inside `layout()`: per-layout text measurement is how the Markdown tile
     /// froze the app for three releases (docs/internals/performance.md).
-    static func height(for card: BoardCard, assigneeName: String?, width: CGFloat) -> CGFloat {
+    static func height(for card: BoardCard, assigneeName: String?, stale: Bool = false, width: CGFloat) -> CGFloat {
         let textWidth = max(1, width - horizontalPadding * 2 - 16)
         let font = NSFont.token(.body)
         let attributed = NSAttributedString(
@@ -173,7 +177,7 @@ final class KanbanCardView: NSView, TokenThemed {
             options: [.usesLineFragmentOrigin, .usesFontLeading])
         let lineHeight = ceil(font.ascender - font.descender + font.leading)
         let measured = min(ceil(bounding.height), lineHeight * 3)
-        let meta = metaText(for: card, assigneeName: assigneeName) == nil ? 0 : metaHeight + 3
+        let meta = metaText(for: card, assigneeName: assigneeName, stale: stale) == nil ? 0 : metaHeight + 3
         return max(minimumHeight, measured + meta + verticalPadding * 2 + 27 + (card.attachments.isEmpty ? 0 : 54))
     }
 
