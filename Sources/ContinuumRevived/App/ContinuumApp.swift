@@ -5797,6 +5797,18 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--sidebar-hover-card-overlay-check") {
+            _ = NSApplication.shared
+            MainActor.assumeIsolated {
+                do {
+                    print(try SidebarHoverCardOverlayChecks.run())
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: sidebar-hover-card-overlay: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+        }
         // Helper-row hover: the pill, driven through NSApp.sendEvent.
         if CommandLine.arguments.contains("--sidebar-helper-hover-check") {
             _ = NSApplication.shared

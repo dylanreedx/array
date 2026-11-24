@@ -19,6 +19,16 @@ final class SettingsOverlayView: NSView {
     static let minimumCardSize = NSSize(width: 560, height: 400)
     static let margin: CGFloat = 32
 
+    /// Posted (object: the window) when the overlay lands in a window, so a
+    /// card the window's content already drew can leave before it is covered.
+    static let didPresentNotification = Notification.Name("ArraySettingsOverlayDidPresent")
+
+    /// True when `window`'s content view holds a Settings overlay: nothing
+    /// transient (a hover card) may draw over it.
+    static func isPresented(in window: NSWindow?) -> Bool {
+        window?.contentView?.subviews.contains { $0 is SettingsOverlayView } ?? false
+    }
+
     var onDismiss: (() -> Void)?
     let card = NSView()
     private let shadowView = NSView()
@@ -109,6 +119,12 @@ final class SettingsOverlayView: NSView {
         shadowView.layer?.shadowPath = CGPath(roundedRect: shadowView.bounds, cornerWidth: radius, cornerHeight: radius, transform: nil)
         hosting.frame = card.bounds
         closeButton.frame = NSRect(x: card.bounds.width - 40, y: card.bounds.height - 40, width: 24, height: 24)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard let window else { return }
+        NotificationCenter.default.post(name: Self.didPresentNotification, object: window)
     }
 
     override var isFlipped: Bool { false }

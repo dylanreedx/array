@@ -6916,6 +6916,13 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
                 self.window?.invalidateCursorRects(for: self.tableView)
             }
         })
+        // A modal drawn in this window covers the list: the card goes at once,
+        // not on a fade that would play over the modal.
+        interactionObservers.append(center.addObserver(
+            forName: SettingsOverlayView.didPresentNotification, object: window, queue: nil
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.dismissHoverCard(immediately: true) }
+        })
         for name in [NSWindow.didResignKeyNotification, NSWindow.didResignMainNotification] {
             interactionObservers.append(center.addObserver(
                 forName: name, object: window, queue: nil
@@ -7184,7 +7191,10 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     }
 
     private func presentHoverCard(for row: AgentInboxRow) {
+        // Settings is a scrim and card inside this same window, drawn as the
+        // content view's top subview. A card added after it would sit on top.
         guard hoverCardEnabled, hoveredAgentId == row.id,
+              !SettingsOverlayView.isPresented(in: window),
               let contentView = window?.contentView,
               let anchor = hoverCardAnchor(for: row.id)
         else { return }
@@ -7210,12 +7220,12 @@ final class AgentInboxView: NSView, NSTableViewDataSource, NSTableViewDelegate,
     static let hoverCardFadeOut = HoverCardMotion.dismissDuration
     private let hoverCardMotion = HoverCardMotion()
 
-    private func dismissHoverCard() {
+    private func dismissHoverCard(immediately: Bool = false) {
         hoverCardCancel?()
         hoverCardCancel = nil
-        guard let card = hoverCard, card.superview != nil, !hoverCardMotion.isDismissing else { return }
+        guard let card = hoverCard, card.superview != nil, immediately || !hoverCardMotion.isDismissing else { return }
         hoverCardClosedAt = clock()
-        hoverCardMotion.dismiss(card, reducedMotion: prefersReducedMotion())
+        hoverCardMotion.dismiss(card, reducedMotion: immediately || prefersReducedMotion())
     }
 
     /// The hovered row's rect, in the window content view's coordinates.
