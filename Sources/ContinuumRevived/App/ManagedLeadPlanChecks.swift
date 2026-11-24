@@ -195,9 +195,15 @@ enum ManagedLeadPlanChecks {
         try render(tile, window: window)
 
         // One scripted helper: running -> needs you -> failed checks -> done.
+        // Urgency is what the status line shows: the step's phase and the
+        // "N need(s) you" pill, which survives every width the row can give.
+        func linePhase(_ title: String) -> PlanGlance.Phase? { view.glance?.steps.first { $0.title == title }?.phase }
+        func lineNeedsYou(_ n: Int) -> Bool { view.glance?.needsYou == n && view.sentence.contains("\(n) need\(n == 1 ? "s" : "") you") }
+        let attentionBefore = view.glance?.needsYou ?? 0
         try await call(helperConfig, "array_status", ["now": "Waiting on decision", "needsYou": "Approve login"])
         try expect(view.presentation?.steps.first { $0.title == "Check login flow" }?.state == .needsYou, "helper needs-you did not repaint lead")
-        try expect(view.presentation?.header.contains("Needs you: Check login flow") == true, "first urgent helper missing from header")
+        try expect(linePhase("Check login flow") == .needsYou && lineNeedsYou(attentionBefore + 1),
+                   "urgent helper missing from the status line: \(view.sentence) \(String(describing: linePhase("Check login flow")))")
         try await call(helperConfig, "array_status", ["now": "Testing login"])
         try expect(view.presentation?.steps.first { $0.title == "Check login flow" }?.state == .running, "cleared needs-you did not return to running")
         try await call(helperConfig, "array_report", ["summary": "Login check failed", "checks": [["what": "Login", "result": "fail"]]])
@@ -217,17 +223,25 @@ enum ManagedLeadPlanChecks {
         }
         plan[3]["state"] = "done"
         try await call(config, "array_status", ["now": "Review", "plan": plan])
-        try expect(view.presentation?.header.contains("Failed: Compare error screen") == true, "failed urgency lost to done/waiting")
+        // Leo's failure stays Failed when another step goes done. Whether it
+        // still asks for Dylan depends on whether Managed mode's wake turn on
+        // the lead has ended yet (22ff76080; the rule itself is
+        // --lead-plan-model-check's), so the line must agree with the model
+        // either way: attention exactly while the failure is unhandled.
+        let leo = view.presentation?.steps.first { $0.title == "Compare error screen" }
+        try expect(leo?.state == .failed && linePhase("Compare error screen").map(PlanGlance.isAttention) == (leo?.past == false),
+                   "failed step lost or line disagrees with the model: \(view.sentence) \(String(describing: leo)) line=\(String(describing: linePhase("Compare error screen")))")
         try await call(failedConfig, "array_report", ["summary": "Fixed", "checks": [["what": "Error layout", "result": "pass"]]])
         try expect(supervisor.send("HOLD-again", to: helper), "helper restart failed")
         try await AgentPresenceChecks.eventually("running urgency not updated") {
-            view.presentation?.header.contains("Running: Check login flow") == true
+            linePhase("Check login flow") == .working
         }
         // Watchdog state comes from the production sweep, not from a lead claim.
         var now = Date(); supervisor.helperWatchdogNow = { now }
         await supervisor.sweepHelperWatchdog()
         try await Task.sleep(for: .milliseconds(200))
-        now.addTimeInterval(601)
+        // Past every production alert threshold (20/20/30 min since 7d7f83837).
+        now.addTimeInterval(max(supervisor.helperWatchdogThreshold, supervisor.helperStallAlertAfter, supervisor.helperWaitCeiling) + 1)
         await supervisor.sweepHelperWatchdog()
         try expect(view.presentation?.steps.first { $0.title == "Check login flow" }?.state == .needsYou, "watchdog did not repaint plan")
         _ = try await ManagedModeChecks.hook(b, helper, ["hook_event_name": "PreToolUse", "tool_name": "Read", "tool_input": [:]])
