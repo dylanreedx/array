@@ -563,7 +563,16 @@ enum SharedTileParityChecks {
                                              authority: authority, loop: loop, document: document)
         let prompter = try SharedAgentHandoffController(identity: sam, transport: NoRoute(), directory: root.appendingPathComponent("handoff"))
         let session = SharedAgentTileSession(view: guestTile, reference: reference, controller: guestController, prompter: prompter)
+        // A link's join hands the tile the controller it has just opened; starting
+        // the tile must not open it a second time and repeat the round trips.
+        await guestController.open()
+        let openedByJoin = await authority.connectionsOpened
         session.start()
+        await session.waitUntilOpen()
+        let openedAfterStart = await authority.connectionsOpened
+        guard openedAfterStart == openedByJoin else {
+            throw Failure(description: "starting a tile on an already-open controller opened it again (\(openedByJoin) -> \(openedAfterStart) connections)")
+        }
         sessions.append { session.close(); projection.stop() }
         let head = projection.projectors[item.id]?.log.head
         try await SharedAreaCheckRig.eventually("the guest's agent view holds the host's projection", attempts: 1600) {

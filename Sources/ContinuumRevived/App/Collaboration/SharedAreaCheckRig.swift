@@ -19,6 +19,8 @@ enum SharedAreaCheckRig {
         private var connections: [(Collaboration.Identity, Connection)] = []
         private var presence: [UUID: Collaboration.Presence] = [:]
         private(set) var applies = 0
+        /// Every connection ever handed out, including ones since closed.
+        private(set) var connectionsOpened = 0
         private(set) var usageReports = 0
         private(set) var presencePublishes = 0
         private(set) var lastInput: [UUID: Collaboration.PresenceInput] = [:]
@@ -35,7 +37,7 @@ enum SharedAreaCheckRig {
         }
         func state(_ identity: Collaboration.Identity) throws -> Collaboration.State { .init(scope: try scope(identity), document: document) }
         func connection(_ identity: Collaboration.Identity) throws -> Connection {
-            _ = try scope(identity); let value = Connection(); connections.append((identity, value)); return value
+            _ = try scope(identity); let value = Connection(); connections.append((identity, value)); connectionsOpened += 1; return value
         }
         func apply(_ mutation: Collaboration.Mutation, from identity: Collaboration.Identity) async throws -> Collaboration.Receipt {
             let current = try scope(identity)
