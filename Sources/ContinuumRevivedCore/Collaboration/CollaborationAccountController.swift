@@ -107,7 +107,14 @@ public final class CollaborationAccountController {
     private struct Active {
         var account: CollaborationLocalAccount
         let transport: any CollaborationAccountTransport
+        /// Every `Active` is made right after the relay confirmed its identity.
+        var identityVerifiedAt = Date()
     }
+    /// How long a confirmed identity stands before an account action asks the
+    /// relay again. Sharing makes four or five account calls in a row, and
+    /// re-asking before each one added a round trip apiece to Copy link. A
+    /// revoked device still fails closed: the action itself is refused.
+    static let identityFreshness: TimeInterval = 30
     private let store: CollaborationAccountStore
     private let credentials: CollaborationCredentialStore
     private let bundleIdentifier: String?
@@ -446,9 +453,12 @@ public final class CollaborationAccountController {
         let ticket = try begin(selecting: false)
         defer { finish(ticket) }
         do {
-            let identity = try await active.transport.identity()
-            try current(ticket)
-            guard identity == active.account.identity else { throw CollaborationAccountFailure.identityMismatch }
+            if Date().timeIntervalSince(active.identityVerifiedAt) >= Self.identityFreshness {
+                let identity = try await active.transport.identity()
+                try current(ticket)
+                guard identity == active.account.identity else { throw CollaborationAccountFailure.identityMismatch }
+                self.active?.identityVerifiedAt = Date()
+            }
             let result = try await action(active, ticket)
             try current(ticket)
             lastError = nil; changed()
