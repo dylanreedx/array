@@ -136,6 +136,9 @@ do {
     log.record([change("qa-runs/sheet-3.png", .add), change("qa-runs/notes.md"), change(".build/x.png"), change("outputs/report.html", .edit)],
                agent: agent, checkoutRoot: root.path, at: t0.addingTimeInterval(60))
     log.record([change("outputs/export.xlsx")], agent: UUID(), checkoutRoot: root.path, at: t0.addingTimeInterval(120))
+    let shell = AgentMadeFileLog.shellWrittenPaths(command: "mkdir -p outputs && echo '<h1>hi</h1>' > outputs/shell-report.html 2>&1; cat a | tee -a \"qa-runs/tee out.png\" > /dev/null; echo x >> notes.md; ls 2>/dev/null; echo y > $HOME/x.png")
+    expect(shell == ["outputs/shell-report.html", "qa-runs/tee out.png", "notes.md"],
+           "a Bash redirect or tee names the file an agent made, and descriptors, /dev/null and variables are not files: \(shell)")
     let names = log.recent().map { URL(fileURLWithPath: $0.path).lastPathComponent }
     expect(names == ["export.xlsx", "notes.md", "sheet-3.png", "report.html"],
            "made-by-agents must list one-off files only (no source, no .build, no repo docs), newest first: \(names)")

@@ -31,6 +31,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     private var tableView: NSTableView?
     private var searchField: NSTextField?
     private var footerLabel: NSTextField?
+    private var fileEmptyLabel: NSTextField?
     private var fileSearchToken = 0
     private var fileSearchResults: [PaletteFileRow] = []
     /// A search is out for the typed query; a key pressed meanwhile waits for it, so it never acts on the stale list.
@@ -201,6 +202,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         deferredFileAction = nil
         fileSearchResults.removeAll()
         footerLabel = nil
+        fileEmptyLabel = nil
         filtered.removeAll()
         displayEntries.removeAll()
         filesystemCreationPreview = nil
@@ -966,7 +968,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         let content = CommandCenterSurfaceView(frame: NSRect(x: 0, y: 0, width: 660, height: 520))
         content.setAccessibilityIdentifier(Self.rootAccessibilityIdentifier)
 
-        let search = NSSearchField()
+        let search = PaletteSearchField()
         search.delegate = self
         search.translatesAutoresizingMaskIntoConstraints = false
         search.placeholderString = "Search Array…"
@@ -1546,7 +1548,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             deferredFileAction = nil
             let sections = (onFileSections?() ?? []).filter { !$0.rows.isEmpty }
             displayEntries = sections.flatMap { [CommandCenterDisplayEntry.section($0.title)] + $0.rows.map(CommandCenterDisplayEntry.file) }
-            reloadFileEntries()
+            reloadFileEntries(emptyText: "Type to search every file in this project.")
             return
         }
         fileSearchToken += 1
@@ -1557,13 +1559,14 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             self.fileSearchPending = false
             self.fileSearchResults = rows
             self.displayEntries = rows.isEmpty ? [] : [.section("Files")] + rows.map(CommandCenterDisplayEntry.file)
-            self.reloadFileEntries()
+            self.reloadFileEntries(emptyText: "No files match “\(trimmed)”")
             if let action = self.deferredFileAction { self.deferredFileAction = nil; self.commitFile(action) }
         }
     }
 
-    private func reloadFileEntries() {
+    private func reloadFileEntries(emptyText: String) {
         tableView?.reloadData()
+        showFileEmptyState(displayEntries.isEmpty ? emptyText : nil)
         if let first = displayEntries.indices.first(where: { if case .file = displayEntries[$0] { return true }; return false }) {
             tableView?.selectRowIndexes(IndexSet(integer: first), byExtendingSelection: false)
         } else {
@@ -1572,14 +1575,37 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         resizeForEntries()
     }
 
+    /// The words standing in an empty list: centred in the list area, in the footer's own type.
+    private func showFileEmptyState(_ text: String?) {
+        if fileEmptyLabel == nil, let scroll = tableView?.enclosingScrollView, let host = scroll.superview {
+            let label = NSTextField(labelWithString: "")
+            label.font = .systemFont(ofSize: 10.5, weight: .medium)
+            label.textColor = .secondaryLabelColor
+            label.alignment = .center
+            label.translatesAutoresizingMaskIntoConstraints = false
+            host.addSubview(label)
+            NSLayoutConstraint.activate([
+                label.centerXAnchor.constraint(equalTo: scroll.centerXAnchor),
+                label.centerYAnchor.constraint(equalTo: scroll.centerYAnchor),
+                label.leadingAnchor.constraint(greaterThanOrEqualTo: scroll.leadingAnchor, constant: 14),
+            ])
+            fileEmptyLabel = label
+        }
+        fileEmptyLabel?.stringValue = text ?? ""
+        fileEmptyLabel?.isHidden = text == nil
+    }
+
+    var fileEmptyTextForQA: String? { fileEmptyLabel.flatMap { $0.isHidden ? nil : $0.stringValue } }
+
     /// Grow or shrink the surface to its rows, as `show` sizes it.
     private func resizeForEntries() {
         guard let paletteView, let host = paletteView.superview else { return }
-        // Search field and its gap above, the rows and the 2pt between them, the footer below.
-        let contentHeight = CGFloat(86) + displayEntries.reduce(CGFloat.zero) { total, entry in
-            total + (entry.isSection ? CommandCenterSectionCell.height : CommandCenterItemCell.rowHeight) + 2
-        }
-        let height = min(520, max(150, contentHeight), max(0, host.bounds.height - 32))
+        // The list is exactly its rows (the table knows where its last row ends), so the gap
+        // above the footer is the same for one row as for many. 86 = search field, the gaps
+        // around the list, and the footer.
+        let rowsBottom = displayEntries.isEmpty ? 0 : (tableView?.rect(ofRow: displayEntries.count - 1).maxY ?? 0)
+        let contentHeight = CGFloat(86) + (displayEntries.isEmpty ? 2 * CommandCenterItemCell.rowHeight : rowsBottom)
+        let height = min(520, contentHeight, max(0, host.bounds.height - 32))
         let top = paletteView.frame.maxY
         paletteView.frame = NSRect(x: paletteView.frame.minX, y: top - height, width: paletteView.frame.width, height: height)
         paletteView.layoutSubtreeIfNeeded()
@@ -1621,6 +1647,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         fileSearchToken += 1
         fileSearchPending = false
         deferredFileAction = nil
+        fileEmptyLabel?.isHidden = true
         footerLabel?.stringValue = Self.standardFooter
         navigationLevel = .root
         rows = rootRows
@@ -1668,6 +1695,32 @@ private enum CommandCenterDisplayEntry {
     var isSection: Bool {
         if case .section = self { return true }
         return false
+    }
+}
+
+/// The palette's search field. While its text editor is active AppKit lays the text over
+/// the magnifier of a borderless field; the cell's own text rect starts after the icon
+/// and ends before the clear button, and the editor is given that rect.
+final class PaletteSearchField: NSSearchField {
+    private final class Cell: NSSearchFieldCell {
+        private func textBounds(_ rect: NSRect) -> NSRect {
+            let left = searchButtonRect(forBounds: rect).maxX + 6
+            let right = cancelButtonRect(forBounds: rect).minX - 6
+            return NSRect(x: left, y: rect.minY, width: max(0, right - left), height: rect.height)
+        }
+        override func searchTextRect(forBounds rect: NSRect) -> NSRect { textBounds(rect) }
+        override func drawingRect(forBounds rect: NSRect) -> NSRect { textBounds(rect) }
+        override func titleRect(forBounds rect: NSRect) -> NSRect { textBounds(rect) }
+        override func edit(withFrame rect: NSRect, in controlView: NSView, editor textObj: NSText, delegate: Any?, event: NSEvent?) {
+            super.edit(withFrame: textBounds(rect), in: controlView, editor: textObj, delegate: delegate, event: event)
+        }
+        override func select(withFrame rect: NSRect, in controlView: NSView, editor textObj: NSText, delegate: Any?, start selStart: Int, length selLength: Int) {
+            super.select(withFrame: textBounds(rect), in: controlView, editor: textObj, delegate: delegate, start: selStart, length: selLength)
+        }
+    }
+    override class var cellClass: AnyClass? {
+        get { Cell.self }
+        set {}
     }
 }
 
@@ -1812,26 +1865,23 @@ final class CommandCenterSectionCell: NSTableCellView {
 /// query matched, and who made it and how long ago.
 struct PaletteFileRow {
     var path: String
-    /// Offsets into the folder text the row shows (`folder`), then the name, as
-    /// `AgentCompletion.matchedPathIndices` gives them: into the whole relative path.
+    /// Offsets into the whole relative path, as `AgentCompletion.matchedPathIndices` gives them.
+    /// The list does not draw them (neither reference does); the data stays for the ranking witness.
     var matched: [Int] = []
     var agent: AgentIdentityChipView.Identity?
     var age: String?
     /// Where the file is on disk; `path` is what the row shows (relative to the project when it is inside it).
     var absolutePath: String?
 
+    /// The project's name: what stands under a file that sits at the project root.
+    var projectName: String?
+
     var name: String { (path as NSString).lastPathComponent }
-    /// What the @ menu shows under a file: its folder with a trailing "/", "./" at the root.
+    /// Under the name: the folder with a trailing "/", or the project's name at the root.
     var folder: String {
         let parent = (path as NSString).deletingLastPathComponent
-        return parent.isEmpty || parent == "." ? "./" : parent + "/"
+        return parent.isEmpty || parent == "." ? (projectName ?? "./") : parent + "/"
     }
-    private var parentCount: Int {
-        let parent = (path as NSString).deletingLastPathComponent
-        return parent.isEmpty || parent == "." ? 0 : parent.count + 1
-    }
-    var nameMatches: Set<Int> { Set(matched.filter { $0 >= parentCount }.map { $0 - parentCount }) }
-    var folderMatches: Set<Int> { Set(matched.filter { $0 < parentCount - 1 }) }
 }
 
 final class CommandCenterItemCell: NSTableCellView {
@@ -1840,6 +1890,7 @@ final class CommandCenterItemCell: NSTableCellView {
     private let subtitleField = NSTextField(labelWithString: "")
     private var file: PaletteFileRow?
     private var accessory: NSView?
+    private var ageLabel: NSTextField?
 
     init(item: CommandCenterItem, shortcut: String? = nil, creationPreview: String? = nil) {
         super.init(frame: .zero)
@@ -1870,19 +1921,27 @@ final class CommandCenterItemCell: NSTableCellView {
     init(file: PaletteFileRow) {
         self.file = file
         super.init(frame: .zero)
+        // The age is one right-aligned column; an agent's chip (plate at its leading edge, then
+        // the name) sits in its own fixed column to the left of it, so plates line up.
+        let ageLabel = NSTextField(labelWithString: file.age ?? "")
+        ageLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        ageLabel.textColor = .secondaryLabelColor
+        ageLabel.alignment = .right
+        ageLabel.translatesAutoresizingMaskIntoConstraints = false
+        ageLabel.widthAnchor.constraint(equalToConstant: 56).isActive = true
+        self.ageLabel = ageLabel
         let trailing: NSView
         if let agent = file.agent {
             let chip = AgentIdentityChipView(frame: .zero)
             chip.configure(agent, age: file.age ?? "")
             accessory = chip
-            trailing = chip
+            let row = NSStackView(views: [chip, ageLabel])
+            row.orientation = .horizontal
+            row.alignment = .centerY
+            row.spacing = 0
+            trailing = row
         } else {
-            let label = NSTextField(labelWithString: file.age ?? "")
-            label.font = .systemFont(ofSize: 11)
-            label.textColor = .secondaryLabelColor
-            label.alignment = .right
-            label.isHidden = file.age == nil
-            trailing = label
+            trailing = ageLabel
         }
         trailing.translatesAutoresizingMaskIntoConstraints = false
         build(symbol: FileKindIcon.symbol(forPath: file.path), selectable: true, trailing: trailing, trailingMinWidth: 0)
@@ -1939,24 +1998,16 @@ final class CommandCenterItemCell: NSTableCellView {
         }
     }
 
-    /// The name and folder with the matched characters one step heavier. Attributed
-    /// text is not recoloured by the selection, so the selected colours are chosen here.
+    /// The name and folder in the row's own weights. Selected rows take the selection's
+    /// contrast colour, as every other palette row's text does.
     private func refreshFileText() {
         guard let file else { return }
         let emphasized = backgroundStyle == .emphasized
-        let primary: NSColor = emphasized ? .alternateSelectedControlTextColor : .labelColor
-        let secondary: NSColor = emphasized ? .alternateSelectedControlTextColor.withAlphaComponent(0.8) : .secondaryLabelColor
-        func text(_ string: String, matched: Set<Int>, size: CGFloat, weight: NSFont.Weight, heavy: NSFont.Weight, colour: NSColor) -> NSAttributedString {
-            let out = NSMutableAttributedString(string: string, attributes: [
-                .font: NSFont.systemFont(ofSize: size, weight: weight), .foregroundColor: colour])
-            for index in matched where index < string.count {
-                out.addAttributes([.font: NSFont.systemFont(ofSize: size, weight: heavy), .foregroundColor: primary],
-                                  range: NSRange(location: index, length: 1))
-            }
-            return out
-        }
-        titleField.attributedStringValue = text(file.name, matched: file.nameMatches, size: 13.5, weight: .medium, heavy: .semibold, colour: file.matched.isEmpty ? primary : primary.withAlphaComponent(0.72))
-        subtitleField.attributedStringValue = text(file.folder, matched: file.folderMatches, size: 11.5, weight: .regular, heavy: .semibold, colour: secondary)
+        titleField.stringValue = file.name
+        subtitleField.stringValue = file.folder
+        titleField.textColor = emphasized ? .alternateSelectedControlTextColor : .labelColor
+        subtitleField.textColor = emphasized ? .alternateSelectedControlTextColor.withAlphaComponent(0.8) : .secondaryLabelColor
+        ageLabel?.textColor = emphasized ? .alternateSelectedControlTextColor.withAlphaComponent(0.8) : .secondaryLabelColor
     }
 }
 

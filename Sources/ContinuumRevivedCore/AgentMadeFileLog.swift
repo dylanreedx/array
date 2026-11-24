@@ -39,6 +39,69 @@ public final class AgentMadeFileLog: @unchecked Sendable {
         }
     }
 
+    /// The files a shell command writes by redirection (`> f`, `>> f`, `&> f`) or `tee`,
+    /// which is how an agent makes a file with Bash instead of a Write tool. Only
+    /// literal paths: a variable, a substitution or `/dev/*` is not a file to offer.
+    /// A command that fails leaves no file, and `recent` drops what is not on disk.
+    public static func shellWrittenPaths(command: String) -> [String] {
+        // Split into words and operators, honouring quotes.
+        var tokens: [(text: String, isOperator: Bool)] = []
+        var current = ""
+        var hasCurrent = false
+        var quote: Character?
+        let chars = Array(command)
+        var i = 0
+        func flush() { if hasCurrent { tokens.append((current, false)); current = ""; hasCurrent = false } }
+        while i < chars.count {
+            let c = chars[i]
+            if let q = quote {
+                if c == q { quote = nil } else if c == "\\", q == "\"", i + 1 < chars.count { i += 1; current.append(chars[i]) } else { current.append(c) }
+                i += 1; continue
+            }
+            switch c {
+            case "'", "\"": quote = c; hasCurrent = true
+            case "\\": if i + 1 < chars.count { i += 1; current.append(chars[i]); hasCurrent = true }
+            case " ", "\t", "\n": flush()
+            case ">":
+                // "2>" and "2>&1" are descriptors, not files: drop a lone digit before the operator.
+                if hasCurrent, current.count == 1, current.first?.isNumber == true { current = ""; hasCurrent = false }
+                else if hasCurrent, current == "&" { current = ""; hasCurrent = false }
+                else { flush() }
+                var op = ">"
+                if i + 1 < chars.count, chars[i + 1] == ">" { op = ">>"; i += 1 }
+                if i + 1 < chars.count, chars[i + 1] == "&" { op = ">&"; i += 1 }
+                tokens.append((op, true))
+            case "|", ";", "&":
+                if c == "&", i + 1 < chars.count, chars[i + 1] == ">" { hasCurrent = true; current = "&"; break }
+                flush(); tokens.append((String(c), true))
+            default: current.append(c); hasCurrent = true
+            }
+            i += 1
+        }
+        flush()
+        var found: [String] = []
+        func accept(_ path: String) {
+            guard !path.isEmpty, !path.hasPrefix("/dev/"), !path.hasPrefix("&"),
+                  !path.contains("$"), !path.contains("`"), !path.contains("*") else { return }
+            if !found.contains(path) { found.append(path) }
+        }
+        var index = 0
+        while index < tokens.count {
+            let token = tokens[index]
+            if token.isOperator, token.text == ">" || token.text == ">>", index + 1 < tokens.count, !tokens[index + 1].isOperator {
+                accept(tokens[index + 1].text)
+            } else if !token.isOperator, token.text == "tee" {
+                var next = index + 1
+                while next < tokens.count, !tokens[next].isOperator {
+                    if !tokens[next].text.hasPrefix("-") { accept(tokens[next].text) }
+                    next += 1
+                }
+            }
+            index += 1
+        }
+        return found
+    }
+
     /// Whether a written file is one a person would go looking for.
     public static func isOneOff(action: AgentToolDetailObservation.FileAction, path: String, checkoutRoot: String) -> Bool {
         guard action == .add || action == .write else { return false }

@@ -71,6 +71,11 @@ enum FileOpenDesignStills {
                               to: compare.appendingPathComponent("\(name)-vs-at-menu-\(tag).png"))
                 }
             }
+            // Empty list: nothing made, nothing recent, and a query nothing matches.
+            for (name, query) in [("6-empty-hint", ""), ("7-no-match", "revrepmd")] {
+                let ours = try snapshot(card(query: query, sections: query.isEmpty ? [] : []), dark: dark)
+                try write(ours, to: out.appendingPathComponent("\(name)-\(tag).png"))
+            }
             // The agent identity follows Settings > Agent Icons, because it reuses the tile's plate.
             for (label, enabled, style) in [("squircle", true, AgentCharacterConfig.BubbleStyle.squircle),
                                             ("inline", true, .inline), ("minimal", true, .minimalSquircle),
@@ -79,6 +84,24 @@ enum FileOpenDesignStills {
                 try write(try snapshot(card(query: "", sections: [("Made by agents", madeByAgents(count: 4))]), dark: dark),
                           to: out.appendingPathComponent("5-style-\(label)-\(tag).png"))
             }
+        }
+        // The live field: a key window, so the search field's editor is active as in the app.
+        for (label, file) in [("live-model-step", false), ("live-file-step-empty", true), ("live-file-step-typed", true)] {
+            let host = KeyWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600), styleMask: [.borderless], backing: .buffered, defer: false)
+            host.appearance = NSAppearance(named: .darkAqua)
+            host.contentView = NSView(frame: NSRect(x: 0, y: 0, width: 900, height: 600))
+            host.orderFrontOffscreenForChecks()
+            let typed = label.hasSuffix("typed") ? "palmod" : ""
+            let view = file
+                ? LaunchProfilePalette.designFileStep(host: host, query: typed, sections: [], results: palmod.prefix(1).map(paletteRow))
+                : LaunchProfilePalette.designReferenceModelStep(host: host, query: "")
+            _ = view
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+            if let content = host.contentView, let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
+                content.cacheDisplay(in: content.bounds, to: rep)
+                try write(rep, to: compare.appendingPathComponent("\(label).png"))
+            }
+            host.orderOut(nil)
         }
         print("FileOpenDesignStills wrote to \(out.path)")
     }
@@ -138,7 +161,7 @@ enum FileOpenDesignStills {
         PaletteFileRow(
             path: row.path, matched: row.matched,
             agent: row.agent.map { .init(agentID: $0.id, name: $0.name, model: $0.model, identityColor: $0.color, characterName: nil) },
-            age: row.age, absolutePath: "/fixture/" + row.path)
+            age: row.age, absolutePath: "/fixture/" + row.path, projectName: "review-root")
     }
 
     /// The production Open file step, built by the real palette with fixture rows.

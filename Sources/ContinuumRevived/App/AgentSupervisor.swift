@@ -3256,8 +3256,13 @@ final class AgentSupervisor {
                                   receivedAt: commandReceivedAt, harness: record.harness?.rawValue)
             } else { runLedger.invalidateCommandSpans() }
         }
-        if case let .toolDetail(_, detail) = observation, !detail.fileChanges.isEmpty {
-            agentMadeFiles.record(detail.fileChanges, agent: id.rawValue, checkoutRoot: record.checkoutRoot)
+        if case let .toolDetail(_, detail) = observation {
+            var made = detail.fileChanges
+            // A file made with Bash (`echo … > f`) is as much the agent's as one it wrote with a tool.
+            if let command = detail.fields.first(where: { $0.key == AgentToolDetailObservation.shellCommandKey })?.value {
+                made += AgentMadeFileLog.shellWrittenPaths(command: command).map { .init(action: .write, path: $0) }
+            }
+            if !made.isEmpty { agentMadeFiles.record(made, agent: id.rawValue, checkoutRoot: record.checkoutRoot) }
         }
         ensureLocationProjector(for: record)
         locationProjectors[id]?.ingest(observation)

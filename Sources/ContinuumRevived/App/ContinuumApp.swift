@@ -14929,7 +14929,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                 deliver(found.filter { !$0.title.hasSuffix("/") }.prefix(12).map { completion in
                     let relative = completion.detail ?? completion.title
                     return PaletteFileRow(path: relative, matched: completion.matchedPathIndices,
-                                          absolutePath: root.appendingPathComponent(relative).path)
+                                          absolutePath: root.appendingPathComponent(relative).path, projectName: project.name)
                 })
             }
         }
@@ -14942,14 +14942,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
                     path: Self.paletteFileDisplayPath(entry.path, projectRoot: rootPath), matched: [],
                     agent: record.map { .init(agentID: entry.agentID, name: $0.displayName, model: $0.model,
                                               identityColor: $0.identityColor, characterName: $0.characterName) },
-                    age: Self.paletteFileAge(since: entry.madeAt), absolutePath: entry.path)
+                    age: Self.paletteFileAge(since: entry.madeAt), absolutePath: entry.path,
+                    projectName: self.activeProject?.name)
             }
             let madePaths = Set(made.compactMap(\.absolutePath))
             let recent = (palette?.recentFiles(limit: 8) ?? []).filter {
                 !madePaths.contains($0.path) && FileManager.default.fileExists(atPath: $0.path)
             }.prefix(5).map {
                 PaletteFileRow(path: Self.paletteFileDisplayPath($0.path, projectRoot: rootPath), matched: [],
-                               age: Self.paletteFileAge(since: $0.openedAt), absolutePath: $0.path)
+                               age: Self.paletteFileAge(since: $0.openedAt), absolutePath: $0.path,
+                               projectName: self.activeProject?.name)
             }
             return [("Made by agents", made), ("Recent", Array(recent))]
         }

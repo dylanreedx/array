@@ -41,6 +41,16 @@ enum PaletteOpenFileChecks {
             [.init(action: .write, path: "outputs/q3-report.html")],
             agent: f.agentId.rawValue, checkoutRoot: f.pbRoot.path)
 
+        // An agent makes a file with Bash (mkdir + echo >), through the supervisor's own
+        // observation route: it must be offered exactly as a Write would be.
+        try Data("<p>made with bash</p>".utf8).write(to: outputs.appendingPathComponent("bash-made.html"))
+        delegate.qaAgentSupervisor.qaObserveSharedTranscript(
+            .toolDetail(itemId: "bash-1", detail: AgentToolDetailObservation(
+                phase: .ended, toolName: "Bash",
+                fields: [(key: AgentToolDetailObservation.shellCommandKey, value: "mkdir -p outputs && echo '<p>made with bash</p>' > outputs/bash-made.html")],
+                observedAt: Date())),
+            for: f.agentId)
+
         let pasteboard = NSPasteboard(name: NSPasteboard.Name("palette-open-file-check-\(UUID().uuidString)"))
         delegate.paletteFilePasteboard = pasteboard
         var revealed: [URL] = []
@@ -62,7 +72,9 @@ enum PaletteOpenFileChecks {
 
         // Empty query: files agents made lead, with the agent's identity and an age.
         try expect(palette.sectionTitlesForQA.first == "Made by agents", "the first section must be Made by agents, got \(palette.sectionTitlesForQA)")
-        guard let made = palette.fileRowsForQA.first else { throw Failure(description: "no row under Made by agents; rows = \(palette.fileRowsForQA.map(\.path))") }
+        try expect(palette.fileRowsForQA.contains { $0.name == "bash-made.html" },
+                   "a file an agent made with a Bash redirect must be under Made by agents, rows = \(palette.fileRowsForQA.map(\.path))")
+        guard let made = palette.fileRowsForQA.first(where: { $0.name == "q3-report.html" }) else { throw Failure(description: "no row under Made by agents; rows = \(palette.fileRowsForQA.map(\.path))") }
         try expect(made.name == "q3-report.html" && made.folder == "outputs/", "made-by-agents row, got \(made.path)")
         try expect(made.agent?.agentID == f.agentId.rawValue && made.agent?.name.isEmpty == false && made.age != nil,
                    "the row must carry the agent that made it and an age, got \(String(describing: made.agent))")
@@ -74,6 +86,20 @@ enum PaletteOpenFileChecks {
         try expect(!hit.matched.isEmpty && hit.absolutePath == docs.appendingPathComponent("handbook.txt").path,
                    "the fuzzy hit must carry match positions and its absolute path, got \(hit)")
         try expect(palette.sectionTitlesForQA == ["Files"], "search results sit under one Files header, got \(palette.sectionTitlesForQA)")
+
+        // A file at the project root is filed under the project's name, not "./".
+        palette.typeForQA("notes.md")
+        try pump(palette) { palette.fileRowsForQA.contains { $0.name == "notes.md" } }
+        let rootFile = palette.fileRowsForQA.first { $0.name == "notes.md" }
+        try expect(rootFile?.folder == f.pbRoot.lastPathComponent || rootFile?.folder != "./", "a root file's folder line is the project's name, got \(String(describing: rootFile?.folder))")
+        // A query nothing matches says so, in the footer's own type.
+        palette.typeForQA("qzxjwvk")
+        try pump(palette) { palette.fileEmptyTextForQA != nil }
+        try expect(palette.fileEmptyTextForQA == "No files match “qzxjwvk”" && palette.fileRowsForQA.isEmpty,
+                   "no match must say so, got \(String(describing: palette.fileEmptyTextForQA))")
+        palette.typeForQA("hanbook")
+        try pump(palette) { palette.fileRowsForQA.contains { $0.name == "handbook.txt" } }
+        try expect(palette.fileEmptyTextForQA == nil, "the no-match line goes away when there are results")
 
         // ⌥Return copies the FILE, not its path.
         palette.keyForQA(keyCode: 36, modifiers: [.option])

@@ -20,10 +20,13 @@ final class AgentIdentityChipView: NSView {
 
     static let plateSide: CGFloat = InboxLeadIconPlate.side
     private static let markSide: CGFloat = 13
+    /// Every row's chip is this wide with the plate at its leading edge, so the plates
+    /// share one x whatever the names' lengths.
+    static let columnWidth: CGFloat = 96
+    static let gap: CGFloat = 6
     private let plate = InboxLeadIconPlate(frame: NSRect(x: 0, y: 0, width: InboxLeadIconPlate.side, height: InboxLeadIconPlate.side))
     private let mark = NSImageView()
     private let nameLabel = NSTextField(labelWithString: "")
-    private let ageLabel = NSTextField(labelWithString: "")
     private let stack = NSStackView()
     /// True while the row it sits in is selected: the text takes the selection's
     /// own contrast colour, as every other palette row's does.
@@ -34,14 +37,12 @@ final class AgentIdentityChipView: NSView {
         plate.translatesAutoresizingMaskIntoConstraints = false
         mark.translatesAutoresizingMaskIntoConstraints = false
         mark.imageScaling = .scaleProportionallyUpOrDown
-        for label in [nameLabel, ageLabel] { label.lineBreakMode = .byTruncatingTail }
+        nameLabel.lineBreakMode = .byTruncatingTail
         nameLabel.font = .systemFont(ofSize: 11.5, weight: .medium)
-        ageLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        ageLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         stack.orientation = .horizontal
         stack.alignment = .centerY
-        stack.spacing = 6
+        stack.spacing = Self.gap
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
@@ -50,7 +51,8 @@ final class AgentIdentityChipView: NSView {
             mark.widthAnchor.constraint(equalToConstant: Self.markSide),
             mark.heightAnchor.constraint(equalToConstant: Self.markSide),
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
+            widthAnchor.constraint(equalToConstant: Self.columnWidth),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
         setAccessibilityElement(true)
@@ -81,8 +83,7 @@ final class AgentIdentityChipView: NSView {
             views.append(mark)
         }
         nameLabel.stringValue = identity.name
-        ageLabel.stringValue = age
-        views += [nameLabel, ageLabel]
+        views.append(nameLabel)
         stack.setViews(views, in: .leading)
         if views.contains(mark) { stack.setCustomSpacing(8, after: mark) }
         applyColours()
@@ -94,11 +95,9 @@ final class AgentIdentityChipView: NSView {
         if isEmphasized {
             mark.contentTintColor = .alternateSelectedControlTextColor
             nameLabel.textColor = .alternateSelectedControlTextColor
-            ageLabel.textColor = .alternateSelectedControlTextColor.withAlphaComponent(0.8)
         } else {
             mark.contentTintColor = BrandMark96.foreground(in: self)
             nameLabel.textColor = .labelColor
-            ageLabel.textColor = .secondaryLabelColor
         }
         plate.applyPalette()
     }
@@ -109,6 +108,6 @@ final class AgentIdentityChipView: NSView {
     }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: ceil(stack.fittingSize.width), height: Self.plateSide)
+        NSSize(width: Self.columnWidth, height: Self.plateSide)
     }
 }
