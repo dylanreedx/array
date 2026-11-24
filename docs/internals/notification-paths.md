@@ -730,15 +730,22 @@ agent sound here, macOS Focus does not gate them: Focus filters notifications,
 and these are in-app audio. Witness: `--character-sounds-check` (recording sink,
 no real audio), reported by the matrix next to the character legs.
 
-Agent sound master defaults on. Individual events (MAC-03…06) default by
-whether their key was ever written: never written reads ON for Finished
-(completed), Failed and Needs you (actionRequired), and OFF for Pushed and
-Merged, so a new install plays those three (changed 2026-11-23; before, every
-event was opt-in and a fresh install was silent). A saved choice, on or off, is
-never overridden, so an existing user's explicit settings are unchanged. In
-Settings › Notifications & Sounds the volume, event rows, icon sounds and custom
-sounds are drawn only while "Play agent sounds" is on; with it off every event
-is quiet (master gates `AgentSoundConfig.resolvedSound`). Per-tile overrides and
+Agent sound master defaults on. Individual events (MAC-03…06) stay opt-in for
+an existing install: a key never written reads OFF, so an existing user hears
+nothing new. A BRAND-NEW install (first launch, no `registry.json` yet in the
+app-support dir; `AgentSoundConfig.seedNewInstall`, called once at launch before
+the registry exists, inert in `-check` runs) is seeded with Finished (completed),
+Failed and Needs you (actionRequired) ON; Pushed and Merged stay off. A saved
+choice, on or off, is never overwritten. In Settings › Notifications & Sounds the
+volume, event rows, icon sounds and custom sounds are drawn only while "Play
+agent sounds" is on; with it off every event is quiet (master gates
+`AgentSoundConfig.resolvedSound`). The iPhone pane shows its push-category
+switches only once a phone is paired; hiding a switch changes no stored choice
+and no delivery. Settings words: Needs you, Failed, Finished, Merged, Pushed
+(tile badges keep Completed / Action required). Witness: `--agent-awareness-check`
+(an existing store with no event keys plays nothing; a new store plays finished
+and needs-you with a saved Failed-off kept, and all three when unset; explicit
+master off is silent) through the production `AgentSignalCenter`. Per-tile overrides and
 volume apply. Settings words: Needs you, Failed, Finished, Merged, Pushed (the
 tile badge keeps Completed / Action required). The iPhone pane shows its
 push-category switches only once a phone is paired; hiding a switch changes no

@@ -9545,6 +9545,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         do {
             let appSupportDir = Self.resolveAppSupportDir(smokeTest: smokeTestEnabled)
             let registryStore = RegistryStore(applicationSupportDirectory: appSupportDir)
+            // A brand-new install (no registry yet) hears finished, failed and
+            // needs-you once sounds are on; an existing install is left alone.
+            if !CommandLine.arguments.contains(where: { $0.hasSuffix("-check") }) {
+                AgentSoundConfig.seedNewInstall(defaults: settingsDefaults, registryFile: registryStore.registryFile)
+            }
             companionAuthService = try CompanionAuthService(
                 authDirectory: Self.resolveAuthDirectory(applicationSupportDirectory: appSupportDir),
                 instanceDisplayName: Host.current().localizedName ?? "Array"

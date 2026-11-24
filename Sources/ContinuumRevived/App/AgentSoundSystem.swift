@@ -441,18 +441,40 @@ enum AgentAwarenessSelfCheck {
         let unsetModel = SettingsModel(defaults: unset, navKeymap: .default, soundLibrary: library)
         try expect(unset.object(forKey: AgentSoundConfig.masterEnabledKey) == nil && unsetModel.soundsEnabled,
                    "an unset master switch must read ON in Settings — read \(unsetModel.soundsEnabled)")
+        // An existing install (its store already has a registry file) is NOT seeded:
+        // no event key is written and it stays silent.
+        let files = FileManager.default
+        let existingSupport = files.temporaryDirectory.appendingPathComponent("array-sound-existing-\(UUID().uuidString)", isDirectory: true)
+        let freshSupport = files.temporaryDirectory.appendingPathComponent("array-sound-fresh-\(UUID().uuidString)", isDirectory: true)
+        try files.createDirectory(at: existingSupport, withIntermediateDirectories: true)
+        defer { try? files.removeItem(at: existingSupport); try? files.removeItem(at: freshSupport) }
+        try Data("{}".utf8).write(to: existingSupport.appendingPathComponent("registry.json"))
+        try expect(!AgentSoundConfig.seedNewInstall(defaults: unset, registryFile: existingSupport.appendingPathComponent("registry.json")),
+                   "an existing store must not be seeded")
+        try expect(AgentSignalKind.allCases.allSatisfy { unset.object(forKey: AgentSoundConfig.enabledKey(for: $0)) == nil },
+                   "an existing store must have no event key written")
         let freshPlayer = RecordingPlayer()
         everyEvent(AgentSignalCenter(defaults: unset, library: library, player: freshPlayer))
-        try expect(Set(freshPlayer.played.map(\.rawValue)) == ["bloom", "radar", "beacon"],
-                   "a new install (no event key written) must play finished, failed and needs-you, and not push or merge — played \(freshPlayer.played.map(\.rawValue))")
-        // A saved choice always wins over the new default: an existing user who
-        // turned finished off, and one who turned merged on, hear exactly that.
-        unset.set(false, forKey: AgentSoundConfig.enabledKey(for: .completed))
-        unset.set(true, forKey: AgentSoundConfig.enabledKey(for: .gitMergeSucceeded))
-        let savedPlayer = RecordingPlayer()
-        everyEvent(AgentSignalCenter(defaults: unset, library: library, player: savedPlayer))
-        try expect(Set(savedPlayer.played.map(\.rawValue)) == ["radar", "beacon", "prism"],
-                   "saved event choices must override the new-install defaults — played \(savedPlayer.played.map(\.rawValue))")
+        try expect(freshPlayer.played.isEmpty,
+                   "an existing install with no event enabled must play NOTHING — played \(freshPlayer.played.map(\.rawValue))")
+        // A brand-new store (no registry file) gets finished, failed and needs-you
+        // ON, once; push and merge stay off; a saved choice is never overwritten.
+        let (newInstall, newInstallName) = try freshSuite("new")
+        defer { newInstall.removePersistentDomain(forName: newInstallName) }
+        newInstall.set(false, forKey: AgentSoundConfig.enabledKey(for: .failed))
+        try expect(AgentSoundConfig.seedNewInstall(defaults: newInstall, registryFile: freshSupport.appendingPathComponent("registry.json")),
+                   "a store with no registry is a new install")
+        let newPlayer = RecordingPlayer()
+        everyEvent(AgentSignalCenter(defaults: newInstall, library: library, player: newPlayer))
+        try expect(Set(newPlayer.played.map(\.rawValue)) == ["bloom", "beacon"],
+                   "a new install plays finished and needs-you, keeps a saved Failed off, and not push or merge — played \(newPlayer.played.map(\.rawValue))")
+        let seededFresh = try freshSuite("seeded")
+        defer { seededFresh.0.removePersistentDomain(forName: seededFresh.1) }
+        AgentSoundConfig.seedNewInstall(defaults: seededFresh.0, registryFile: freshSupport.appendingPathComponent("registry.json"))
+        let seededPlayer = RecordingPlayer()
+        everyEvent(AgentSignalCenter(defaults: seededFresh.0, library: library, player: seededPlayer))
+        try expect(Set(seededPlayer.played.map(\.rawValue)) == ["bloom", "radar", "beacon"],
+                   "a new install must play finished, failed and needs-you — played \(seededPlayer.played.map(\.rawValue))")
 
         let (off, offName) = try freshSuite("off")
         defer { off.removePersistentDomain(forName: offName) }
@@ -464,7 +486,7 @@ enum AgentAwarenessSelfCheck {
         everyEvent(AgentSignalCenter(defaults: off, library: library, player: offPlayer))
         try expect(offPlayer.played.isEmpty,
                    "an explicit OFF master switch must silence an enabled event — played \(offPlayer.played.map(\.rawValue))")
-        print("Agent awareness checks passed: 20 assets, import lifecycle, accessible visuals, deduped completion, master sound ON when unset and OFF when set off, a new install hears finished, failed and needs-you while saved choices win")
+        print("Agent awareness checks passed: 20 assets, import lifecycle, accessible visuals, deduped completion, master sound ON when unset and OFF when set off, an existing install stays silent, a new install hears finished, failed and needs-you, saved choices win")
     }
 }
 

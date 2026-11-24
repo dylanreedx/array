@@ -250,19 +250,27 @@ public struct AgentSoundManifestEntry: Codable, Equatable, Identifiable, Sendabl
 
 public enum AgentSoundConfig {
     public static let masterEnabledKey = "continuum.agentSounds.enabled"
-    /// ON when nobody has set it (decisions pass). The events a person has to act
-    /// on or learn of (`defaultEnabled(for:)`) are ON until someone saves a
-    /// choice for them, so turning sounds on makes sound; a saved choice, on or
-    /// off, is never overridden.
+    /// ON when nobody has set it (decisions pass). Every event rule stays opt-in
+    /// for an install that already exists (`AgentSoundRules.defaults`); a brand
+    /// new install is seeded once by `seedNewInstall`.
     public static let defaultMasterEnabled = true
 
-    /// What an event's switch reads when its key was never written: the three
-    /// moments that matter (needs you, failed, finished) on, git events off.
-    public static func defaultEnabled(for kind: AgentSignalKind) -> Bool {
-        switch kind {
-        case .actionRequired, .failed, .completed: return true
-        case .gitPushSucceeded, .gitMergeSucceeded: return false
+    /// The moments a person has to act on or learn of: the ones a new install
+    /// turns on so that sounds, once on, make sound.
+    public static let newInstallEvents: [AgentSignalKind] = [.actionRequired, .failed, .completed]
+
+    /// On the very first launch (no registry file yet in the app-support
+    /// directory) writes the `newInstallEvents` keys as ON, once, where none was
+    /// ever written. An existing install has a registry file, so nothing changes
+    /// for it, and a saved choice is never overwritten.
+    @discardableResult
+    public static func seedNewInstall(defaults: UserDefaults, registryFile: URL,
+                                      fileManager: FileManager = .default) -> Bool {
+        guard !fileManager.fileExists(atPath: registryFile.path) else { return false }
+        for kind in newInstallEvents where defaults.object(forKey: enabledKey(for: kind)) == nil {
+            defaults.set(true, forKey: enabledKey(for: kind))
         }
+        return true
     }
     public static let volumeKey = "continuum.agentSounds.volume"
     public static let defaultVolume = 0.72
@@ -280,7 +288,7 @@ public enum AgentSoundConfig {
         for kind in AgentSignalKind.allCases {
             guard let suggested = values[kind] else { continue }
             let enabled = defaults.object(forKey: enabledKey(for: kind)) == nil
-                ? defaultEnabled(for: kind) : defaults.bool(forKey: enabledKey(for: kind))
+                ? false : defaults.bool(forKey: enabledKey(for: kind))
             let sound = AgentSoundReference(rawValue: defaults.string(forKey: soundKey(for: kind)) ?? suggested.sound.rawValue)
             values[kind] = AgentSoundRule(enabled: enabled, sound: sound)
         }

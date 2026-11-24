@@ -94,9 +94,6 @@ enum CharacterSoundsChecks {
 
         let suite = "ArrayCharacterSoundsChecks-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!
-        // This check is about the characters, so the alert sounds start off here (a
-        // new install now has finished, failed and needs-you ON).
-        for kind in AgentSignalKind.allCases { defaults.set(false, forKey: AgentSoundConfig.enabledKey(for: kind)) }
         defer { defaults.removePersistentDomain(forName: suite) }
         let controller = AgentCharacterController.shared
         controller.reduceMotion = { true }
@@ -255,8 +252,8 @@ enum CharacterSoundsChecks {
         if case .quiet(_, .alertPlayed)? = center.outcomes.dropLast().last {} else {
             throw Failure(description: "the character records why it stayed quiet: \(center.outcomes.suffix(3))")
         }
-        defaults.set(false, forKey: AgentSoundConfig.enabledKey(for: .completed))
-        defaults.set(false, forKey: AgentSoundConfig.enabledKey(for: .actionRequired))
+        defaults.removeObject(forKey: AgentSoundConfig.enabledKey(for: .completed))
+        defaults.removeObject(forKey: AgentSoundConfig.enabledKey(for: .actionRequired))
         // A per-tile mute silences the character too.
         let muted = center.ingest(event: .requestOpened(threadId: "m", requestId: "m1", kind: .commandExecutionApproval),
                                   agentID: lead.rawValue, isHelper: false,
