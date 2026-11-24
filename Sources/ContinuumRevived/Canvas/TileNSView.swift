@@ -1099,7 +1099,9 @@ class TileNSView: NSView, TokenThemed {
 
     /// The residency transitions' own swap, which must not promote.
     private func installContentView(_ view: NSView) {
-        contentView?.removeFromSuperview()
+        // The old body may already live inside the new one (Edit's editor, now a
+        // pane of Split): only take it off if it is still this tile's own child.
+        if let old = contentView, old.superview === self { old.removeFromSuperview() }
         contentView = view
         view.translatesAutoresizingMaskIntoConstraints = true
         view.autoresizingMask = []

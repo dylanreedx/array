@@ -2328,6 +2328,8 @@ run_app_check .build/debug/Array --workspace-selector-check
 run_app_check .build/debug/Array --browser-profile-persistence-check
 # Hidden note autosave plus Preview/Edit and same-identity Save-as-Markdown conversion.
 run_app_check .build/debug/Array --note-file-tile-spawn-check
+# A note typed in Edit, switched to Split and back by real clicks keeps every keystroke.
+run_app_check .build/debug/Array --note-split-edit-check
 run_app_check .build/debug/Array --run-artifacts-tile-check
 run_app_check .build/debug/Array --zone-hydration-lifecycle-check
 run_app_check .build/debug/Array --zone-save-isolation-check

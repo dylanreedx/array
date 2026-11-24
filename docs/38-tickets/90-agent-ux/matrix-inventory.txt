@@ -272,6 +272,7 @@ check --nav-overlay-visible-check
 check --new-tile-cwd-check
 check --note-conversion-writer-check
 check --note-file-tile-spawn-check
+check --note-split-edit-check
 check --observer-sweep-badge-check
 check --onboarding-panel-check
 check --orchestration-plan-check
@@ -845,6 +846,7 @@ leg run_app_check .build/debug/Array --nav-overlay-visible-check
 leg run_app_check .build/debug/Array --new-tile-cwd-check
 leg run_app_check .build/debug/Array --note-conversion-writer-check
 leg run_app_check .build/debug/Array --note-file-tile-spawn-check
+leg run_app_check .build/debug/Array --note-split-edit-check
 leg run_app_check .build/debug/Array --observer-sweep-badge-check
 leg run_app_check .build/debug/Array --onboarding-panel-check
 leg run_app_check .build/debug/Array --orchestration-plan-check

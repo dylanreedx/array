@@ -248,6 +248,75 @@ final class NoteTileNSView: TileNSView, NSTextViewDelegate {
         try? content.text.write(to: url, atomically: true, encoding: .utf8)
     }
 
+    /// Edit → Split → Edit on a real note, with the production mode switch clicked
+    /// through the window and the note typed with real key events. The outcome
+    /// asserted is the text the note would save, not a view-tree shape.
+    static func runNoteSplitEditSelfCheck() throws {
+        struct Failure: Error, CustomStringConvertible { let description: String }
+        func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
+            if !condition() { throw Failure(description: message) }
+        }
+        let tile = Tile(id: UUID(), kind: .note, title: "NOTE_SPLIT_EDIT", frame: TileFrame(x: 40, y: 40, width: 600, height: 300),
+                        zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata(noteId: UUID(), markdownDocumentMode: .edit))
+        let canvas = CanvasNSView(canvasState: CanvasState(viewport: CanvasViewport(x: 0, y: 0, zoom: 1), tiles: [tile], groups: [], lastActiveTileId: nil))
+        canvas.focusBroker = FocusBroker()
+        canvas.frame = NSRect(x: 0, y: 0, width: 760, height: 480)
+        let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = canvas
+        window.orderFrontOffscreenForChecks()
+        let note = NoteTileNSView(tile: tile, noteId: tile.metadata.noteId ?? UUID(), initialBody: "")
+        var saved = ""
+        note.onTextChange = { saved = note.textView.string }
+        canvas.install(tileView: note, for: tile)
+        func settle() { window.contentView?.layoutSubtreeIfNeeded(); canvas.layoutSubtreeIfNeeded(); note.layoutSubtreeIfNeeded() }
+        settle()
+        try expect(note.mode == .edit, "the note starts in Edit")
+
+        func click(_ control: ModeSegmentedControl, at fraction: CGFloat) throws {
+            let point = control.convert(NSPoint(x: control.bounds.width * fraction, y: control.bounds.midY), to: nil)
+            func mouse(_ type: NSEvent.EventType) throws -> NSEvent {
+                guard let event = NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                                                     timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                                     context: nil, eventNumber: 1, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1)
+                else { throw Failure(description: "could not create a mouse event") }
+                return event
+            }
+            NSApplication.shared.postEvent(try mouse(.leftMouseUp), atStart: false)
+            window.sendEvent(try mouse(.leftMouseDown))
+            settle()
+        }
+        func type(_ text: String) throws {
+            for character in text {
+                guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [],
+                                                   timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                                   context: nil, characters: String(character), charactersIgnoringModifiers: String(character),
+                                                   isARepeat: false, keyCode: 0)
+                else { throw Failure(description: "could not create a key event") }
+                guard let responder = window.firstResponder as? NSTextView else {
+                    throw Failure(description: "typing after the switch has no text view to receive it; first responder \(String(describing: window.firstResponder))")
+                }
+                responder.keyDown(with: event)
+            }
+        }
+        guard let control = note.qaModeControl else { throw Failure(description: "the note has no mode control") }
+
+        _ = window.makeFirstResponder(note.textView)
+        try type("ab")
+        try expect(saved == "ab", "typing in Edit saves the text; saved \(saved.debugDescription)")
+
+        try click(control, at: 0.5)
+        try expect(note.mode == .split, "clicking Split installs Split")
+        try expect(note.textView.window != nil && note.textView.isDescendant(of: note) && note.textView.enclosingScrollView?.frame.width ?? 0 > 40,
+                   "Split shows the editor beside the preview; editor window \(String(describing: note.textView.window)), in tile \(note.textView.isDescendant(of: note)), width \(note.textView.enclosingScrollView?.frame.width ?? 0)")
+        try type("cd")
+        try expect(saved == "abcd" && note.textView.string == "abcd", "typing in Split reaches the saved text; saved \(saved.debugDescription)")
+
+        try click(control, at: 5.0 / 6.0)
+        try expect(note.mode == .edit, "clicking Edit installs Edit")
+        try type("e")
+        try expect(saved == "abcde", "typing after Split → Edit reaches the saved text; saved \(saved.debugDescription)")
+    }
+
     static func runNoteClickFocusSelfCheck() throws -> URL {
         enum CheckError: Error, CustomStringConvertible {
             case failed(String)

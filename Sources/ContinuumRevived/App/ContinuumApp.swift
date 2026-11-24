@@ -6993,6 +6993,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--note-split-edit-check") {
+            do {
+                _ = NSApplication.shared
+                try NoteTileNSView.runNoteSplitEditSelfCheck()
+                print("ContinuumRevivedNoteSplitEditChecks passed: a note typed in Edit, switched to Split and back by real clicks keeps every keystroke in its saved text")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--zone-rename-inline-check") {
             do {
                 _ = NSApplication.shared
