@@ -30,14 +30,15 @@ public enum ClaudeSessionTranscriptReader {
         threadId: String,
         truncated: Bool = false,
         limits: RehydrationLimits = RehydrationLimits(),
-        now: () -> Date = Date.init
+        now: () -> Date = Date.init,
+        settingsDefaults: UserDefaults = .standard
     ) -> RehydratedTranscript {
         ManagedTranscriptRehydrator.assemble(
-            normalize(lines: lines), threadId: threadId, truncated: truncated, limits: limits,
+            normalize(lines: lines, settingsDefaults: settingsDefaults), threadId: threadId, truncated: truncated, limits: limits,
             now: now)
     }
 
-    static func normalize(lines: [String]) -> [NormalizedTranscriptMessage] {
+    static func normalize(lines: [String], settingsDefaults: UserDefaults = .standard) -> [NormalizedTranscriptMessage] {
         var out: [NormalizedTranscriptMessage] = []
         for line in lines {
             guard let object = ManagedTranscriptRehydrator.jsonObject(line),
@@ -94,7 +95,7 @@ public enum ClaudeSessionTranscriptReader {
             case "assistant":
                 guard let message = object["message"] as? [String: Any],
                       let blocks = message["content"] as? [[String: Any]] else { continue }
-                appendAssistantMessage(blocks, into: &out)
+                appendAssistantMessage(blocks, settingsDefaults: settingsDefaults, into: &out)
             default:
                 continue
             }
@@ -194,7 +195,7 @@ public enum ClaudeSessionTranscriptReader {
     }
 
     private static func appendAssistantMessage(
-        _ blocks: [[String: Any]], into out: inout [NormalizedTranscriptMessage]
+        _ blocks: [[String: Any]], settingsDefaults: UserDefaults, into out: inout [NormalizedTranscriptMessage]
     ) {
         var reasoning = ""
         var text = ""
@@ -227,7 +228,10 @@ public enum ClaudeSessionTranscriptReader {
                             ?? (input?["notebook_path"] as? String)
                             ?? (input?["path"] as? String),
                         messageText: AgentToolDetailObservation.messageTextField(toolName: name, arguments: input ?? [:])?.value,
-                        summaryText: Self.summaryText(from: input)))
+                        summaryText: Self.summaryText(from: input),
+                        commandText: AgentShellObservation.isShellTool(name)
+                            ? AgentShellObservation.commandField(input?["command"], defaults: settingsDefaults)?.value
+                            : nil))
                 }
             default:
                 continue

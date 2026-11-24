@@ -81,16 +81,22 @@ private func runClaudeSessionTranscriptParseChecks() {
     // is pinned to compare whole step lists.
     let observedAt = Date(timeIntervalSince1970: 1_700_000_000)
     let transcript = ClaudeSessionTranscriptReader.parse(
-        lines: lines, threadId: threadId, now: { observedAt })
+        lines: lines, threadId: threadId, now: { observedAt },
+        settingsDefaults: UserDefaults(suiteName: "restored-bash-title-check-\(UUID().uuidString)")!)
 
     let expected: [RehydratedTranscriptStep] = [
         .userPrompt("HELLO_PROMPT_ONE"),
         .event(.turnStarted(threadId: threadId, turnId: "rehydrated-t1")),
         .event(.contentDelta(threadId: threadId, turnId: "rehydrated-t1", streamKind: .reasoning, delta: "REASON_ALPHA")),
         .event(.contentDelta(threadId: threadId, turnId: "rehydrated-t1", streamKind: .assistant, delta: "ANSWER_ALPHA")),
-        // The command rides the title so a rehydrated card reads "Bash · ls"
-        // instead of an opaque "Bash" (display-only; rehydration never re-syncs).
-        .event(.itemStarted(threadId: threadId, itemId: "toolu_A", kind: .commandExecution, title: "Bash · ls")),
+        // The command rides a host-local detail field, as the live row's does, so
+        // the row is drawn from it and the title stays the bare tool name (a
+        // path in a title read as a path-bearing name and became "Tool").
+        .observation(.toolDetail(itemId: "toolu_A", detail: AgentToolDetailObservation(
+            phase: .started, toolName: "Bash",
+            fields: [(key: AgentToolDetailObservation.shellCommandKey, value: "ls")],
+            observedAt: observedAt))),
+        .event(.itemStarted(threadId: threadId, itemId: "toolu_A", kind: .commandExecution, title: "Bash")),
         .event(.itemCompleted(threadId: threadId, itemId: "toolu_A", kind: .commandExecution, status: .completed)),
         .event(.contentDelta(threadId: threadId, turnId: "rehydrated-t1", streamKind: .assistant, delta: "ANSWER_BETA")),
         // TR-01 — the restored file change now replays the host-local facts the
@@ -699,39 +705,54 @@ func runRestoredBashTitleChecks() {
         guard condition() else { fatalError("TranscriptRehydration check failed: \(message)") }
     }
     let title = "Create outputs folder and write two small files"
-    let lines = [
-        #"{"type":"user","isSidechain":false,"message":{"role":"user","content":"go"}}"#,
-        #"{"type":"assistant","isSidechain":false,"message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_T","name":"Bash","input":{"command":"mkdir -p /tmp/outputs && echo hi > /tmp/outputs/a.txt","description":"\#(title)"}}]}}"#,
-    ]
-    let transcript = ClaudeSessionTranscriptReader.parse(lines: lines, threadId: "t-title")
-    guard let scope = AgentToolDetailScope(agentID: "a", threadID: "t-title", turnID: "rehydrated-t1", provider: "claude") else { fatalError("scope") }
-    let itemID = AgentToolDetailID("toolu_T")
-    let key = AgentToolDetailKey(scope: scope, providerItemID: itemID)
-    // The same order the transcript list view replays: the item's own title
-    // start, then every observation's start, merged by the store.
-    var starts: [AgentToolDetailStart] = []
-    var itemTitle: String?
-    for step in transcript.steps {
-        if case let .event(.itemStarted(_, id, _, t)) = step, id == "toolu_T" { itemTitle = t }
-    }
-    starts.append(AgentToolDetailStart(identity: key, toolName: itemTitle ?? "Tool"))
-    for step in transcript.steps {
-        if case let .observation(.toolDetail(id, detail)) = step, id == "toolu_T", detail.phase == .started {
-            starts.append(AgentToolDetailStart(
-                identity: key, toolName: detail.toolName ?? itemTitle ?? "Tool",
-                arguments: detail.fields.map { AgentToolDetailField(key: $0.key, value: $0.value) }))
+    let command = "mkdir -p /tmp/outputs && echo hi > /tmp/outputs/a.txt"
+    func restoredRow(input: String) -> (line: String?, command: String?) {
+        let lines = [
+            #"{"type":"user","isSidechain":false,"message":{"role":"user","content":"go"}}"#,
+            #"{"type":"assistant","isSidechain":false,"message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_T","name":"Bash","input":\#(input)}]}}"#,
+        ]
+        let transcript = ClaudeSessionTranscriptReader.parse(
+            lines: lines, threadId: "t-title",
+            settingsDefaults: UserDefaults(suiteName: "restored-bash-title-check-\(UUID().uuidString)")!)
+        guard let scope = AgentToolDetailScope(agentID: "a", threadID: "t-title", turnID: "rehydrated-t1", provider: "claude")
+        else { fatalError("scope") }
+        let itemID = AgentToolDetailID("toolu_T")
+        let key = AgentToolDetailKey(scope: scope, providerItemID: itemID)
+        // The same order the transcript list view replays: the item's own title
+        // start, then every observation's start, merged by the store.
+        var starts: [AgentToolDetailStart] = []
+        var itemTitle: String?
+        for step in transcript.steps {
+            if case let .event(.itemStarted(_, id, _, t)) = step, id == "toolu_T" { itemTitle = t }
         }
+        starts.append(AgentToolDetailStart(identity: key, toolName: itemTitle ?? "Tool"))
+        for step in transcript.steps {
+            if case let .observation(.toolDetail(id, detail)) = step, id == "toolu_T", detail.phase == .started {
+                starts.append(AgentToolDetailStart(
+                    identity: key, toolName: detail.toolName ?? itemTitle ?? "Tool",
+                    arguments: detail.fields.map { AgentToolDetailField(key: $0.key, value: $0.value) }))
+            }
+        }
+        let box = RestoredTitleBox()
+        let done = DispatchSemaphore(value: 0)
+        Task {
+            let store = AgentToolDetailStore()
+            for start in starts { _ = await store.recordStart(start) }
+            if let record = await store.detail(for: key) {
+                box.line = AgentToolDetailPresenter.collapsed(record).actionLine
+                box.command = AgentToolDetailPresenter.shellInvocation(record)?.command
+            }
+            done.signal()
+        }
+        done.wait()
+        return (box.line, box.command)
     }
-    let box = RestoredTitleBox()
-    let done = DispatchSemaphore(value: 0)
-    Task {
-        let store = AgentToolDetailStore()
-        for start in starts { _ = await store.recordStart(start) }
-        box.line = await store.detail(for: key).map { AgentToolDetailPresenter.collapsed($0).actionLine }
-        done.signal()
-    }
-    done.wait()
-    expect(box.line == title, "restored Bash row title is \"\(box.line ?? "nil")\", expected \"\(title)\"")
+    let described = restoredRow(input: #"{"command":"\#(command)","description":"\#(title)"}"#)
+    expect(described.line == title, "restored Bash row title is \"\(described.line ?? "nil")\", expected \"\(title)\"")
+    // No description: the row is drawn from the command, as a live call's is.
+    let bare = restoredRow(input: #"{"command":"\#(command)"}"#)
+    expect(bare.line != "Tool", "a restored Bash call with no description must not read \"Tool\"")
+    expect(bare.command == command, "restored Bash row without a description carries its command, got \"\(bare.command ?? "nil")\"")
 }
 
-private final class RestoredTitleBox: @unchecked Sendable { var line: String? }
+private final class RestoredTitleBox: @unchecked Sendable { var line: String?; var command: String? }

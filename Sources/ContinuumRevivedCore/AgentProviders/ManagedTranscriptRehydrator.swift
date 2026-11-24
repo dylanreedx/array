@@ -127,6 +127,10 @@ struct NormalizedTranscriptMessage: Equatable {
         /// title otherwise carries the command, whose paths the detail
         /// store reads as a path-bearing tool name and flattens to "Tool".
         var summaryText: String? = nil
+        /// A shell call's command, as the live row carries it (redacted, and
+        /// absent when "Show shell commands in transcripts" is off). With no
+        /// `description` it is what the row is drawn from.
+        var commandText: String? = nil
     }
 
     var role: Role
@@ -282,7 +286,7 @@ public enum ManagedTranscriptRehydrator {
                     // so repeating it in the title printed the same absolute path
                     // twice on one card (and put it in the document, which the
                     // live path is careful never to do).
-                    let title = (kind == .fileChange && !call.fileChanges.isEmpty) || call.summaryText != nil
+                    let title = (kind == .fileChange && !call.fileChanges.isEmpty) || call.summaryText != nil || call.commandText != nil
                         ? call.name
                         : (call.detail.map { "\(call.name) · \($0)" } ?? call.name)
                     // Before the item, mirroring the live claude frame order.
@@ -310,13 +314,20 @@ public enum ManagedTranscriptRehydrator {
                                 fileChanges: call.fileChanges,
                                 observedAt: now()))))
                     }
-                    if let summary = call.summaryText {
+                    // One observation, as the live frame sends it: a second
+                    // started detail for the same item replaces the first's fields.
+                    var detailFields: [(key: String, value: String)] = []
+                    if let summary = call.summaryText { detailFields.append((key: "description", value: summary)) }
+                    if let command = call.commandText {
+                        detailFields.append((key: AgentToolDetailObservation.shellCommandKey, value: command))
+                    }
+                    if !detailFields.isEmpty {
                         append(.observation(.toolDetail(
                             itemId: call.id,
                             detail: AgentToolDetailObservation(
                                 phase: .started,
                                 toolName: call.name,
-                                fields: [(key: "description", value: summary)],
+                                fields: detailFields,
                                 observedAt: now()))))
                     }
                     if let messageText = call.messageText {
