@@ -2864,6 +2864,7 @@ enum ContinuumApp {
             Task { @MainActor in
                 do {
                     try await HelperCompletionChecks.runMessages()
+                    try await HelperCompletionChecks.runMessageFanOut()
                     print("HelperCompletionChecks passed")
                     Foundation.exit(0)
                 } catch {

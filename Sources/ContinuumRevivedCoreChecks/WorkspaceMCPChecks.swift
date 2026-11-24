@@ -62,7 +62,7 @@ func runWorkspaceMCPChecks() {
         return Set(values.compactMap { if case .string(let key) = $0 { return key } else { return nil } })
     }
     expect(required("array_delegate") == ["task", "idempotencyKey"]
-           && required("array_message_agent") == ["agentId", "text", "idempotencyKey"]
+           && required("array_message_agent") == ["text", "idempotencyKey"]
            && required("array_canvas_apply") == ["op", "tileId", "expectedRevision"],
            "required fields drifted from pi's TypeBox definitions")
     func requiredAlternatives(_ value: WorkspaceMCPJSON?) -> Set<Set<String>> {
@@ -86,6 +86,8 @@ func runWorkspaceMCPChecks() {
         }
         return nil
     }
+    expect(requiredAlternatives(WorkspaceMCPToolCatalog.tool(named: "array_message_agent")?.inputSchema["anyOf"]) == [["agentId"], ["agentIds"]],
+           "array_message_agent must take one agentId or an agentIds list")
     let openSchema = WorkspaceMCPToolCatalog.tool(named: "array_open_document")?.inputSchema
     let operationSchema = WorkspaceMCPToolCatalog.tool(named: "array_get_operation")?.inputSchema
     let canvasSchema = WorkspaceMCPToolCatalog.tool(named: "array_canvas_apply")?.inputSchema

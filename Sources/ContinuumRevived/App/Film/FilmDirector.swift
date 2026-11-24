@@ -1564,8 +1564,13 @@ final class FilmDirector {
         delegate.workspaceAPI.filmRevealCamera = { production = $0 }
         defer { delegate.workspaceAPI.filmRevealCamera = nil }
         let reply = try callWorkspaceMCP(tool, input: input, requestId: "film-\(open.toolId)", agent: agent)
-        guard (reply["status"] as? String) == "ok", let object = reply["result"],
-              let data = try? JSONSerialization.data(withJSONObject: object),
+        // The wire receipt omits presentationEffects when every dimension is preserved.
+        guard (reply["status"] as? String) == "ok", var object = reply["result"] as? [String: Any],
+              let preserved = WorkspaceAPIService.jsonObject(WorkspacePresentationEffects.allPreserved) else {
+            throw FilmError("open \(open.path) as \(agentKey): the workspace API answered \(reply)")
+        }
+        if object["presentationEffects"] == nil { object["presentationEffects"] = WorkspaceAPIService.plain(preserved) }
+        guard let data = try? JSONSerialization.data(withJSONObject: object),
               let result = try? JSONDecoder().decode(ArtifactOpenResult.self, from: data),
               let tileId = result.tileId else {
             throw FilmError("open \(open.path) as \(agentKey): the workspace API answered \(reply)")

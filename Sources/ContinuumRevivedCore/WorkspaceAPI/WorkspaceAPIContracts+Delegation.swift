@@ -429,6 +429,70 @@ public struct AgentMessageResult: Codable, Equatable, Sendable {
     }
 }
 
+/// `agent.message` with `agentIds`: the same text to several agents in one
+/// call. Each recipient goes through the single-send path on its own, with
+/// the same reach, grant, plan, queue, hold and pause rules, and its own
+/// idempotency key (`recipientKey`), so a retry with the caller's key replays
+/// every recipient's first outcome and never delivers to anyone twice.
+public enum AgentMessageFanOut {
+    /// Larger fan-outs belong in several calls: the approval UI and the hop
+    /// limit still apply per recipient.
+    public static let recipientCeiling = 16
+
+    /// nil when the payload names no `agentIds` (a single send). Otherwise the
+    /// recipients, or the `invalid_request` that refuses the whole call before
+    /// any delivery.
+    public static func recipients(in payload: [String: Any]) -> Result<[AgentID], WorkspaceAPIError>? {
+        guard let raw = payload["agentIds"] else { return nil }
+        func refuse(_ message: String) -> Result<[AgentID], WorkspaceAPIError> {
+            .failure(WorkspaceAPIError(code: .invalidRequest, message: message + " Nothing was delivered."))
+        }
+        if payload["agentId"] != nil { return refuse("Pass agentId or agentIds, not both.") }
+        guard let values = raw as? [Any] else { return refuse("agentIds must be a list of agent ids.") }
+        if values.isEmpty { return refuse("agentIds is empty.") }
+        if values.count > recipientCeiling { return refuse("agentIds lists \(values.count) agents; the ceiling is \(recipientCeiling).") }
+        var ids: [AgentID] = []
+        for value in values {
+            guard let text = value as? String, let uuid = UUID(uuidString: text) else {
+                return refuse("agentIds must hold agent ids from array_delegate or array_find_agent.")
+            }
+            let id = AgentID(rawValue: uuid)
+            if ids.contains(id) { return refuse("agentIds lists \(text) twice.") }
+            ids.append(id)
+        }
+        return .success(ids)
+    }
+
+    /// One key per recipient, derived from the caller's: the operation store
+    /// and the durable queue never see two recipients under one key.
+    public static func recipientKey(_ key: String, for agentId: AgentID) -> String {
+        key + "/" + agentId.rawValue.uuidString.lowercased()
+    }
+
+    public struct Entry: Codable, Equatable, Sendable {
+        public var agentId: AgentID
+        public var delivery: AgentMessageDelivery
+        /// Absent only when the call refused this recipient before reserving.
+        public var operationId: String?
+        /// Why it was refused or held; for a refusal, the error code first.
+        public var reason: String?
+
+        public init(agentId: AgentID, delivery: AgentMessageDelivery, operationId: String? = nil, reason: String? = nil) {
+            self.agentId = agentId
+            self.delivery = delivery
+            self.operationId = operationId
+            self.reason = reason
+        }
+    }
+}
+
+public struct AgentMessageFanOutResult: Codable, Equatable, Sendable {
+    public var schema: String = WorkspaceAPISchema.v1
+    public var results: [AgentMessageFanOut.Entry]
+
+    public init(results: [AgentMessageFanOut.Entry]) { self.results = results }
+}
+
 // MARK: - operation.get
 
 public struct OperationGetRequest: Codable, Equatable, Sendable {

@@ -18,7 +18,55 @@ func runWorkspaceAPIContractChecks() {
     checkResultRoundTrip()
     checkGrantEvaluator()
     checkBridgeParseAndEncode()
+    checkMessageFanOutBounds()
+    checkReceiptCompaction()
     print("WorkspaceAPIContractChecks passed")
+}
+
+private func checkMessageFanOutBounds() {
+    let a = UUID().uuidString, b = UUID().uuidString
+    func refused(_ payload: [String: Any]) -> Bool {
+        if case .failure(let error)? = AgentMessageFanOut.recipients(in: payload) { return error.code == .invalidRequest }
+        return false
+    }
+    expect(AgentMessageFanOut.recipients(in: ["agentId": a]) == nil, "a single send is not a fan-out")
+    if case .success(let ids)? = AgentMessageFanOut.recipients(in: ["agentIds": [a, b]]) {
+        expect(ids.map(\.rawValue.uuidString) == [a, b], "fan-out keeps the caller's order: \(ids)")
+    } else { expect(false, "two distinct ids must fan out") }
+    expect(refused(["agentIds": []]), "an empty agentIds is refused")
+    expect(refused(["agentIds": [a, a]]), "a duplicate recipient is refused")
+    expect(refused(["agentIds": [a], "agentId": b]), "agentId and agentIds together are refused")
+    expect(refused(["agentIds": ["not-an-id"]]), "a malformed id is refused")
+    let tooMany = (0...AgentMessageFanOut.recipientCeiling).map { _ in UUID().uuidString }
+    expect(refused(["agentIds": tooMany]), "more than \(AgentMessageFanOut.recipientCeiling) recipients are refused")
+    let idA = AgentID(rawValue: UUID(uuidString: a)!), idB = AgentID(rawValue: UUID(uuidString: b)!)
+    expect(AgentMessageFanOut.recipientKey("k", for: idA) != AgentMessageFanOut.recipientKey("k", for: idB)
+           && AgentMessageFanOut.recipientKey("k", for: idA) == AgentMessageFanOut.recipientKey("k", for: idA),
+           "recipient keys are stable per recipient and distinct across recipients")
+}
+
+private func checkReceiptCompaction() {
+    let preserved = ["workspace": "preserved", "armedZone": "preserved", "selection": "preserved", "camera": "preserved", "keyboardFocus": "preserved"]
+    let usual: [String: Any] = ["operationId": "op", "childAgentId": "c", "parentAgentId": "p", "partial": false,
+        "presentationEffects": preserved,
+        "steps": ["creation": "succeeded", "attachment": "succeeded", "durability": "succeeded", "presentation": "skipped"]]
+    let lean = WorkspaceReceiptCompaction.compact(usual)
+    expect(lean["presentationEffects"] == nil && lean["steps"] == nil && lean["parentAgentId"] == nil,
+           "an all-preserved, all-succeeded receipt drops its boilerplate: \(lean.keys.sorted())")
+    expect(lean["operationId"] as? String == "op" && lean["childAgentId"] as? String == "c" && lean["partial"] as? Bool == false,
+           "operationId, childAgentId and partial survive compaction")
+    var moved = usual
+    moved["presentationEffects"] = preserved.merging(["camera": "changed"]) { $1 }
+    moved["steps"] = ["creation": "succeeded", "attachment": "failed", "durability": "succeeded", "presentation": "skipped"]
+    let kept = WorkspaceReceiptCompaction.compact(moved)
+    expect(kept["presentationEffects"] != nil && kept["steps"] != nil, "a moved camera and a failed step are kept")
+    var partial = usual
+    partial["partial"] = true
+    partial["retryOp"] = "agent.reveal"
+    expect(WorkspaceReceiptCompaction.compact(partial).count == partial.count, "a partial receipt goes out whole")
+    var noChild = usual
+    noChild["childAgentId"] = nil
+    expect(WorkspaceReceiptCompaction.compact(noChild)["parentAgentId"] != nil, "parentAgentId stays when there is no childAgentId beside it")
 }
 
 private func checkBrowserNotLiveError() {

@@ -349,6 +349,120 @@ enum HelperCompletionChecks {
         _ = await waitUntil(timeout: 15, pollInterval: 0.02) { !s.isRunning(child) && heldMessages() == 0 }
         print("helper-message-result-check: held messages say why and how many, persist the reason, are all kept, expire after 24 h and run in order when fresh PASS")
     }
+    /// Bulk `agent.message` (`agentIds`) and lean receipts, through the
+    /// production dispatch and the production wire encoder: one call reaches
+    /// two idle helpers, holds for a helper the real Stop paused, refuses an
+    /// agent in another project; a retry with the same key delivers nothing
+    /// twice; and a typical delegate/message receipt is smaller on the wire.
+    static func runMessageFanOut() async throws {
+        let bench = try WorkspaceAgentReportChecks.makeBench(label: "helper-message-fanout")
+        defer { bench.tearDown() }
+        let s = bench.supervisor, parent = bench.f.agentId
+        func expect(_ ok: Bool, _ what: String) throws { try HelperGuardChecks.expect(ok, what) }
+        func dispatch(_ requestId: String, _ op: String, _ payload: [String: Any]) -> WorkspaceAPIService.Reply {
+            bench.f.api.dispatch(agentId: parent, requestId: requestId, op: op, payload: payload)
+        }
+        func wire(_ reply: WorkspaceAPIService.Reply) -> String {
+            WorkspaceAPIService.transportResponse(for: reply).encodedValue(requestId: "r")
+        }
+        func unabridged(_ reply: WorkspaceAPIService.Reply) -> String {
+            guard case let .result(object) = reply else { return wire(reply) }
+            return PiHostToolResponse.ok(WorkspaceAPIService.plain(object)).encodedValue(requestId: "r")
+        }
+
+        // Helper A by hand, so its delegate receipt can be measured.
+        let delegated = dispatch("fanout-delegate-A", "agent.delegate", ["task": "FANOUT-A: check the ledger", "title": "FANOUT-A", "idempotencyKey": "fanout-delegate-A"])
+        guard case let .result(delegateResult) = delegated,
+              let helperA = delegateResult["childAgentId"]?.string.flatMap(UUID.init(uuidString:)).map(AgentID.init(rawValue:)) else {
+            throw WorkspaceAgentReportChecks.Failure(description: "delegation failed: \(delegated)")
+        }
+        let helperB = try bench.delegate("FANOUT-B")
+        let helperP = try bench.delegate("FANOUT-P")
+        let settled = await waitUntil(timeout: 20, pollInterval: 0.02) { [helperA, helperB, helperP].allSatisfy { !s.isRunning($0) } }
+        try expect(settled, "fan-out helpers did not settle")
+
+        // Typical receipts, before and after compaction, as the transport sends them.
+        let message = dispatch("fanout-single", "agent.message", ["agentId": helperA.rawValue.uuidString, "text": "FANOUT-SINGLE note", "idempotencyKey": "fanout-single"])
+        guard case .result = message else { throw WorkspaceAgentReportChecks.Failure(description: "single message failed: \(message)") }
+        for (label, reply) in [("delegate", delegated), ("message", message)] {
+            let lean = wire(reply), full = unabridged(reply)
+            guard let object = (try? JSONSerialization.jsonObject(with: Data(lean.utf8))) as? [String: Any],
+                  let result = object["result"] as? [String: Any] else { throw WorkspaceAgentReportChecks.Failure(description: "unreadable wire: \(lean)") }
+            try expect(lean.utf8.count < full.utf8.count && result["presentationEffects"] == nil && result["parentAgentId"] == nil
+                && result["operationId"] != nil && result["childAgentId"] != nil,
+                "a usual \(label) receipt drops its boilerplate and keeps what an agent acts on: \(lean)")
+            if label == "delegate" {
+                try expect(result["partial"] as? Bool == false && result["steps"] == nil
+                    && (result["coordinationNote"] as? String).map { $0.count < 80 } == true,
+                    "a committed delegate receipt has no steps and a one-sentence note: \(lean)")
+            }
+            print("helper-message-fanout-check: \(label) receipt \(full.utf8.count) -> \(lean.utf8.count) bytes")
+        }
+        _ = await waitUntil(timeout: 15, pollInterval: 0.02) { !s.isRunning(helperA) }
+
+        // Helper P: the user stops a running turn, and the production Stop pauses its queue.
+        _ = dispatch("fanout-hold-run", "agent.message", ["agentId": helperP.rawValue.uuidString, "text": "HOLD-fanout-run", "idempotencyKey": "fanout-hold-run"])
+        let started = await waitUntil(timeout: 15, pollInterval: 0.02) { s.isRunning(helperP) }
+        try expect(started, "helper P did not start")
+        _ = await s.accept(.stop, for: helperP)
+        let paused = await waitUntil(timeout: 15, pollInterval: 0.02) { !s.isRunning(helperP) && s.isQueuePaused(for: helperP) }
+        try expect(paused, "Stop did not leave helper P's queue paused")
+
+        // An agent in another project: out of reach for this lead.
+        let elsewhere = bench.binDir.deletingLastPathComponent().appendingPathComponent("fanout-elsewhere", isDirectory: true)
+        try FileManager.default.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+        let stranger = s.spawn(role: nil, prompt: nil, cwd: elsewhere, harness: s.records[parent]!.harness ?? .pi,
+                               model: s.records[parent]!.model, thinking: "low", projectId: UUID(), projectRoot: elsewhere)
+
+        func cwdLogs() -> String {
+            Set([helperA, helperB, helperP].compactMap { s.records[$0]?.cwd }).map {
+                (try? String(contentsOf: URL(fileURLWithPath: $0).appendingPathComponent("prompts.log"), encoding: .utf8)) ?? ""
+            }.joined(separator: "\n")
+        }
+        func copies() -> Int { cwdLogs().components(separatedBy: "FANOUT-GO").count - 1 }
+        func heldForP() -> Int { s.queuedMessages(for: helperP).filter { $0.agentMessageContext != nil }.count }
+        let ids = [helperA, helperB, helperP, stranger]
+        let payload: [String: Any] = ["agentIds": ids.map { $0.rawValue.uuidString }, "text": "FANOUT-GO rebase onto main", "idempotencyKey": "fanout-go"]
+        func entries(_ reply: WorkspaceAPIService.Reply) throws -> [[String: AnyHashableJSON]] {
+            guard case let .result(object) = reply, let list = object["results"]?.array?.compactMap(\.object), list.count == ids.count else {
+                throw WorkspaceAgentReportChecks.Failure(description: "fan-out did not answer one entry per recipient: \(reply)")
+            }
+            return list
+        }
+        let first = try entries(dispatch("fanout-go", "agent.message", payload))
+        func entry(_ list: [[String: AnyHashableJSON]], _ id: AgentID) -> [String: AnyHashableJSON]? {
+            list.first { $0["agentId"]?.string?.lowercased() == id.rawValue.uuidString.lowercased() }
+        }
+        try expect([helperA, helperB].allSatisfy { ["delivered", "queued"].contains(entry(first, $0)?["delivery"]?.string ?? "") && entry(first, $0)?["operationId"] != nil },
+                   "both idle helpers receive the message: \(first)")
+        try expect(entry(first, helperP)?["delivery"]?.string == "held" && entry(first, helperP)?["reason"]?.string?.contains("paused after a Stop") == true,
+                   "the paused helper holds it and says why: \(String(describing: entry(first, helperP)))")
+        try expect(entry(first, stranger)?["delivery"]?.string == "refused" && entry(first, stranger)?["reason"]?.string?.hasPrefix("permission_denied") == true,
+                   "the out-of-reach agent is refused with a reason: \(String(describing: entry(first, stranger)))")
+        let reachedBoth = await waitUntil(timeout: 20, pollInterval: 0.05) { copies() >= 2 }
+        try expect(reachedBoth && copies() == 2 && heldForP() == 1, "exactly A and B ran it and P holds one: \(copies()) copies, \(heldForP()) held")
+        _ = await waitUntil(timeout: 15, pollInterval: 0.02) { !s.isRunning(helperA) && !s.isRunning(helperB) }
+
+        // The same key again: every recipient replays its first outcome; nobody gets it twice.
+        let retry = try entries(dispatch("fanout-go-retry", "agent.message", payload))
+        for id in [helperA, helperB, helperP] {
+            try expect(entry(retry, id)?["operationId"] == entry(first, id)?["operationId"] && entry(retry, id)?["delivery"] == entry(first, id)?["delivery"],
+                       "a retry replays the first outcome for \(id): \(String(describing: entry(retry, id)))")
+        }
+        let doubled = await waitUntil(timeout: 3, pollInterval: 0.1) { copies() > 2 }
+        try expect(!doubled && heldForP() == 1 && ![helperA, helperB].contains(where: s.isRunning),
+                   "a retry delivers nothing twice: \(copies()) copies, \(heldForP()) held")
+
+        // Bounds refuse the whole call before anything is delivered.
+        for bad: [String: Any] in [["agentIds": [String](), "text": "x", "idempotencyKey": "fanout-empty"],
+                                   ["agentIds": [helperA.rawValue.uuidString, helperA.rawValue.uuidString], "text": "x", "idempotencyKey": "fanout-dup"]] {
+            guard case let .error(error) = dispatch(UUID().uuidString, "agent.message", bad), error.code == .invalidRequest else {
+                throw WorkspaceAgentReportChecks.Failure(description: "an empty or duplicate agentIds must be invalid_request")
+            }
+        }
+        print("helper-message-fanout-check: one call delivers to idle helpers, holds for a paused one, refuses one out of reach, and a retry delivers nothing twice PASS")
+    }
+
     static func runDeliveryLedger() async throws {
         let bench = try WorkspaceAgentReportChecks.makeBench(label: "helper-delivery-ledger")
         defer { bench.tearDown() }

@@ -402,7 +402,7 @@ final class WorkspaceAPIService {
     static func transportResponse(for reply: Reply) -> PiHostToolResponse {
         switch reply {
         case let .result(object):
-            return .ok(Self.plain(object))
+            return .ok(WorkspaceReceiptCompaction.compact(Self.plain(object)))
         case let .error(error):
             var details: [String: Any] = [:]
             if let id = error.approvalRequestId { details["approvalRequestId"] = id }
@@ -412,7 +412,7 @@ final class WorkspaceAPIService {
             }
             return .error(error.code.rawValue, error.message, details: details.isEmpty ? nil : details)
         case let .cancelled(result):
-            return .cancelled(result: result.map(Self.plain))
+            return .cancelled(result: result.map { WorkspaceReceiptCompaction.compact(Self.plain($0)) })
         }
     }
 

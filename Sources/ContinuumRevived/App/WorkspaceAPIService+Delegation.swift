@@ -298,8 +298,8 @@ extension WorkspaceAPIService {
                 partial: false)
 
             result.coordinationNote = supervisor.resultDelivery(for: agentId) == .push
-                ? "Continue independent work or end this turn. Array delivers this helper's result to you by itself; do not poll, wait or message it to check."
-                : "Array does not run this agent, so it delivers no helper results to it. Continue independent work, then collect the result with a short wait_agents when needed; do not poll."
+                ? "Array delivers this helper's result to you; never poll it."
+                : "Collect this helper's result with a short wait_agents; never poll."
             result.checkoutRoot = child?.checkoutRoot
             result.worktreeBranch = child?.worktreeBranch
             result.checkoutNotice = child?.delegationContext?.checkoutNotice
@@ -668,6 +668,14 @@ extension WorkspaceAPIService {
         payload: [String: Any], runtime: WorkspaceRuntime, canvas: CanvasNSView,
         isCancelled: () -> Bool
     ) -> Reply {
+        if let fanOut = AgentMessageFanOut.recipients(in: payload) {
+            switch fanOut {
+            case let .failure(error): return .error(error)
+            case let .success(recipients):
+                return messageEach(recipients, agentId: agentId, record: record, ownHandle: ownHandle, requestId: requestId,
+                                   payload: payload, runtime: runtime, canvas: canvas, isCancelled: isCancelled)
+            }
+        }
         // 1. Schema and pure bounds (the 8 KB text ceiling, the required key).
         let request: AgentMessageRequest
         do {
@@ -926,6 +934,42 @@ extension WorkspaceAPIService {
         remember(agentId: agentId, WorkspaceRecentOperation(
             requestId: requestId, op: .agentMessage,
             outcome: result.delivery == .refused ? "refused" : result.delivery.rawValue))
+        return .result(object)
+    }
+
+    /// `agentIds`: every recipient through the single send above, one at a
+    /// time, under its own derived key, so each gets exactly the rules (and
+    /// the replay) a single message would. One compact entry per recipient.
+    private func messageEach(
+        _ recipients: [AgentID], agentId: AgentID, record: AgentRecord, ownHandle: CheckoutHandle, requestId: String,
+        payload: [String: Any], runtime: WorkspaceRuntime, canvas: CanvasNSView, isCancelled: () -> Bool
+    ) -> Reply {
+        guard let key = (payload["idempotencyKey"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else {
+            return .error(WorkspaceAPIError(code: .invalidRequest, message: "idempotencyKey is required for agent.message: a retry without one would prompt each agent twice."))
+        }
+        var entries: [AgentMessageFanOut.Entry] = []
+        for (index, recipient) in recipients.enumerated() {
+            var single = payload
+            single["agentIds"] = nil
+            single["agentId"] = recipient.rawValue.uuidString
+            single["idempotencyKey"] = AgentMessageFanOut.recipientKey(key, for: recipient)
+            let reply = message(agentId: agentId, record: record, ownHandle: ownHandle, requestId: "\(requestId)-\(index + 1)",
+                                payload: single, runtime: runtime, canvas: canvas, isCancelled: isCancelled)
+            switch reply {
+            case let .result(object):
+                let delivery = object["delivery"]?.string.flatMap(AgentMessageDelivery.init(rawValue:)) ?? .refused
+                let reason = delivery == .held ? object["heldReason"]?.string
+                    : delivery == .refused ? object["refusalReason"]?.string : nil
+                entries.append(.init(agentId: recipient, delivery: delivery, operationId: object["operationId"]?.string, reason: reason))
+            case let .error(error):
+                entries.append(.init(agentId: recipient, delivery: .refused, reason: "\(error.code.rawValue): \(error.message)"))
+            case .cancelled:
+                entries.append(.init(agentId: recipient, delivery: .refused, reason: "cancelled: nothing was delivered."))
+            }
+        }
+        guard let object = Self.jsonObject(AgentMessageFanOutResult(results: entries)) else {
+            return .error(WorkspaceAPIError(code: .unsupported, message: "Result could not be encoded."))
+        }
         return .result(object)
     }
 
