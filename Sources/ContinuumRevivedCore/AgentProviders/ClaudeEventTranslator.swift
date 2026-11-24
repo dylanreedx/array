@@ -40,6 +40,9 @@ public struct ClaudeEventTranslator {
     /// and outcome. `itemKinds` cannot say: every unknown tool is
     /// `.commandExecution` there.
     private var shellToolUseIDs = Set<String>()
+    /// A claude `Write`'s file facts, by tool_use id, until its result says whether
+    /// the file was created or overwritten (the call alone cannot know).
+    private var writeFileChanges: [String: (fields: [(key: String, value: String)], changes: [AgentToolDetailObservation.FileChange])] = [:]
     private var browserToolUseIDs = Set<String>()
     /// Every Claude child this SESSION has opened and not yet closed. Owned by
     /// the runner, not by one turn: a background child outlives the result
@@ -436,6 +439,12 @@ public struct ClaudeEventTranslator {
             // (query/url/pattern/basename/description, and a SHELL's command),
             // bound at construction and store-sanitized on top.
             if !isSubagent, AgentShellObservation.isShellTool(name) { shellToolUseIDs.insert(id) }
+            if !isSubagent, name.lowercased() == "write" {
+                let input = block["input"] as? [String: Any] ?? [:]
+                writeFileChanges[id] = (
+                    Self.toolDetailFields(toolName: name, input: input, settingsDefaults: settingsDefaults),
+                    Self.fileDetails(toolName: name, input: input))
+            }
             if !isSubagent, ArrayWorkspaceTool(toolName: name)?.isBrowser == true { browserToolUseIDs.insert(id) }
             if let onRuntimeObservation, !isSubagent {
                 onRuntimeObservation(.toolDetail(itemId: id, detail: AgentToolDetailObservation(
@@ -519,6 +528,17 @@ public struct ClaudeEventTranslator {
             else { continue }
             let isError = (block["is_error"] as? Bool) ?? false
             let browserResult = browserToolUseIDs.remove(toolUseId) != nil
+            // A `Write` whose result says "File created successfully" made a NEW
+            // file; the call itself never says so. Same extractor as the restore.
+            let write = writeFileChanges.removeValue(forKey: toolUseId)
+            let created = Self.createdFileChanges(write?.changes ?? [], resultContent: block["content"])
+            if let onRuntimeObservation, !isSubagent, !created.isEmpty {
+                // The call's own fields ride along so this start restates, never
+                // blanks, what the first one said.
+                onRuntimeObservation(.toolDetail(itemId: toolUseId, detail: AgentToolDetailObservation(
+                    phase: .started, toolName: "Write", fields: write?.fields ?? [],
+                    fileChanges: created, observedAt: now())))
+            }
             // `.plans/45` S2 — a bounded output preview for the expanded pane.
             // Emitted BEFORE `.itemCompleted` (observation delivery is FIFO),
             // so the host can fold it into the one recordEnd it issues there.
@@ -998,9 +1018,28 @@ public struct ClaudeEventTranslator {
         }
     }
 
+    /// Internal: `ClaudeSessionTranscriptReader` calls it on the restore, so a
+    /// created file reads the same live and restored.
+    ///
+    /// claude's `Write` answers "File created successfully at: …" for a NEW file
+    /// and "The file … has been updated …" for an overwrite. Only the first is a
+    /// creation, so only it turns the `.write` facts into `.add`; an overwrite
+    /// keeps `.write`, whose removed count is unknown.
+    static func createdFileChanges(
+        _ writes: [AgentToolDetailObservation.FileChange], resultContent: Any?
+    ) -> [AgentToolDetailObservation.FileChange] {
+        guard !writes.isEmpty,
+              let text = toolResultPreview(resultContent),
+              text.lowercased().hasPrefix("file created successfully")
+        else { return [] }
+        return writes.filter { $0.action == .write }.map {
+            .init(action: .add, path: $0.path, addedLines: $0.addedLines, removedLines: $0.removedLines)
+        }
+    }
+
     /// A bounded plain-text preview of a `tool_result`'s content: the string
     /// form, or the joined text blocks. Anything else stays opaque.
-    private static func toolResultPreview(_ content: Any?) -> String? {
+    static func toolResultPreview(_ content: Any?) -> String? {
         let text: String
         if let string = content as? String {
             text = string

@@ -147,6 +147,9 @@ struct NormalizedTranscriptMessage: Equatable {
     /// toolResult: which tool call it completes, and whether it failed.
     var toolCallId: String = ""
     var toolFailed: Bool = false
+    /// toolResult: the file facts this result settles (a `Write` whose result says
+    /// the file was created), replayed as the live stream does.
+    var createdFileChanges: [AgentToolDetailObservation.FileChange] = []
     /// B6.3 — compaction: pi's persisted `tokensBefore`, the one real field its
     /// session-file `compaction` entry carries (see `AgentCompactionPayload`'s
     /// doc comment for what it does not carry).
@@ -228,6 +231,7 @@ public enum ManagedTranscriptRehydrator {
         var turnCounter = 0
         var openTurnId: String?
         var itemKinds: [String: ItemKind] = [:]
+        var itemNames: [String: String] = [:]
         var messageCount = 0
         var compactionCounter = 0
 
@@ -276,6 +280,7 @@ public enum ManagedTranscriptRehydrator {
                 for call in message.toolCalls {
                     let kind = itemKind(forTool: call.name)
                     itemKinds[call.id] = kind
+                    itemNames[call.id] = call.name
                     // Surface the command in the title so a rehydrated card reads
                     // "Bash · ls && cat …" instead of an opaque, contextless
                     // "Bash". Display-only (rehydration never re-syncs); the live
@@ -347,6 +352,15 @@ public enum ManagedTranscriptRehydrator {
                 lastTurnTimestamp = message.timestamp
                 _ = ensureTurn()
                 let kind = itemKinds[message.toolCallId] ?? .commandExecution
+                if !message.createdFileChanges.isEmpty {
+                    append(.observation(.toolDetail(
+                        itemId: message.toolCallId,
+                        detail: AgentToolDetailObservation(
+                            phase: .started,
+                            toolName: itemNames[message.toolCallId] ?? "Write",
+                            fileChanges: message.createdFileChanges,
+                            observedAt: now()))))
+                }
                 append(.event(.itemCompleted(
                     threadId: threadId,
                     itemId: message.toolCallId,

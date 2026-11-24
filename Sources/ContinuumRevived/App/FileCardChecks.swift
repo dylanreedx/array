@@ -262,16 +262,25 @@ enum FileCardChecks {
             throw fail("delete: '\(card(deleted).fileStatLabels.first?.stringValue ?? "missing")'")
         }
 
-        // Half measured: a whole-file write knows its additions and cannot know
-        // what it replaced. The aggregate is then a FLOOR, and says so.
+        // A created file reads plainly; a write over an existing file knows only
+        // what it wrote, and says so in words, never as "≥" over "−?".
+        let created = AgentDiffPayload(
+            text: "write", summary: "Write",
+            files: [.init(displayName: "new.swift", addedLineCount: 12, action: .add)])
+        guard card(created).fileStatLabels.first?.stringValue == "+12" else {
+            throw fail("created: '\(card(created).fileStatLabels.first?.stringValue ?? "missing")'")
+        }
+        guard card(created).countsLabel.stringValue == "1 file · +12" else {
+            throw fail("created aggregate: '\(card(created).countsLabel.stringValue)'")
+        }
         let write = AgentDiffPayload(
             text: "write", summary: "Write",
-            files: [.init(displayName: "new.swift", addedLineCount: 12, action: .write)])
-        guard card(write).fileStatLabels.first?.stringValue == "+12" else {
-            throw fail("write: '\(card(write).fileStatLabels.first?.stringValue ?? "missing")'")
+            files: [.init(displayName: "old.swift", addedLineCount: 12, action: .write)])
+        guard card(write).fileStatLabels.first?.stringValue == "+12 · rewritten" else {
+            throw fail("overwrite: '\(card(write).fileStatLabels.first?.stringValue ?? "missing")'")
         }
-        guard card(write).countsLabel.stringValue == "1 file · +12" else {
-            throw fail("write aggregate: '\(card(write).countsLabel.stringValue)'")
+        guard card(write).countsLabel.stringValue == "1 file · +12 · rewritten" else {
+            throw fail("overwrite aggregate: '\(card(write).countsLabel.stringValue)'")
         }
 
         // Counts taken from a truncated preview are a floor too.

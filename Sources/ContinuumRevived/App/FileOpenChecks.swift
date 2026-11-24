@@ -3023,6 +3023,9 @@ enum FileOpenChecks {
             let created = sessionRoot.appendingPathComponent("created.md")
             let body = (1...16).map { "line \($0)" }.joined(separator: "\n")
             try Data(body.utf8).write(to: created)
+            let overwritten = sessionRoot.appendingPathComponent("overwritten.md")
+            let overBody = (1...8).map { "row \($0)" }.joined(separator: "\n")
+            try Data("old".utf8).write(to: overwritten)
             var lines: [String] = []
             func line(_ object: [String: Any]) {
                 if let data = try? JSONSerialization.data(withJSONObject: object), let text = String(data: data, encoding: .utf8) { lines.append(text) }
@@ -3036,6 +3039,10 @@ enum FileOpenChecks {
                 ["type": "tool_use", "id": "toolu_write_1", "name": "Write", "input": ["file_path": created.path, "content": body]]]]])
             line(["type": "user", "timestamp": "2026-11-24T05:41:05.000Z", "message": ["role": "user", "content": [
                 ["type": "tool_result", "tool_use_id": "toolu_write_1", "content": "File created successfully at: \(created.path)"]]]])
+            line(["type": "assistant", "timestamp": "2026-11-24T05:41:05.200Z", "message": ["role": "assistant", "content": [
+                ["type": "tool_use", "id": "toolu_write_2", "name": "Write", "input": ["file_path": overwritten.path, "content": overBody]]]]])
+            line(["type": "user", "timestamp": "2026-11-24T05:41:05.400Z", "message": ["role": "user", "content": [
+                ["type": "tool_result", "tool_use_id": "toolu_write_2", "content": "The file \(overwritten.path) has been updated successfully."]]]])
             line(["type": "assistant", "timestamp": "2026-11-24T05:41:06.000Z", "message": ["role": "assistant", "content": [["type": "text", "text": "Followups closing text."]]]])
             let transcript = ClaudeSessionTranscriptReader.parse(lines: lines, threadId: "followup-thread")
             let tile = ManagedAgentTileNSView(tile: Tile(
@@ -3061,13 +3068,43 @@ enum FileOpenChecks {
             try expect(bash != nil && (bash?.presentedShell?.command.contains("followup-folder") ?? false),
                        "a restored finished Bash step must keep its name and command; held \(canvas.toolDetail.qaHeldRecordCount) records, tool rows: \(tools.map { "\($0.name)|\($0.presentedToolNameText ?? "-")|\($0.presentedShell?.command ?? "-")|\($0.summary ?? "-")" })")
             let cards = canvas.qaChangesCards
-            try expect(cards.count == 1 && cards[0].files.count == 1, "the created file must draw one card, got \(cards.map { $0.files.count })")
+            try expect(cards.count == 1 && cards[0].files.count == 2, "one created and one overwritten file must draw one card of two rows, got \(cards.map { $0.files.count })")
             let headline = AgentDiffSummaryView.countsText(cards[0].files)
-            let stat = AgentDiffSummaryView.statText(cards[0].files[0], added: .green, removed: .red, unavailable: .gray).string
-            try expect(headline == "1 file · +16" && stat == "+16",
-                       "a created file's count must read plainly; headline '\(headline)', row '\(stat)'")
-            print("file preview strip: a restored Bash step keeps its name and command; a created file's count reads plainly")
+            func row(_ name: String) -> String {
+                guard let file = cards[0].files.first(where: { $0.displayName.hasSuffix(name) }) else { return "missing \(name)" }
+                return AgentDiffSummaryView.statText(file, added: .green, removed: .red, unavailable: .gray).string
+            }
+            try expect(row("created.md") == "+16", "a created file's count must read plainly; row '\(row("created.md"))'")
+            try expect(row("overwritten.md") != "+8" && row("overwritten.md") == "+8 · rewritten",
+                       "an overwritten file must not read as created; row '\(row("overwritten.md"))'")
+            try expect(headline == "2 files · +24 · 1 rewritten", "headline must not claim both were created; got '\(headline)'")
+            print("file preview strip: a restored Bash step keeps its name and command; a created file's count reads plainly and an overwrite does not")
         }
+        // 12. The LIVE stream decides creation from the Write's result, as the restore does.
+        func liveWriteResults() throws {
+            final class Box: @unchecked Sendable { var changes: [AgentToolDetailObservation.FileChange] = [] }
+            let box = Box()
+            var translator = ClaudeEventTranslator()
+            translator.onRuntimeObservation = { observation in
+                if case let .toolDetail(_, detail) = observation { box.changes += detail.fileChanges }
+            }
+            func send(_ object: [String: Any]) {
+                guard let data = try? JSONSerialization.data(withJSONObject: object), let text = String(data: data, encoding: .utf8) else { return }
+                _ = translator.translate(line: text)
+            }
+            for (id, name, result) in [("toolu_live_new", "fresh.md", "File created successfully at: /tmp/fresh.md"),
+                                       ("toolu_live_over", "existing.md", "The file /tmp/existing.md has been updated successfully.")] {
+                send(["type": "assistant", "message": ["role": "assistant", "content": [
+                    ["type": "tool_use", "id": id, "name": "Write", "input": ["file_path": "/tmp/\(name)", "content": "a\nb\nc"]]]]])
+                send(["type": "user", "message": ["role": "user", "content": [
+                    ["type": "tool_result", "tool_use_id": id, "content": result]]]])
+            }
+            let actions = Dictionary(grouping: box.changes, by: { ($0.path as NSString).lastPathComponent }).mapValues { Set($0.map { $0.action.rawValue }) }
+            try expect(actions["fresh.md"]?.contains("add") == true, "a live Write whose result says created must publish an add; got \(actions)")
+            try expect(actions["existing.md"]?.contains("add") != true, "a live Write whose result says updated must not publish an add; got \(actions)")
+            print("file preview strip: a live Write is a creation only when its result says so")
+        }
+        try liveWriteResults()
         try restoredFollowups()
         try exercise(drawn: true)
         try exercise(drawn: false)

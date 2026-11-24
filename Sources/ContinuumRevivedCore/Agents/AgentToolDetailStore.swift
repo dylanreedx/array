@@ -488,7 +488,14 @@ public struct AgentToolDetailSanitizer: Sendable {
                 unique[key] = change
             }
         }
-        return unique.sorted { $0.key < $1.key }.prefix(24).map(\.value)
+        // A `.write` the provider later confirmed as a creation (`.add`, same path)
+        // is one row, not two: the creation is the more specific fact.
+        let created = Set(unique.values.filter { $0.action == .add }.map(\.path))
+        return unique.values.filter { !($0.action == .write && created.contains($0.path)) }
+            .sorted { lhs, rhs in
+                [lhs.action.rawValue, lhs.path, lhs.renamePath ?? ""].joined(separator: "\u{1f}")
+                    < [rhs.action.rawValue, rhs.path, rhs.renamePath ?? ""].joined(separator: "\u{1f}")
+            }.prefix(24).map { $0 }
     }
 
     func excludesSensitiveFingerprints(

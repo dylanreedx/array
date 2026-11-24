@@ -135,8 +135,11 @@ public enum ClaudeSessionTranscriptReader {
             case "tool_result":
                 guard let toolUseId = block["tool_use_id"] as? String else { continue }
                 let isError = (block["is_error"] as? Bool) ?? false
+                let writes = out.lazy.flatMap(\.toolCalls).first { $0.id == toolUseId }?.fileChanges ?? []
                 out.append(NormalizedTranscriptMessage(
-                    role: .toolResult, toolCallId: toolUseId, toolFailed: isError))
+                    role: .toolResult, toolCallId: toolUseId, toolFailed: isError,
+                    createdFileChanges: isError ? [] : ClaudeEventTranslator.createdFileChanges(
+                        writes, resultContent: block["content"])))
             case "text":
                 if let text = block["text"] as? String { promptText += text }
             default:

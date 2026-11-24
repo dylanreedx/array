@@ -644,10 +644,17 @@ final class AgentDiffSummaryView: NSView, CornerStyled {
         let noun = files.count == 1 ? "file" : "files"
         guard !measured.isEmpty else { return "\(files.count) \(noun) · line counts unavailable" }
         // A created file has nothing it replaced: its count is the lines it holds,
-        // read plainly ("+16"), never as a floor over "−0" or "−?".
-        let stat = measured.allSatisfy(\.isCreation)
-            ? "+\(additions)"
-            : "\(sawLowerBound ? "≥ " : "")+\(additions) −\(removals)"
+        // read plainly ("+16"), never as a floor over "−0" or "−?". A file written
+        // over an existing one knows only what it wrote, so it is said in words
+        // ("+16 · rewritten"), never as a floor over a guessed removal.
+        let rewritten = measured.filter(\.isRewrite).count
+        let stat: String
+        if measured.allSatisfy({ $0.isCreation || $0.isRewrite }) {
+            let rewrittenText = rewritten == 0 ? "" : (rewritten == 1 && measured.count == 1 ? " · rewritten" : " · \(rewritten) rewritten")
+            stat = "+\(additions)" + rewrittenText
+        } else {
+            stat = "\(sawLowerBound ? "≥ " : "")+\(additions) −\(removals)"
+        }
         let unmeasured = files.count - measured.count
         guard unmeasured > 0 else { return "\(files.count) \(noun) · \(stat)" }
         let unmeasuredNoun = unmeasured == 1 ? "file" : "files"
@@ -773,6 +780,12 @@ final class AgentDiffSummaryView: NSView, CornerStyled {
             return NSAttributedString(
                 string: "+\(count)", attributes: [.font: font, .foregroundColor: added])
         }
+        if file.isRewrite, let count = file.addedLineCount {
+            let result = NSMutableAttributedString(
+                string: "+\(count)", attributes: [.font: font, .foregroundColor: added])
+            result.append(caption(" · rewritten"))
+            return result
+        }
         let result = NSMutableAttributedString()
         if file.countsAreLowerBound { result.append(caption("≥ ")) }
         result.append(NSAttributedString(
@@ -897,5 +910,9 @@ final class AgentOpenReviewButton: NSButton {
 
 extension AgentDiffFileSummary {
     /// The operation made the file: it replaced nothing, so it has no removed count.
-    fileprivate var isCreation: Bool { action == .add || action == .write }
+    /// Created, as the tool's own result said (claude's Write reports a new file).
+    fileprivate var isCreation: Bool { action == .add }
+    /// Written whole over a file that was already there (or not known to be new):
+    /// the additions are known, what it replaced is not.
+    fileprivate var isRewrite: Bool { action == .write && addedLineCount != nil && removedLineCount == nil && !countsAreLowerBound }
 }
