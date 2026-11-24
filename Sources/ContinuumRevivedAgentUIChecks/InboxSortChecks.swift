@@ -1115,6 +1115,8 @@ private func runInboxFanoutCheck() {
     expect(sorted.map(\.depth).contains(2),
            "fan-out fixture includes a real grandchild at depth 2, so descendant accounting is not flat")
 
+    // The need-you group reads oldest-spawned first, the lead tile's order
+    // (`InboxSort.needsYouOrder`, 5c26208f6): child 0 before child 1.
     // Plan 106: needs you, then working (a finished child whose own child works
     // counts as working), then finished within 30 minutes newest first, at most
     // eight; an opened failure folds whatever its age. Every ready child here
@@ -1122,7 +1124,7 @@ private func runInboxFanoutCheck() {
     let now = sortEpoch.addingTimeInterval(100)
     let bounded = InboxSort.boundedForInbox(rows: sorted, now: now)
     let expectedVisible = [
-        parentID, childIDs[1], childIDs[0], childIDs[4], grandchildID, childIDs[3],
+        parentID, childIDs[0], childIDs[1], childIDs[4], grandchildID, childIDs[3],
         childIDs[9], childIDs[8], childIDs[7], childIDs[6],
     ]
     expect(bounded.rows.map(\.id) == expectedVisible,
