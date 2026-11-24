@@ -8,6 +8,12 @@ final class DocumentRelationshipOverlayView: NSView {
         var source: CGRect
         var target: CGRect
         var emphasized: Bool
+        /// Every other tile's rect in overlay space (source and target excluded).
+        /// When non-empty with a `gutter`, a route that would cross one runs in
+        /// the gutter above the row instead.
+        var obstacles: [CGRect] = []
+        /// Vertical clearance above the row for the detour (the tile gap, zoomed).
+        var gutter: CGFloat = 0
     }
 
     enum Route: Equatable {
@@ -83,11 +89,19 @@ final class DocumentRelationshipOverlayView: NSView {
             let separation = abs(end.x - start.x)
             let handle = min(separation * 0.42, separation * 0.5)
             let direction: CGFloat = travelsRight ? 1 : -1
-            return .cubic(
+            let cubic = Route.cubic(
                 start: start,
                 control1: CGPoint(x: start.x + direction * handle, y: start.y),
                 control2: CGPoint(x: end.x - direction * handle, y: end.y),
                 end: end)
+            if crosses(cubic, obstacles: segment.obstacles) {
+                let y = min(source.minY, target.minY) - segment.gutter / 2
+                return .polyline([
+                    CGPoint(x: source.midX, y: source.minY), CGPoint(x: source.midX, y: y),
+                    CGPoint(x: target.midX, y: y), CGPoint(x: target.midX, y: target.minY),
+                ])
+            }
+            return cubic
         }
 
         let aboveGap = target.minY - source.maxY
@@ -143,6 +157,19 @@ final class DocumentRelationshipOverlayView: NSView {
                 CGPoint(x: source.minX, y: source.midY), CGPoint(x: x, y: source.midY),
                 CGPoint(x: x, y: target.midY), CGPoint(x: target.minX, y: target.midY),
             ])
+        }
+    }
+
+    /// True when the cubic's bounding box, inset by 1 pt, meets any obstacle.
+    private static func crosses(_ route: Route, obstacles: [CGRect]) -> Bool {
+        guard !obstacles.isEmpty else { return false }
+        let xs = route.points.map(\.x), ys = route.points.map(\.y)
+        guard let minX = xs.min(), let maxX = xs.max(), let minY = ys.min(), let maxY = ys.max() else { return false }
+        // Interval overlap against each obstacle inset by 1 pt; a straight
+        // route has a zero-height box, which a CGRect test would call empty.
+        return obstacles.contains {
+            let o = $0.insetBy(dx: 1, dy: 1)
+            return minX <= o.maxX && maxX >= o.minX && minY <= o.maxY && maxY >= o.minY
         }
     }
 }

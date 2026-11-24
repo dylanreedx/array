@@ -153,6 +153,22 @@ enum SubagentTileZoneChecks {
                            || members.contains { $0.key != id && rect($0.value).intersects(rect(was)) },
                            "\(stage): neighbour \(name) moved although nothing took its place")
             }
+            if target == 3 {
+                // No painted lineage path may enter a tile that is not one of its endpoints.
+                let edges = fixture.helperTiles.map { (parentTileID: fixture.leadTile, childTileID: $0) }
+                canvas.showContextualAgentLineage(edges: edges)
+                canvas.layoutSubtreeIfNeeded()
+                let paths = canvas.qaLineagePathPointsInCanvasSpace
+                try expect(paths.count == 3, "3 helpers: expected 3 painted lineage paths, got \(paths.count)")
+                for (pathIndex, points) in paths.enumerated() {
+                    let child = fixture.helperTiles[pathIndex]
+                    for (id, _) in frames where id != fixture.leadTile && id != child {
+                        guard let box = canvas.qaTileRectInCanvasSpace(id)?.insetBy(dx: 1, dy: 1) else { continue }
+                        try expect(!points.contains { box.contains($0) },
+                                   "3 helpers: the lineage path to helper \(pathIndex + 1) runs through a tile that is not its endpoint (\(describe(frames[id]!)))")
+                    }
+                }
+            }
             if target == 3, let stills {
                 try fixture.renderStill(to: URL(fileURLWithPath: stills, isDirectory: true), name: "three-helpers")
             }

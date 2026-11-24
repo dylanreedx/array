@@ -2859,13 +2859,19 @@ final class CanvasNSView: NSView, TokenThemed {
     private func updateContextualAgentLineageGeometry() {
         guard !contextualAgentLineage.isEmpty, let overlay = agentLineageOverlay else { return }
         overlay.frame = bounds
+        let gutter = CGFloat(TileGapResolver.resolvedGap(defaults: autoLayoutDefaults)) * CGFloat(viewport.zoom)
         let segments = contextualAgentLineage.compactMap { relation -> DocumentRelationshipOverlayView.Segment? in
             guard let parent = tileView(for: relation.parentTileID),
                   let child = tileView(for: relation.childTileID) else { return nil }
+            let obstacles = tileLayers.flatMap { $0.tileViews }
+                .filter { $0.key != relation.parentTileID && $0.key != relation.childTileID }
+                .map { overlay.convert($0.value.bounds, from: $0.value) }
             return .init(
                 source: overlay.convert(parent.bounds, from: parent),
                 target: overlay.convert(child.bounds, from: child),
-                emphasized: true
+                emphasized: true,
+                obstacles: obstacles,
+                gutter: gutter
             )
         }
         overlay.show(segments: segments)
@@ -2915,6 +2921,22 @@ final class CanvasNSView: NSView, TokenThemed {
     var qaLineageEndpointsInCanvasSpace: [(start: CGPoint, end: CGPoint)] {
         guard let overlay = agentLineageOverlay else { return [] }
         return overlay.endpoints.map { (overlay.convert($0.start, to: self), overlay.convert($0.end, to: self)) }
+    }
+
+    /// Every painted lineage route's points, in the canvas's own space.
+    var qaLineagePathPointsInCanvasSpace: [[CGPoint]] {
+        guard let overlay = agentLineageOverlay else { return [] }
+        return overlay.routes.map { route in
+            var pts = route.points
+            if case let .cubic(start, c1, c2, end) = route {
+                pts = (0...40).map { i in
+                    let t = CGFloat(i) / 40, u = 1 - t
+                    return CGPoint(x: u*u*u*start.x + 3*u*u*t*c1.x + 3*u*t*t*c2.x + t*t*t*end.x,
+                                   y: u*u*u*start.y + 3*u*u*t*c1.y + 3*u*t*t*c2.y + t*t*t*end.y)
+                }
+            }
+            return pts.map { overlay.convert($0, to: self) }
+        }
     }
 
     var qaLineageAnimationCount: Int { agentLineageOverlay?.qaAnimationCount ?? 0 }
