@@ -288,6 +288,9 @@ struct AgentNameTitler: Equatable, Sendable {
     /// The CLI's own model argument: claude/codex take the bare name, pi takes
     /// the full `provider/model` id — the runners' own mappings.
     let model: String
+    /// The agent's own account folder (`CLAUDE_CONFIG_DIR` / `CODEX_HOME`); nil
+    /// is the CLI's default login, which is what the runner does for it too.
+    var configDirectory: String? = nil
 
     static func resolve(
         for record: AgentRecord,
@@ -592,6 +595,20 @@ enum AgentNameOneShot {
         try nameSchema.write(to: schemaFile, atomically: true, encoding: .utf8)
 
         var environment = PiAgentRunner.childEnvironment()
+        // The agent's own login, exactly as its runner signs in: a set folder,
+        // or the default account with any inherited folder removed.
+        switch titler.harness {
+        case .claudeCode:
+            if let directory = titler.configDirectory, !directory.isEmpty {
+                environment["CLAUDE_CONFIG_DIR"] = directory
+            } else {
+                environment.removeValue(forKey: "CLAUDE_CONFIG_DIR")
+            }
+        case .codex:
+            if let directory = titler.configDirectory, !directory.isEmpty { environment["CODEX_HOME"] = directory }
+        case .pi:
+            break
+        }
         environment.merge(environmentOverrides) { _, override in override }
         if titler.harness == .pi {
             // Unchanged pi handling: a private copy of the user's pi config, so
@@ -9850,10 +9867,21 @@ final class AgentSupervisor {
             return false
         }
         let resolveCommand = nameTitlerCommand ?? { AgentNameTitler.liveCommand(for: $0) }
-        guard let titler = AgentNameTitler.resolve(for: record, command: resolveCommand) else {
+        guard var titler = AgentNameTitler.resolve(for: record, command: resolveCommand) else {
             let harness = record.harness?.rawValue ?? "unresolved"
             logNamingRefusal("harness=\(harness) titler unavailable (CLI not resolved or no model); no process spawned", agentID: id)
             return false
+        }
+        // Titling spends the agent's own account, never the ambient default. A
+        // limited account titles nothing until it frees: the existing name
+        // stays and no process is spawned (2026-11-23: 89 one-shots met a limit).
+        if titler.harness != .pi {
+            let account = account(forAgent: id)
+            titler.configDirectory = account?.configDirectory
+            if let account, accountIsLimited(account.id) {
+                logNamingRefusal("harness=\(titler.harness.rawValue) account \(account.id) is usage-limited; titling skipped, no process spawned", agentID: id)
+                return false
+            }
         }
         // A second explicit click supersedes the old request. Cancellation is a
         // hint to the detached task; the completion still proves the old CAS id,
@@ -14663,6 +14691,16 @@ final class AgentSupervisor {
               now.timeIntervalSince(record.lastActivityAt) < Self.relaunchWakeFreshness else { return false }
         let ended = [record.runCompletedAt, record.failedAt].compactMap { $0 }.max()
         return ended.map { started > $0 } ?? true
+    }
+
+    /// True while the account has an open window at its limit, or an agent is
+    /// paused on it.
+    private func accountIsLimited(_ accountId: String) -> Bool {
+        let now = usagePauseNow()
+        if usagePauses.values.contains(where: { $0.accountId == accountId }) { return true }
+        return accountQuotas[accountId]?.windows.contains {
+            !$0.isExpired(at: now) && ($0.utilization ?? 0) >= AgentUsagePause.exhaustedFraction
+        } ?? false
     }
 
     private func recipientHasUsage(_ id: AgentID) -> Bool {
@@ -20325,6 +20363,88 @@ func runAgentDisplayNameChecks() async throws {
     print(try await checkPerHarnessSessionTitles(fail: fail))
     print(try await checkClaudeTitleLadderRaces(fail: fail))
     print(try await checkAutomaticNameRefresh(fail: fail))
+    print(try await checkTitlerAccount(fail: fail))
+}
+
+/// Titling runs under the AGENT's own account, and a usage-limited account
+/// titles nothing: no `claude -p` is spawned and the existing name stays.
+@MainActor
+private func checkTitlerAccount<Failure: Error>(fail: (String) -> Failure) async throws -> String {
+    let fileManager = FileManager.default
+    let root = fileManager.temporaryDirectory
+        .appendingPathComponent("continuum-titler-account-check-\(UUID().uuidString)", isDirectory: true)
+    defer { try? fileManager.removeItem(at: root) }
+    try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+    let cli = try FakeTitlerCLI(
+        binDirectory: root.appendingPathComponent("bin", isDirectory: true), harness: .claudeCode,
+        log: root.appendingPathComponent("log", isDirectory: true), behavior: .succeed("Attempt $n"))
+    let store = AgentStore(applicationSupportDirectory: root.appendingPathComponent("support", isDirectory: true))
+    let runner = ScriptedAgentRunner(script: [], holdUntilStopped: true)
+    let supervisor = AgentSupervisor(
+        store: store, makeRunner: { _ in runner },
+        nameTitlerCommand: { $0 == .claudeCode ? cli.command : nil }, nameGenerationTimeout: 10)
+    defer { supervisor.stopAll() }
+    let work = try supervisor.addAccount(harness: .claudeCode, label: "Work")
+    guard case .switched = supervisor.switchAccount(to: work.id), let workFolder = work.configDirectory else {
+        throw fail("could not switch the fixture supervisor to the Work account")
+    }
+    func spawnAgent() async throws -> AgentID {
+        let before = runner.runCount
+        let id = supervisor.spawn(role: nil, prompt: "investigate the flaky build", cwd: root, harness: .claudeCode,
+                                  model: "anthropic/claude-fixture-opus", thinking: "medium")
+        guard await waitUntil(timeout: 5, pollInterval: 0.02, { runner.runCount > before }) else {
+            throw fail("the fixture agent's runner never started")
+        }
+        return id
+    }
+    func settle() async -> Bool {
+        await waitUntil(timeout: 15, pollInterval: 0.02, { supervisor.qaActiveNameGenerationCount == 0 })
+    }
+    func spawns() -> Int {
+        (try? String(contentsOf: cli.log.appendingPathComponent("count"), encoding: .utf8))?
+            .split(separator: "\n").count ?? 0
+    }
+    func env(_ n: Int) -> String? {
+        try? String(contentsOf: cli.log.appendingPathComponent("account-env-\(n)"), encoding: .utf8)
+    }
+
+    // 1. Work's agent is titled under Work's folder, not the ambient default.
+    // (Spawning also titles automatically, so count runs rather than assume.)
+    let first = try await spawnAgent()
+    guard supervisor.requestGeneratedName(agentID: first), await settle() else {
+        throw fail("the explicit title request on the Work agent was not accepted")
+    }
+    let afterFirst = spawns()
+    guard afterFirst >= 1, (1...afterFirst).allSatisfy({ env($0)?.hasPrefix(workFolder + "|") == true }) else {
+        throw fail("a title one-shot did not run under the agent's own account: spawns=\(afterFirst) env=\((1...max(afterFirst, 1)).map { String(describing: env($0)) })")
+    }
+
+    // 2. Work hits its limit: nothing is spawned and the name stays.
+    supervisor.qaDeliverAccountQuota(AgentAccountQuotaSnapshot(
+        harness: .claudeCode,
+        windows: [AgentQuotaWindow(kind: .fiveHour, utilization: 1.0, resetsAt: Date().addingTimeInterval(7_200))],
+        observedAt: Date(), source: .claudeUsageRequest))
+    let nameBefore = supervisor.records[first]?.displayName
+    guard !supervisor.requestGeneratedName(agentID: first), await settle(),
+          spawns() == afterFirst, supervisor.records[first]?.displayName == nameBefore else {
+        throw fail("a usage-limited account still spawned a title one-shot or changed the name: spawns=\(spawns()) was \(afterFirst)")
+    }
+
+    // 3. An agent on the default account is titled with no folder set, even
+    // though Work is limited.
+    guard case .switched = supervisor.switchAccount(to: AgentAccount.defaultAccount(for: .claudeCode).id) else {
+        throw fail("could not switch back to the default account")
+    }
+    let second = try await spawnAgent()
+    guard supervisor.requestGeneratedName(agentID: second), await settle() else {
+        throw fail("the explicit title request on the default-account agent was not accepted")
+    }
+    let afterSecond = spawns()
+    guard afterSecond > afterFirst,
+          ((afterFirst + 1)...afterSecond).allSatisfy({ env($0)?.hasPrefix("UNSET|") == true }) else {
+        throw fail("a default-account agent was not titled with the default login: spawns=\(afterSecond) env=\(((afterFirst + 1)...max(afterSecond, afterFirst + 1)).map { String(describing: env($0)) })")
+    }
+    return "titler account: runs under the agent's own account; a limited account spawns nothing and keeps the name"
 }
 
 @MainActor
@@ -21583,6 +21703,7 @@ private struct FakeTitlerCLI {
         echo "$n" >> "$LOG/count"
         printf '%s\n' "$@" > "$LOG/args-$n"
         pwd -P > "$LOG/cwd-$n"
+        printf '%s|%s' "${CLAUDE_CONFIG_DIR-UNSET}" "${CODEX_HOME-UNSET}" > "$LOG/account-env-$n"
         ls -A > "$LOG/cwd-listing-$n"
         out=""
         prev=""
