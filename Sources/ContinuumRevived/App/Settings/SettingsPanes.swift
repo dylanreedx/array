@@ -332,7 +332,7 @@ struct SettingsFieldRow: View {
     var body: some View {
         let field = row.field
         let _ = model.revision
-        if field.isVisible(in: model.defaults) {
+        if row.isVisible(in: model.defaults) {
             switch field {
             case .agentSounds:
                 SettingsSoundRows(model: model)
@@ -356,6 +356,12 @@ struct SettingsFieldRow: View {
     @ViewBuilder
     private func rowContent(_ field: SettingsField) -> some View {
         switch field {
+        case _ where row.optionalNumber != nil:
+            OptionalNumberRow(row: row, spec: row.optionalNumber!, model: model)
+        case .toggle where row.toggleTitles != nil:
+            SegmentedToggleRow(row: row, titles: row.toggleTitles!, model: model)
+        case .choice where row.segmented:
+            PickerRow(row: row, model: model, segmented: true)
         case let .toggle(key, _, _) where key == PersonalRulesConfig.enabledKey:
             PersonalRulesToggleRow(row: row, model: model)
         case let .toggle(key, _, _) where key == ReplyStandard.enabledKey:

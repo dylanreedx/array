@@ -59,7 +59,7 @@ public enum SettingsRegistry {
                 groupID: nil, groupTitle: nil, label: section.title, keywords: section.keywords,
                 optionTitles: [], reveal: .pane, field: nil))
             for group in section.groups {
-                for row in group.rows where row.field.isVisible(in: defaults) {
+                for row in group.rows where row.isVisible(in: defaults) {
                     let field = row.field
                     let custom = SettingsSchema.customEntries(for: field)
                     if !custom.isEmpty {

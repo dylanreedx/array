@@ -107,7 +107,7 @@ enum ReplyRulesChecks {
             } }) else {
                 throw Failure(description: "no Settings switch defaulting to off")
             }
-            try expect(groups.indices.contains(index + 1) && groups[index + 1].id == "agents.personalRules",
+            try expect(groups[index].rows.contains { $0.field.key == PersonalRulesConfig.enabledKey },
                        "the switch is not beside the personal-rules switch")
             guard let on = QAIsolatedDefaults(isolatedSuiteName: try suite(reply: true, personal: false)) else { throw Failure(description: "no isolated suite") }
             try expect(ReplyStandard.isEnabled(defaults: on), "the isolated suite did not switch it on")

@@ -225,13 +225,91 @@ public struct SettingsRequirement: Equatable, Sendable {
     public let key: String
     public let defaultOn: Bool
     public let hint: String
-    public init(key: String, defaultOn: Bool = true, hint: String) {
+    public init(key: String, defaultOn: Bool = true, hint: String = "") {
         self.key = key
         self.defaultOn = defaultOn
         self.hint = hint
     }
     public func isMet(in defaults: UserDefaults) -> Bool {
         defaults.object(forKey: key) as? Bool ?? defaultOn
+    }
+}
+
+/// "Off" shown as a word beside the switch of a segmented bool row: Patient /
+/// Quick. The stored value stays the bool (`false` is the first title).
+public struct SettingsToggleTitles: Equatable, Sendable {
+    public let off: String
+    public let on: String
+    public init(off: String, on: String) {
+        self.off = off
+        self.on = on
+    }
+}
+
+/// A number that can be switched off: a switch over the stored value, and while
+/// on, a slider with a live value label. The stored value is whatever the
+/// resolver already reads (`off` means 0, or the word "Off"), so nothing migrates.
+/// With no `off` it is a plain stepped slider.
+public struct SettingsOptionalNumber: Equatable, Sendable {
+    /// The stored value that means "off"; nil when the row has no switch.
+    public let off: SettingsValue?
+    /// What the switch writes when it turns on; also fixes the stored type.
+    public let onValue: SettingsValue
+    public let range: ClosedRange<Double>
+    /// Snapping stops (days: 1, 2, 3, 5 …). Empty: `step` over `range`.
+    public let stops: [Double]
+    public let step: Double
+    public let unit: String
+    public let singularUnit: String?
+    /// The slider's own label while the switch is on.
+    public let sliderLabel: String
+
+    public init(off: SettingsValue?, onValue: SettingsValue, range: ClosedRange<Double>, stops: [Double] = [],
+                step: Double = 1, unit: String, singularUnit: String? = nil, sliderLabel: String) {
+        self.off = off
+        self.onValue = onValue
+        self.range = range
+        self.stops = stops
+        self.step = step
+        self.unit = unit
+        self.singularUnit = singularUnit
+        self.sliderLabel = sliderLabel
+    }
+
+    public func isOn(_ stored: SettingsValue) -> Bool {
+        guard let off else { return true }
+        return stored != off
+    }
+
+    /// The stored value as a number for the slider, clamped to the range.
+    public func number(from stored: SettingsValue) -> Double {
+        let raw: Double
+        switch stored {
+        case let .double(value): raw = value
+        case let .string(text): raw = Double(text) ?? number(from: onValue)
+        case .bool: raw = number(from: onValue)
+        }
+        if raw == 0 || !isOn(stored) { return number(from: onValue) }
+        return snapped(raw)
+    }
+
+    public func snapped(_ value: Double) -> Double {
+        let clamped = min(range.upperBound, max(range.lowerBound, value))
+        if !stops.isEmpty { return stops.min { abs($0 - clamped) < abs($1 - clamped) } ?? clamped }
+        guard step > 0 else { return clamped }
+        return min(range.upperBound, max(range.lowerBound, (clamped / step).rounded() * step))
+    }
+
+    /// What the slider writes for `value`, in the stored type.
+    public func storedValue(forNumber value: Double) -> SettingsValue {
+        let snapped = snapped(value)
+        if case .string = onValue { return .string(String(Int(snapped.rounded()))) }
+        return .double(snapped)
+    }
+
+    public func display(_ value: Double) -> String {
+        let number = step < 1 ? String(format: "%.1f", value) : String(Int(value.rounded()))
+        return value == 1 && singularUnit != nil ? "\(number) \(singularUnit!)" : "\(number) \(unit)"
     }
 }
 
@@ -243,14 +321,32 @@ public struct SettingsRow: Equatable, Sendable {
     /// A switch (a Bool defaults key, on by default) this row only matters
     /// under: with it off the row shows disabled, with a hint in the footer.
     public let requires: SettingsRequirement?
+    /// A switch this row exists under: with it off the row is HIDDEN, not dimmed,
+    /// and search does not offer it.
+    public let showsWhen: SettingsRequirement?
+    /// A short, ordered choice drawn side by side instead of as a menu.
+    public let segmented: Bool
+    /// A bool drawn as two side-by-side words instead of a switch.
+    public let toggleTitles: SettingsToggleTitles?
+    public let optionalNumber: SettingsOptionalNumber?
 
     public init(_ field: SettingsField, help: String? = nil, keywords: [String] = [], zeroTitle: String? = nil,
-                requires: SettingsRequirement? = nil) {
+                requires: SettingsRequirement? = nil, showsWhen: SettingsRequirement? = nil, segmented: Bool = false,
+                toggleTitles: SettingsToggleTitles? = nil, optionalNumber: SettingsOptionalNumber? = nil) {
         self.field = field
         self.help = help
         self.keywords = keywords
         self.zeroTitle = zeroTitle
         self.requires = requires
+        self.showsWhen = showsWhen
+        self.segmented = segmented
+        self.toggleTitles = toggleTitles
+        self.optionalNumber = optionalNumber
+    }
+
+    /// Whether the row is on screen: its field's own condition and its switch.
+    public func isVisible(in defaults: UserDefaults) -> Bool {
+        field.isVisible(in: defaults) && (showsWhen?.isMet(in: defaults) ?? true)
     }
 }
 

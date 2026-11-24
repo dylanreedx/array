@@ -245,38 +245,54 @@ public enum SettingsSchema {
     }
 
     private static func agents() -> SettingsSection {
-        let managedRequirement = SettingsRequirement(key: AgentManagedModeConfig.enabledKey,
-                                                     hint: "Turn on Managed mode above to change these.")
+        let managed = SettingsRequirement(key: AgentManagedModeConfig.enabledKey)
         let statusRow = AgentStatusElement.presentationOrder.filter { $0 != .contextMeter }.map { element in
             SettingsRow(.toggle(key: element.settingKey, label: element.title, default: element.defaultVisible),
                         keywords: element.isAccountScoped ? ["status", "quota", "usage", "account", "limits"] : ["status"])
         }
         return SettingsSection(id: "agents", title: "Agents", iconSystemName: "sparkles", sidebarHeading: tilesHeading,
                                keywords: ["ai", "assistant"], groups: [
+            // Managed mode is one switch; the rows that steer it exist only while it is on.
             SettingsGroup(id: "agents.managedMode", title: nil,
-                          footer: "Managed mode applies to Claude Code and Codex agents. Pi agents and the helpers a lead starts always stay free.", rows: [
+                          footer: "Applies to Claude Code and Codex agents. A change takes effect at each agent's next turn, which re-reads its conversation at full price.", rows: [
                 SettingsRow(.toggle(key: AgentManagedModeConfig.enabledKey, label: "Managed mode", default: true),
-                            help: "A Managed agent acts as a lead: it plans, hands separate pieces of work to helper agents on cheaper models, and checks what comes back. Off, agents work alone, and any agent may still start helpers. Changes apply at each agent’s next turn, which re-reads its conversation at full price.",
-                            keywords: ["managed", "free", "lead", "delegate", "helpers", "orchestrate", "opinionated"]),
-                SettingsRow(.toggle(key: AgentManagedModeConfig.showIndicatorKey, label: "Show Managed indicator", default: true),
-                            help: "Shows Managed beside the branch in agent tiles.",
-                            keywords: ["managed", "badge", "indicator", "header"], requires: managedRequirement),
+                            help: "A lead agent plans the work and hands pieces to helper agents.",
+                            keywords: ["managed", "lead", "delegate", "helpers", "orchestrate", "opinionated"]),
+                SettingsRow(.number(key: AgentSpawnLimitConfig.maximumActiveChildrenKey, label: "Limit helpers running at once",
+                                    range: Double(AgentSpawnLimitConfig.supportedRange.lowerBound)...Double(AgentSpawnLimitConfig.supportedRange.upperBound),
+                                    default: Double(AgentSpawnLimitConfig.defaultMaximumActiveChildren), unit: "helpers", step: 1),
+                            help: "How many helpers one agent may run at the same time. Off means no limit.",
+                            keywords: ["children", "sub-agents", "subagents", "spawn", "limit", "max", "helpers"],
+                            showsWhen: managed,
+                            optionalNumber: SettingsOptionalNumber(off: .double(0), onValue: .double(4), range: 1...16, unit: "helpers",
+                                                                   singularUnit: "helper", sliderLabel: "Helpers at once")),
                 SettingsRow(.toggle(key: AgentShortReportConfig.enabledKey, label: "Ask helpers for short reports",
                                     default: AgentShortReportConfig.enabledDefault),
-                            help: "A helper whose final message runs over \(AgentShortReportConfig.pushBackWordLimit) words is asked once to cut it to about \(AgentShortReportConfig.targetWords) and save the rest to a file. The lead gets the short report instead of the full reply. Works with Claude agents for now.",
-                            keywords: ["report", "summary", "subagents", "helpers", "delegate", "context", "short"], requires: managedRequirement),
+                            help: "A helper's long final message is cut to a short report, and the rest is saved to a file.",
+                            keywords: ["report", "summary", "subagents", "helpers", "delegate", "context", "short"], showsWhen: managed),
                 SettingsRow(.toggle(key: HelperTileTidyConfig.enabledKey, label: "Tidy finished helper tiles",
                                     default: HelperTileTidyConfig.enabledDefault),
-                            help: "When a helper has finished and its result has reached the lead, Array closes the helper's tile after a short wait, the same as closing it yourself. The agent stays in the sidebar, and opening it there brings the tile back. A helper that failed, needs you, or that you have looked at, moved or typed into keeps its tile.",
-                            keywords: ["tidy", "close", "tiles", "subagents", "helpers", "delegate", "clean up", "finished"], requires: managedRequirement),
-                SettingsRow(.toggle(key: AgentManagedModeConfig.stallAlertsKey, label: "Tell the lead only when a helper is stuck", default: false),
-                            help: "Off: the lead hears after 10 minutes without progress, even during a long build. On: the lead hears once a helper has gone 3 minutes without progress with nothing running, and once if it has waited 30 minutes on a build or tool call. Busy helpers and silent model turns keep the 10 minutes.",
-                            keywords: ["stalled", "stuck", "watchdog", "helper", "alert", "no progress"], requires: managedRequirement),
+                            help: "Closes a helper's tile once its result has reached the lead; the agent stays in the sidebar.",
+                            keywords: ["tidy", "close", "tiles", "subagents", "helpers", "delegate", "clean up", "finished"], showsWhen: managed),
+                SettingsRow(.toggle(key: AgentManagedModeConfig.stallAlertsKey, label: "Helper stuck alerts", default: false),
+                            help: "Quick tells the lead after about 3 minutes without progress; Patient waits 10.",
+                            keywords: ["stalled", "stuck", "watchdog", "helper", "alert", "no progress", "patient", "quick"],
+                            showsWhen: managed, toggleTitles: SettingsToggleTitles(off: "Patient", on: "Quick")),
+                SettingsRow(.toggle(key: AgentManagedModeConfig.showIndicatorKey, label: "Show Managed indicator", default: true),
+                            help: "Shows Managed beside the branch in agent tiles.",
+                            keywords: ["managed", "badge", "indicator", "header"], showsWhen: managed),
             ]),
             // .plans/101: one login per CLI for the whole app, chosen here.
             SettingsGroup(id: "agents.accounts", title: "Accounts",
                           footer: "Every agent of a CLI uses the account in use. A switch lets running turns finish, then their next turn signs in as the new account. Each account signs in with the CLI's own login; Array never sees a password or token.", rows: [
                 SettingsRow(.custom(id: "agentAccounts", label: "Accounts")),
+            ]),
+            SettingsGroup(id: "agents.clis", title: "Agent CLIs", rows: [
+                SettingsRow(.custom(id: "harnessStatus", label: "Agent CLIs")),
+                SettingsRow(.toggle(key: AgentCLIUpdateConfig.checksEnabledKey, label: "Check for agent CLI updates",
+                                    default: AgentCLIUpdateConfig.checksEnabledDefault),
+                            help: "Looks for newer versions at most once an hour. Updates only run when you click Update.",
+                            keywords: ["update", "upgrade", "version", "cli", "npm", "homebrew"]),
             ]),
             SettingsGroup(id: "agents.new", title: "New agents",
                           footer: "Applies to new agents. Existing agents keep their own CLI, model, and effort.", rows: [
@@ -294,17 +310,14 @@ public enum SettingsSchema {
                 SettingsRow(.choice(key: WorkspaceToolsConfig.permissionKey, label: "Agent permissions",
                                     options: WorkspaceToolsPermission.allCases.map(\.rawValue),
                                     default: WorkspaceToolsConfig.defaultPermission.rawValue,
-                                    titles: Dictionary(uniqueKeysWithValues: WorkspaceToolsPermission.allCases.map { ($0.rawValue, $0.title) })),
-                            help: "Free: agents start, message, and inspect other agents, open files, and arrange tiles in their own project without asking. Anything in another project still asks. Ask first: each kind of action asks once per agent. Off: new agents get no workspace tools.",
-                            keywords: ["workspace tools", "canvas api", "permissions", "approval", "orchestrate", "delegate", "message", "subagents"]),
-            ]),
-            SettingsGroup(id: "agents.clis", title: "Agent CLIs",
-                          footer: "Each CLI signs in with its own login. Array never asks for an API key.", rows: [
-                SettingsRow(.custom(id: "harnessStatus", label: "Agent CLIs")),
-                SettingsRow(.toggle(key: AgentCLIUpdateConfig.checksEnabledKey, label: "Check for agent CLI updates",
-                                    default: AgentCLIUpdateConfig.checksEnabledDefault),
-                            help: "Looks for newer versions at most once an hour. Updates only run when you click Update.",
-                            keywords: ["update", "upgrade", "version", "cli", "npm", "homebrew"]),
+                                    titles: [
+                                        WorkspaceToolsPermission.free.rawValue: "In their project",
+                                        WorkspaceToolsPermission.askFirst.rawValue: "Ask first",
+                                        WorkspaceToolsPermission.off.rawValue: "Off",
+                                    ]),
+                            help: "What an agent may do on the canvas without asking: act in its own project, ask before each kind of action, or get no workspace tools. Anything in another project still asks.",
+                            keywords: ["workspace tools", "canvas api", "permissions", "approval", "orchestrate", "delegate", "message", "subagents", "free"],
+                            segmented: true),
             ]),
             SettingsGroup(id: "agents.context", title: "Context",
                           footer: "Applies to every agent, Managed or not. Ask me first shows a button beside the composer and waits for you; Automatically compacts between turns. Agents a lead started have no composer to watch, so they compact automatically between turns while this is on.", rows: [
@@ -322,61 +335,66 @@ public enum SettingsSchema {
                 SettingsRow(.toggle(key: AgentStatusElement.contextMeter.settingKey, label: "Show the context meter", default: AgentStatusElement.contextMeter.defaultVisible),
                             keywords: ["context meter", "status", "tokens"]),
             ]),
-            SettingsGroup(id: "agents.lifecycle", title: "Sessions and cleanup", rows: [
-                SettingsRow(.choice(key: AgentAutoSettleConfig.afterDaysKey, label: "Settle finished agents", options: AgentAutoSettleConfig.options, default: AgentAutoSettleConfig.defaultOption,
-                                    titles: Dictionary(uniqueKeysWithValues: AgentAutoSettleConfig.options.map { option in
-                                        guard let days = Int(option) else { return (option, "Never") }
-                                        return (option, days == 1 ? "After 1 day" : "After \(days) days")
-                                    })),
-                            help: "Moves an idle agent out of the Activity Dock list.",
-                            keywords: ["auto settle", "archive", "idle"]),
-                SettingsRow(.number(key: AgentSpawnLimitConfig.maximumActiveChildrenKey, label: "Sub-agents at once", range: Double(AgentSpawnLimitConfig.supportedRange.lowerBound)...Double(AgentSpawnLimitConfig.supportedRange.upperBound), default: Double(AgentSpawnLimitConfig.defaultMaximumActiveChildren), unit: "agents", step: 1),
-                            help: "How many child agents one agent may run at the same time.",
-                            keywords: ["children", "spawn", "limit", "max"], zeroTitle: "No limit"),
-                SettingsRow(.number(key: AgentIdleSessionConfig.minutesKey, label: "Stop idle sessions after", range: AgentIdleSessionConfig.supportedRange, default: AgentIdleSessionConfig.defaultMinutes, unit: "min", step: 1),
-                            help: "An agent's CLI keeps running for this long after its turn ends, then stops to free memory. Your next message resumes the same conversation. Sessions running a shell job or helpers are kept.",
-                            keywords: ["idle", "memory", "hibernate", "session", "timeout", "reap"]),
-            ]),
-            SettingsGroup(id: "agents.replyRules", title: "Reply rules", rows: [
+            SettingsGroup(id: "agents.instructions", title: "Agent instructions",
+                          footer: "Claude Code agents already read your own Claude instructions, so they are left as they are. Array only reads your rules file; it never changes it.", rows: [
                 SettingsRow(.toggle(key: ReplyStandard.enabledKey, label: "Give every agent Array's reply rules", default: false),
-                            help: "Each time Array starts a Claude Code, Codex or Pi agent, it adds Array's \(ReplyStandard.wordCount)-word rules for replies, before your personal rules. It applies to agents from their next launch; running agents keep what they started with.",
+                            help: "Each time Array starts an agent, it adds its \(ReplyStandard.wordCount)-word rules for replies. Running agents keep what they started with.",
                             keywords: ["reply", "replies", "rules", "report", "answer", "instructions", "codex", "pi", "claude"]),
-            ]),
-            SettingsGroup(id: "agents.personalRules", title: "Personal rules",
-                          footer: "Claude Code agents already read your own Claude instructions, so they are left as they are. Array only reads the file; it never changes it.", rows: [
                 SettingsRow(.toggle(key: PersonalRulesConfig.enabledKey, label: "Give Codex and Pi agents my rules", default: false),
-                            help: "Each time Array starts a Codex or Pi agent, it adds the text of the file below to that agent's instructions.",
+                            help: "Each time Array starts a Codex or Pi agent, it adds the text of your rules file to that agent's instructions.",
                             keywords: ["rules", "instructions", "preferences", "commit", "codex", "pi", "agents.md", "claude.md"]),
                 SettingsRow(.text(key: PersonalRulesConfig.pathKey, label: "Rules file", default: ""),
                             help: "The full path to a short text file you keep.",
-                            keywords: ["rules", "instructions", "file", "path"]),
+                            keywords: ["rules", "instructions", "file", "path"],
+                            showsWhen: SettingsRequirement(key: PersonalRulesConfig.enabledKey, defaultOn: false)),
             ]),
-            SettingsGroup(id: "agents.identity", title: "Agent colour", rows: [
+            SettingsGroup(id: "agents.identity", title: "Look",
+                          footer: "Agents have no colour until you pick one from the tile's menu.", rows: [
                 SettingsRow(.choice(key: AgentIdentityColorConfig.styleKey, label: "Agent colour shows as",
                                     options: AgentIdentityColorStyle.allCases.map(\.rawValue),
                                     default: AgentIdentityColorConfig.defaultStyle.rawValue,
                                     titles: Dictionary(uniqueKeysWithValues: AgentIdentityColorStyle.allCases.map { ($0.rawValue, $0.title) })),
-                            help: "Agents have no colour until you pick one from the tile's menu.",
-                            keywords: ["color", "colour", "identity", "tint", "border", "stripe"]),
-            ]),
-            SettingsGroup(id: "agents.transcript", title: "Transcript", rows: [
+                            help: "Where a tile shows its agent's colour.",
+                            keywords: ["color", "colour", "identity", "tint", "border", "stripe"], segmented: true),
                 SettingsRow(.toggle(key: AgentTerminalFaceConfig.showToggleKey, label: "Show Terminal toggle",
                                     default: AgentTerminalFaceConfig.defaultShowToggle),
-                            help: "Adds a small icon to Claude Code tiles to switch between chat and Terminal. You can always switch from the tile menu or with ⌃⌘T.",
+                            help: "Adds a small icon to Claude Code tiles to switch between chat and Terminal.",
                             keywords: ["terminal", "chat", "toggle", "switch", "CLI", "title bar"]),
-                SettingsRow(.toggle(key: TranscriptShellCommandConfig.key, label: "Show shell commands in transcripts",
-                                    default: TranscriptShellCommandConfig.defaultEnabled),
-                            help: "Keeps the commands agents run on this Mac so transcript rows can show them. Never synced.",
-                            keywords: ["privacy", "shell", "command", "bash", "history", "transcript"]),
             ]),
             SettingsGroup(id: "agents.status", title: "Status row",
                           footer: "Applies to every agent tile. Account usage is per provider account, shared by every agent signed into it.",
                           rows: statusRow),
-            SettingsGroup(id: "agents.dictation", title: "Dictation",
+            SettingsGroup(id: "agents.dictation", title: "Composer",
                           footer: "Speech is transcribed on this Mac. No audio is kept or sent anywhere.", rows: [
                 SettingsRow(.toggle(key: DictationConfig.enabledKey, label: "Dictate into the composer", default: DictationConfig.defaultEnabled),
                             help: "Shows a microphone button beside Send. Press ⇧⌘D to start or finish, Esc to discard.",
                             keywords: ["dictation", "voice", "speech", "microphone", "mic", "talk"]),
+            ]),
+            SettingsGroup(id: "agents.lifecycle", title: "Sessions", rows: [
+                SettingsRow(.choice(key: AgentAutoSettleConfig.afterDaysKey, label: "Archive finished agents", options: AgentAutoSettleConfig.options, default: AgentAutoSettleConfig.defaultOption,
+                                    titles: Dictionary(uniqueKeysWithValues: AgentAutoSettleConfig.options.map { option in
+                                        guard let days = Int(option) else { return (option, "Never") }
+                                        return (option, days == 1 ? "After 1 day" : "After \(days) days")
+                                    })),
+                            help: "Moves an agent that has sat idle out of the Activity Dock list.",
+                            keywords: ["auto settle", "settle", "archive", "idle", "never"],
+                            optionalNumber: SettingsOptionalNumber(off: .string(AgentAutoSettleConfig.offOption),
+                                                                   onValue: .string(AgentAutoSettleConfig.defaultOption),
+                                                                   range: Double(AgentAutoSettleConfig.dayOptions.first ?? 1)...Double(AgentAutoSettleConfig.dayOptions.last ?? 90),
+                                                                   stops: AgentAutoSettleConfig.dayOptions.map(Double.init),
+                                                                   unit: "days", singularUnit: "day", sliderLabel: "Archive after")),
+                SettingsRow(.number(key: AgentIdleSessionConfig.minutesKey, label: "Stop idle sessions after", range: AgentIdleSessionConfig.supportedRange, default: AgentIdleSessionConfig.defaultMinutes, unit: "min", step: 1),
+                            help: "Frees memory. Your next message resumes the conversation.",
+                            keywords: ["idle", "memory", "hibernate", "session", "timeout", "reap"],
+                            optionalNumber: SettingsOptionalNumber(off: nil, onValue: .double(AgentIdleSessionConfig.defaultMinutes),
+                                                                   range: AgentIdleSessionConfig.supportedRange, unit: "min",
+                                                                   sliderLabel: "Stop idle sessions after")),
+            ]),
+            SettingsGroup(id: "agents.privacy", title: "Privacy", rows: [
+                SettingsRow(.toggle(key: TranscriptShellCommandConfig.key, label: "Show shell commands in transcripts",
+                                    default: TranscriptShellCommandConfig.defaultEnabled),
+                            help: "Keeps the commands agents run on this Mac so transcript rows can show them. Never synced.",
+                            keywords: ["privacy", "shell", "command", "bash", "history", "transcript"]),
             ]),
             SettingsGroup(id: "agents.tokenTelemetry", title: "Usage recording",
                           footer: "Kept on this Mac only. Never uploaded or synced.", rows: [
@@ -398,13 +416,15 @@ public enum SettingsSchema {
                                         EditorAppearance.light.rawValue: "Light",
                                         EditorAppearance.dark.rawValue: "Dark",
                                     ]),
-                            keywords: ["theme"]),
+                            keywords: ["theme"], segmented: true),
                 SettingsRow(.text(key: EditorPreferences.fontFamilyKey, label: "Font", default: EditorPreferences.defaultFontFamily),
                             keywords: ["font family", "typeface", "monospace"]),
                 SettingsRow(.number(key: EditorPreferences.fontSizeKey, label: "Font size", range: EditorPreferences.fontSizeRange, default: EditorPreferences.defaultFontSize, unit: "pt", step: 1),
-                            keywords: ["text size"]),
+                            keywords: ["text size"],
+                            optionalNumber: SettingsOptionalNumber(off: nil, onValue: .double(EditorPreferences.defaultFontSize), range: EditorPreferences.fontSizeRange, unit: "pt", sliderLabel: "Font size")),
                 SettingsRow(.number(key: EditorPreferences.lineHeightKey, label: "Line height", range: EditorPreferences.lineHeightRange, default: EditorPreferences.defaultLineHeight, unit: "×", step: 0.1),
-                            keywords: ["spacing"]),
+                            keywords: ["spacing"],
+                            optionalNumber: SettingsOptionalNumber(off: nil, onValue: .double(EditorPreferences.defaultLineHeight), range: EditorPreferences.lineHeightRange, step: 0.1, unit: "×", sliderLabel: "Line height")),
                 SettingsRow(.toggle(key: EditorPreferences.lineNumbersKey, label: "Line numbers", default: true),
                             keywords: ["gutter"]),
                 SettingsRow(.toggle(key: EditorPreferences.wordWrapKey, label: "Wrap long lines", default: false),
@@ -416,26 +436,33 @@ public enum SettingsSchema {
     }
 
     private static func terminal() -> SettingsSection {
-        SettingsSection(id: "terminal", title: "Terminal", iconSystemName: "terminal", sidebarHeading: tilesHeading,
+        let keepRunning = SettingsRequirement(key: TmuxPersistenceConfig.enabledKey, defaultOn: TmuxPersistenceConfig.defaultEnabled)
+        let scrollback = SettingsRequirement(key: SessionResumeConfig.scrollbackEnabledKey, defaultOn: SessionResumeConfig.scrollbackEnabledDefault)
+        return SettingsSection(id: "terminal", title: "Terminal", iconSystemName: "terminal", sidebarHeading: tilesHeading,
                         keywords: ["shell", "console"], groups: [
             SettingsGroup(id: "terminal.display", title: "Display", footer: "Applies to new terminals.", rows: [
-                SettingsRow(.number(key: TerminalDisplayConfig.fontSizeKey, label: "Font size", range: 0...48, default: TerminalDisplayConfig.defaultFontSize, unit: "pt", step: 1),
-                            help: "At 0, terminals use your Ghostty configuration.",
-                            keywords: ["text size"], zeroTitle: "Default"),
+                SettingsRow(.number(key: TerminalDisplayConfig.fontSizeKey, label: "Use my own font size", range: 0...48, default: TerminalDisplayConfig.defaultFontSize, unit: "pt", step: 1),
+                            help: "Off: terminals use the font size from your Ghostty configuration.",
+                            keywords: ["text size", "font size", "ghostty"],
+                            optionalNumber: SettingsOptionalNumber(off: .double(0), onValue: .double(TerminalDisplayConfig.defaultFontSize),
+                                                                   range: TerminalDisplayConfig.minFontSize...TerminalDisplayConfig.maxFontSize,
+                                                                   unit: "pt", sliderLabel: "Font size")),
             ]),
             SettingsGroup(id: "terminal.sessions", title: "Sessions", footer: "Applies to new terminals.", rows: [
                 SettingsRow(.toggle(key: TmuxPersistenceConfig.enabledKey, label: "Keep shells running when Array quits", default: TmuxPersistenceConfig.defaultEnabled),
-                            help: "Uses tmux, so a terminal comes back where you left it.",
+                            help: "A terminal comes back where you left it.",
                             keywords: ["tmux", "persist", "restore"]),
                 SettingsRow(.toggle(key: TmuxPersistenceConfig.ambientPerWorkspaceKey, label: "Share one session outside zones", default: TmuxPersistenceConfig.ambientPerWorkspaceDefault),
-                            help: "Terminals not in a zone share one tmux session per workspace.",
-                            keywords: ["tmux", "unzoned"]),
+                            help: "Terminals that are not in a zone share one session per workspace.",
+                            keywords: ["tmux", "unzoned"], showsWhen: keepRunning),
                 SettingsRow(.toggle(key: SessionResumeConfig.scrollbackEnabledKey, label: "Restore scrollback", default: SessionResumeConfig.scrollbackEnabledDefault),
                             help: "A terminal that comes back after a restart shows what was on screen before.",
                             keywords: ["history", "resume"]),
                 SettingsRow(.number(key: SessionResumeConfig.scrollbackMaxLinesKey, label: "Lines to restore", range: 0...100_000, default: Double(SessionResumeConfig.scrollbackMaxLinesDefault), unit: "lines", step: 500),
-                            help: "How much history comes back with a restored terminal. Only used when Restore scrollback is on.",
-                            keywords: ["scrollback", "history"]),
+                            help: "How much history comes back with a restored terminal.",
+                            keywords: ["scrollback", "history"], showsWhen: scrollback,
+                            optionalNumber: SettingsOptionalNumber(off: nil, onValue: .double(Double(SessionResumeConfig.scrollbackMaxLinesDefault)),
+                                                                   range: 500...20_000, step: 500, unit: "lines", sliderLabel: "Lines to restore")),
             ]),
             SettingsGroup(id: "terminal.directory", title: "Starting folder", rows: [
                 SettingsRow(.choice(key: NewTileCwdConfig.userDefaultsKey, label: "Terminals outside a zone start in", options: NewTileCwdPolicy.allCases.map(\.rawValue), default: NewTileCwdConfig.defaultPolicy.rawValue,
@@ -453,11 +480,12 @@ public enum SettingsSchema {
     private static func browser() -> SettingsSection {
         SettingsSection(id: "browser", title: "Browser", iconSystemName: "globe", sidebarHeading: tilesHeading,
                         keywords: ["web", "webkit"], groups: [
-            SettingsGroup(id: "browser.general", title: "Pages and inspection", rows: [
+            SettingsGroup(id: "browser.general", title: nil, rows: [
                 SettingsRow(.url(key: DefaultBrowserURL.userDefaultsKey, label: "New browser tiles open", default: DefaultBrowserURL.fallback),
+                            help: "The page a new browser tile starts on.",
                             keywords: ["home page", "default url", "start page"]),
                 SettingsRow(.toggle(key: BrowserWebInspectorConfig.userDefaultsKey, label: "Allow Safari Web Inspector", default: BrowserWebInspectorConfig.defaultEnabled),
-                            help: "Safari Web Inspector is native WebKit inspection, opened from Safari's Develop menu. Array Inspector opens inside Array with focused Elements, Console, Styles, and Network panels, and needs no setting.",
+                            help: "Lets you inspect browser tiles from Safari's Develop menu.",
                             keywords: ["devtools", "developer", "inspect", "debug"]),
             ]),
         ])

@@ -235,9 +235,91 @@ enum SettingsSelfChecks {
         // Managed mode leads the Agents pane and its steering rows are gated by it.
         let agentsPane = sections.first { $0.id == "agents" }!
         try expect(agentsPane.groups.first?.id == "agents.managedMode", "Managed mode must be the first group in Agents")
-        let gated = agentsPane.groups.flatMap(\.rows).filter { $0.requires != nil }
-        try expect(gated.count >= 4 && gated.allSatisfy { $0.requires?.key == AgentManagedModeConfig.enabledKey },
-                   "Managed steering rows must be gated by the Managed switch")
+        let steering = agentsPane.groups.flatMap(\.rows).filter { $0.showsWhen?.key == AgentManagedModeConfig.enabledKey }
+        try expect(steering.count == 5 && steering.allSatisfy { $0.showsWhen?.key == AgentManagedModeConfig.enabledKey },
+                   "the five Managed steering rows must be shown only under the Managed switch")
+        // Managed off HIDES its steering rows (not dims them); permissions stay for every agent.
+        let managedField = sections.flatMap(\.fields).first { $0.key == AgentManagedModeConfig.enabledKey }!
+        let steeringKeys = steering.compactMap(\.field.key)
+        let permissionKey = WorkspaceToolsConfig.permissionKey
+        model.write(.bool(false), to: managedField)
+        fixture.settle()
+        for key in steeringKeys {
+            try expect(model.renderedAnchors["field.\(key)"] == nil, "\(key) must be hidden while Managed mode is off")
+        }
+        try expect(model.renderedAnchors["field.\(permissionKey)"] != nil, "Agent permissions must stay while Managed mode is off")
+        try expect(SettingsRegistry.entries(sections: sections, defaults: defaults).allSatisfy { entry in
+                       guard let key = entry.field?.key else { return true }
+                       return !steeringKeys.contains(key)
+                   }, "search must not offer hidden Managed rows")
+        model.write(.bool(true), to: managedField)
+        fixture.settle()
+        for key in steeringKeys {
+            try expect(model.renderedAnchors["field.\(key)"] != nil, "\(key) must show while Managed mode is on")
+        }
+        // The rules file exists only under its switch.
+        let personalField = sections.flatMap(\.fields).first { $0.key == PersonalRulesConfig.enabledKey }!
+        let rulesPathKey = "field.\(PersonalRulesConfig.pathKey)"
+        model.write(.bool(false), to: personalField); fixture.settle()
+        try expect(model.renderedAnchors[rulesPathKey] == nil, "the rules file must be hidden while my rules is off")
+        model.write(.bool(true), to: personalField); fixture.settle()
+        try expect(model.renderedAnchors[rulesPathKey] != nil, "the rules file must show while my rules is on")
+        model.reset(personalField); fixture.settle()
+        // Optional numbers: switch off is the stored 0 / "Off" the resolvers already read.
+        func optional(_ key: String) -> (SettingsRow, SettingsOptionalNumber) {
+            let row = sections.flatMap(\.rows).first { $0.field.key == key }!
+            return (row, row.optionalNumber!)
+        }
+        let (limitRow, limit) = optional(AgentSpawnLimitConfig.maximumActiveChildrenKey)
+        try expect(limit.isOn(.double(0)) == false && limit.isOn(.double(6)) && AgentSpawnLimitConfig.maximumActiveChildren(defaults: defaults) == nil,
+                   "helper limit: 0 must read as the switch off, and the default as no limit")
+        model.write(limit.onValue, to: limitRow.field)
+        try expect(AgentSpawnLimitConfig.maximumActiveChildren(defaults: defaults) == 4, "helper limit: the switch on must write 4")
+        model.write(limit.storedValue(forNumber: 9), to: limitRow.field)
+        try expect(AgentSpawnLimitConfig.maximumActiveChildren(defaults: defaults) == 9, "helper limit: the slider must write the number")
+        model.write(limit.off!, to: limitRow.field)
+        try expect(defaults.integer(forKey: AgentSpawnLimitConfig.maximumActiveChildrenKey) == 0
+                   && AgentSpawnLimitConfig.maximumActiveChildren(defaults: defaults) == nil, "helper limit: the switch off must store 0")
+        model.reset(limitRow.field)
+        let (settleRow, settle) = optional(AgentAutoSettleConfig.afterDaysKey)
+        model.write(settle.off!, to: settleRow.field)
+        try expect(settle.isOn(model.value(of: settleRow.field)!) == false && AgentAutoSettleConfig.resolvedFromDefaults(defaults: defaults).days == nil,
+                   "archive: the switch off must store Off")
+        model.write(settle.onValue, to: settleRow.field)
+        try expect(AgentAutoSettleConfig.resolvedFromDefaults(defaults: defaults).days == AgentAutoSettleConfig.defaultDays, "archive: the switch on must restore the default days")
+        model.write(settle.storedValue(forNumber: 13), to: settleRow.field)
+        try expect(AgentAutoSettleConfig.resolvedFromDefaults(defaults: defaults).days == 14, "archive: the slider must snap to a stored day count")
+        model.reset(settleRow.field)
+        let (fontRow, font) = optional(TerminalDisplayConfig.fontSizeKey)
+        model.write(font.off!, to: fontRow.field)
+        try expect(font.isOn(model.value(of: fontRow.field)!) == false && TerminalDisplayConfig.fontSize(defaults: defaults) == nil,
+                   "terminal font: the switch off must store 0, which inherits Ghostty's size")
+        model.write(font.onValue, to: fontRow.field)
+        try expect(TerminalDisplayConfig.fontSize(defaults: defaults) == TerminalDisplayConfig.defaultFontSize, "terminal font: the switch on must write the default size")
+        model.reset(fontRow.field)
+        let (idleRow, idle) = optional(AgentIdleSessionConfig.minutesKey)
+        try expect(idle.off == nil, "idle sessions have no off: a slider only")
+        model.write(idle.storedValue(forNumber: 45), to: idleRow.field)
+        try expect(AgentIdleSessionConfig.timeout(defaults: defaults) == 45 * 60, "idle sessions: the slider must write minutes")
+        model.reset(idleRow.field)
+        // Stuck alerts are the same bool, drawn Patient / Quick.
+        let stall = steering.first { $0.field.key == AgentManagedModeConfig.stallAlertsKey }!
+        try expect(stall.toggleTitles == SettingsToggleTitles(off: "Patient", on: "Quick"), "stuck alerts must be a Patient / Quick choice")
+        model.write(.bool(true), to: stall.field)
+        try expect(AgentManagedModeConfig.stallAlerts(defaults: defaults), "Quick must store true")
+        model.reset(stall.field)
+        // Terminal: dependent rows hide with their switch.
+        fixture.select("terminal")
+        let keepField = sections.flatMap(\.fields).first { $0.key == TmuxPersistenceConfig.enabledKey }!
+        let scrollField = sections.flatMap(\.fields).first { $0.key == SessionResumeConfig.scrollbackEnabledKey }!
+        let shareAnchor = "field.\(TmuxPersistenceConfig.ambientPerWorkspaceKey)"
+        let linesAnchor = "field.\(SessionResumeConfig.scrollbackMaxLinesKey)"
+        model.write(.bool(true), to: keepField); model.write(.bool(true), to: scrollField); fixture.settle()
+        try expect(model.renderedAnchors[shareAnchor] != nil && model.renderedAnchors[linesAnchor] != nil, "terminal dependents must show while their switches are on")
+        model.write(.bool(false), to: keepField); model.write(.bool(false), to: scrollField); fixture.settle()
+        try expect(model.renderedAnchors[shareAnchor] == nil, "Share one session must hide when keep-running is off")
+        try expect(model.renderedAnchors[linesAnchor] == nil, "Lines to restore must hide when scrollback is off")
+        model.reset(keepField); model.reset(scrollField); fixture.select("agents"); fixture.settle()
         // Two compaction rows (mode and size), no old on/off or percent rows, and the rows drive the policy.
         let compactionKeys = sections.flatMap(\.fields).compactMap(\.key).filter { $0.hasPrefix("continuum.agentContext.") }
         try expect(compactionKeys == [AgentContextAutoCompactionPolicy.modeKey, AgentContextAutoCompactionPolicy.compactAtKey],
@@ -338,6 +420,8 @@ enum SettingsSelfChecks {
             try expect(!metrics.isBlank, "\(id) rendered blank: \(metrics.distinctSampledColors) colours at \(metrics.width)x\(metrics.height)")
             try? rep.representation(using: .png, properties: [:])?.write(to: artifactDir.appendingPathComponent("\(id).png"))
         }
+
+        try SettingsPaneStills.renderIfRequested()
 
         // 8. Teardown: the overlay leaves, and Settings never made a window.
         fixture.modal.close()
