@@ -50,11 +50,10 @@ final class UserPromptRenderer: AgentBlockRendering {
     }
 
     func measure(block: AgentBlock, width: CGFloat, context: AgentRenderContext) -> CGFloat {
-        // The prose measures against the INSET width, or text against the rule's
-        // gutter would clip its last line.
+        // The prose measures against the width inside the tint's padding.
         proseRenderer.measure(
             block: block,
-            width: max(1, width - UserPromptView.leadingInset(zoom: context.pageZoom)),
+            width: max(1, width - UserPromptView.leadingInset(zoom: context.pageZoom) - UserPromptView.trailingInset(zoom: context.pageZoom)),
             context: context
         ) + UserPromptView.verticalInset(zoom: context.pageZoom) * 2
     }
@@ -76,23 +75,21 @@ final class UserPromptRenderer: AgentBlockRendering {
 @MainActor
 final class UserPromptView: NSView, TokenThemed {
     static let verticalInset = CGFloat(Space.m)
-    /// Rule width + breathing room before the first glyph. No trailing gutter:
-    /// with no fill, a trailing inset is invisible and only narrows the measure.
-    static let leadingInset = CGFloat(LineWidth.rule) + CGFloat(Space.m)
+    /// The tint's padding on each side of the prose. The turn used to hang a
+    /// one-sided rule down its left edge; it is now one full, even tint, so it
+    /// has a gutter on both sides.
+    static let leadingInset = CGFloat(Space.m)
+    static let trailingInset = CGFloat(Space.m)
 
     // WS5 companions. The two zero-argument properties above are read by
     // `UIProbeGeometry`, `TranscriptRhythmChecks` and `AgentTranscriptListView`,
     // so they keep their shipped 100% values; this view and its renderer read
     // the zoomed ones.
     static func verticalInset(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.m)) }
-    /// The gutter is rule + air, and both halves scale, so the prose column
-    /// still starts exactly one `Space.m` past the rule at every rung.
-    static func leadingInset(zoom: AgentPageZoom) -> CGFloat {
-        ruleWidth(zoom: zoom) + CGFloat(zoom.scaled(Space.m))
-    }
-    /// `LineWidth.rule` is an authorship EDGE, not the 0.5pt hairline the zoom
-    /// pass leaves alone: at 150% a 2pt bar beside 150% type reads as a hairline.
-    static func ruleWidth(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(LineWidth.rule)) }
+    static func leadingInset(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.m)) }
+    static func trailingInset(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.m)) }
+    /// No one-sided edge any more; kept at zero for the drawn renderer's layout.
+    static func ruleWidth(zoom: AgentPageZoom) -> CGFloat { 0 }
 
     private let proseRenderer: AssistantProseRenderer
     private(set) var proseView: AssistantProseView
@@ -141,7 +138,8 @@ final class UserPromptView: NSView, TokenThemed {
     }
 
     func applyTokens() {
-        rule.layer?.backgroundColor = AgentLineRole.authorship.color.cgColor(for: theme)
+        rule.layer?.backgroundColor = AgentSurfaceRole.artifact.color.cgColor(for: theme)
+        rule.layer?.applyCorner(.artifact, zoom: pageZoom)
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -169,15 +167,15 @@ final class UserPromptView: NSView, TokenThemed {
         super.layout()
         let leadingInset = Self.leadingInset(zoom: pageZoom)
         let verticalInset = Self.verticalInset(zoom: pageZoom)
-        rule.frame = NSRect(
-            x: bounds.minX, y: bounds.minY,
-            width: Self.ruleWidth(zoom: pageZoom), height: bounds.height)
+        // `rule` is now the turn's tint: the whole row, behind the prose.
+        rule.frame = bounds
         proseView.frame = NSRect(
             x: bounds.minX + leadingInset,
             y: bounds.minY + verticalInset,
-            width: max(1, bounds.width - leadingInset),
+            width: max(1, bounds.width - leadingInset - Self.trailingInset(zoom: pageZoom)),
             height: max(0, bounds.height - verticalInset * 2)
         )
         proseView.layoutSubtreeIfNeeded()
     }
 }
+

@@ -826,7 +826,7 @@ enum TranscriptRhythmChecks {
                         + "fixture or the role-aware registry stopped producing one"
                     )
                 }
-                let expectedHex = AgentLineRole.authorship.color.cgColor(for: theme).hexForChecks
+                let expectedHex = AgentSurfaceRole.artifact.color.cgColor(for: theme).hexForChecks
                 for user in userViews {
                     // 1. No fill left. Comparing to `nil`, not `.clear` — a
                     //    painted transparent is an unregistered literal to the
@@ -848,7 +848,7 @@ enum TranscriptRhythmChecks {
                     }
                     let ruleFrame = ruleLayers[0].layer.frame
                     guard abs(ruleFrame.minX - user.bounds.minX) <= 0.01,
-                          abs(ruleFrame.width - CGFloat(LineWidth.rule)) <= 0.01,
+                          abs(ruleFrame.width - user.bounds.width) <= 0.5,
                           abs(ruleFrame.height - user.bounds.height) <= 0.5 else {
                         throw fail(
                             "\(state.rawValue)/\(theme.rawValue): the authorship rule is not a full "
@@ -869,7 +869,7 @@ enum TranscriptRhythmChecks {
                     //    `AssistantProseRenderer.horizontalReadingInset == 0`, so
                     //    the shared text column IS the row's leading edge; there
                     //    is no interior margin to hang the rule in.
-                    let expectedGlyphX = ruleFrame.maxX + CGFloat(Space.m)
+                    let expectedGlyphX = ruleFrame.minX + CGFloat(Space.m)
                     let leftmostGlyphX = user.proseView.textFields.map {
                         $0.convert($0.bounds, to: user).minX
                     }.min()

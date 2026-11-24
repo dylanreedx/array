@@ -2546,9 +2546,9 @@ enum UIProbeAppearance {
             guard view.layer?.backgroundColor == nil, view.layer?.cornerRadius == 0 else {
                 throw fail("user prompt lost its card but still paints a fill or a rounded corner in \(theme)")
             }
-            let expectedRule = AgentLineRole.authorship.color.cgColor(for: theme)
+            let expectedRule = AgentSurfaceRole.artifact.color.cgColor(for: theme)
             guard view.qaTokenPaintedLayers.first?.layer.backgroundColor == expectedRule else {
-                throw fail("user prompt's authorship rule is not painted with AgentLineRole.authorship in \(theme)")
+                throw fail("user prompt's tint is not painted with AgentSurfaceRole.artifact in \(theme)")
             }
             guard view.accessibilityRole() == .group, view.accessibilityLabel() == "You",
                   assistant.accessibilityLabel() == nil else {

@@ -3346,6 +3346,30 @@ enum ContinuumApp {
         #endif
 
         #if ARRAY_CHECKS
+        if CommandLine.arguments.contains("--file-preview-open-check") {
+            do {
+                _ = NSApplication.shared
+                try FileOpenChecks.runFilePreviewOpenCheck()
+                print("ContinuumRevivedFilePreviewOpenChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+        if let index = CommandLine.arguments.firstIndex(of: "--file-preview-stills"),
+           index + 1 < CommandLine.arguments.count {
+            _ = NSApplication.shared
+            let target = URL(fileURLWithPath: CommandLine.arguments[index + 1])
+            Task { @MainActor in
+                do { try await FileUXTranscriptStills.render(to: target) } catch {
+                    fputs("FAIL --file-preview-stills: \(error)\n", stderr); Foundation.exit(1)
+                }
+                Foundation.exit(0)
+            }
+            RunLoop.main.run()
+            return
+        }
         if CommandLine.arguments.contains("--agent-local-file-link-check") {
             do {
                 _ = NSApplication.shared

@@ -57,6 +57,19 @@ final class AgentDiffSummaryView: NSView, CornerStyled {
         CGFloat(zoom.scaled(Space.s))
     }
     static let maximumVisibleFiles = 8
+
+    /// A one-off file this card previews as a thumbnail (an image, pdf, page, or
+    /// a document or source file the operation created). Everything else stays
+    /// a path row.
+    static func previewKind(_ file: AgentDiffFileSummary) -> FilePreviewKind? {
+        file.fileURL.flatMap { FilePreviewKind(url: $0, action: file.action) }
+    }
+    /// The strip's height: one thumbnail row and its caption, in the card's own
+    /// row rhythm. Zero when no file earns a preview.
+    static func stripHeight(_ files: [AgentDiffFileSummary], zoom: AgentPageZoom) -> CGFloat {
+        guard files.contains(where: { previewKind($0) != nil }) else { return 0 }
+        return AgentFileStripView.thumbHeight(zoom: zoom) + fileRowHeight(zoom: zoom) + CGFloat(zoom.scaled(Space.s))
+    }
     /// The proportional add/remove bar, git `--stat` style.
     static func statBarWidth(zoom: AgentPageZoom = .default) -> CGFloat {
         CGFloat(zoom.scaled(Space.xxl * 2))
@@ -81,6 +94,7 @@ final class AgentDiffSummaryView: NSView, CornerStyled {
     private(set) var overflowLabel = NSTextField(labelWithString: "")
     private(set) var openReviewButton = AgentOpenReviewButton(frame: .zero)
     private(set) var displayedFiles: [AgentDiffFileSummary] = []
+    private let fileStrip = AgentFileStripView()
     /// A3: one view for the whole inline diff body (`performance.md` trap 1 —
     /// never one view per line). Non-editable, non-scrolling; the enclosing
     /// transcript scrolls. Created lazily, once, the first time a block
@@ -248,6 +262,8 @@ final class AgentDiffSummaryView: NSView, CornerStyled {
         addSubview(overflowLabel)
         addSubview(bodyOverflowLabel)
         addSubview(openReviewButton)
+        fileStrip.isHidden = true
+        addSubview(fileStrip)
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
     }
@@ -266,18 +282,15 @@ final class AgentDiffSummaryView: NSView, CornerStyled {
         let previousFiles = displayedFiles
         displayedFiles = Array(payload.files.prefix(Self.maximumVisibleFiles))
         titleLabel.attributedStringValue = NSAttributedString(
-            string: "CHANGES",
+            string: "Changes",
             attributes: [
                 .font: NSFont.token(.caption, zoom: context.pageZoom),
-                // Tracking is deliberately NOT scaled: `AgentPageZoom.scaled`
-                // quantizes to half points, so 0.8 would become 1.0 at 100% and
-                // break the "100% is unchanged" contract.
-                .kern: 0.8,
             ])
         countsLabel.stringValue = Self.countsText(payload.files, pending: payload.presentedFilesArePending)
         summaryLabel.stringValue = Self.safeSummary(payload.summary)
         summaryLabel.isHidden = summaryLabel.stringValue.isEmpty
         syncFileRows(previousFiles: previousFiles)
+        syncAffordances()
         let overflow = payload.files.count - displayedFiles.count
         overflowLabel.stringValue = overflow > 0 ? "+\(overflow) more files" : ""
         overflowLabel.isHidden = overflow == 0
@@ -385,6 +398,20 @@ final class AgentDiffSummaryView: NSView, CornerStyled {
         return view
     }
 
+    private func syncAffordances() {
+        let previewed = displayedFiles.enumerated().filter { Self.previewKind($0.element) != nil }
+        fileStrip.isHidden = previewed.isEmpty
+        guard !previewed.isEmpty else { return }
+        for (index, _) in previewed where fileLabels.indices.contains(index) {
+            fileLabels[index].isHidden = true
+            fileStatLabels[index].isHidden = true
+            fileStatBars[index].isHidden = true
+        }
+        fileStrip.apply(
+            files: previewed.map(\.element), tokens: context.tokens, theme: effectiveTokenTheme,
+            zoom: context.pageZoom, perform: context.actions.perform, blockID: blockID)
+    }
+
     func applyAccessibility(payload: AgentDiffPayload) {
         setAccessibilityLabel(
             "File changes, \(Self.countsText(payload.files, pending: payload.presentedFilesArePending))")
@@ -439,12 +466,23 @@ final class AgentDiffSummaryView: NSView, CornerStyled {
             height: titleIntrinsic.height
         ))
         var y = headerHeight
+        var stripPlaced = false
         if !summaryLabel.isHidden {
             let height = Self.summaryHeight(payload.summary, width: bounds.width, zoom: zoom)
             place(summaryLabel, NSRect(x: inset, y: y, width: max(1, bounds.width - inset * 2), height: height))
             y += height + CGFloat(zoom.scaled(Space.s))
         }
         for index in 0..<displayedFiles.count {
+            if Self.previewKind(displayedFiles[index]) != nil {
+                // One strip holds every previewed file; it takes the place of the first.
+                if !stripPlaced {
+                    stripPlaced = true
+                    let height = Self.stripHeight(displayedFiles, zoom: zoom)
+                    place(fileStrip, NSRect(x: inset, y: y, width: max(1, bounds.width - inset * 2), height: height))
+                    y += height
+                }
+                continue
+            }
             let label = fileLabels[index]
             let barWidth = min(Self.statBarWidth(zoom: zoom), max(0, bounds.width * 0.22))
             let statLabel = fileStatLabels.indices.contains(index) ? fileStatLabels[index] : nil
@@ -538,6 +576,7 @@ final class AgentDiffSummaryView: NSView, CornerStyled {
         }
         for bar in fileStatBars { bar.applyColors(added: added, removed: removed) }
         openReviewButton.contentTintColor = context.tokens.primaryText.color.nsColor(for: theme)
+        syncAffordances()
         // The diff body's colours are baked into its attributed string (same
         // reason `DiffReviewTileNSView.applyTokens` re-renders): re-run
         // `syncBody` so an appearance flip repaints it. The parse stays cached;
@@ -559,7 +598,9 @@ final class AgentDiffSummaryView: NSView, CornerStyled {
         if !summary.isEmpty {
             result += summaryHeight(summary, width: width, zoom: zoom) + CGFloat(zoom.scaled(Space.s))
         }
-        result += CGFloat(min(payload.files.count, maximumVisibleFiles)) * fileRowHeight(zoom: zoom)
+        let shown = Array(payload.files.prefix(maximumVisibleFiles))
+        let rows = shown.filter { previewKind($0) == nil }.count
+        result += CGFloat(rows) * fileRowHeight(zoom: zoom) + stripHeight(shown, zoom: zoom)
         if payload.files.count > maximumVisibleFiles { result += fileRowHeight(zoom: zoom) }
         if !payload.text.isEmpty {
             let model = parsedModel(blockID: blockID, revision: revision, text: payload.text, sharedPreview: payload.presentedTotalLines != nil)
@@ -844,3 +885,4 @@ final class AgentOpenReviewButton: NSButton {
         font = NSFont.token(.label, zoom: zoom)
     }
 }
+

@@ -2355,6 +2355,168 @@ enum FileOpenChecks {
         try expect(!fileManager.fileExists(atPath: protectedURL.path),
                    "saving a recovered draft must remove its recovery record")
     }
+
+    // MARK: - Changes-card file previews
+
+    /// The strip of file previews in the Changes card: each kind renders a
+    /// thumbnail off the main thread, a click opens the file in a tile beside
+    /// the agent without overlapping anything, a second click reveals that tile
+    /// instead of making another, and hover animates the fade away.
+    static func runFilePreviewOpenCheck() throws {
+        let fileManager = FileManager.default
+        let tempRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("continuum-file-preview-\(UUID().uuidString)", isDirectory: true)
+        let checkout = tempRoot.appendingPathComponent("worktree", isDirectory: true)
+        try fileManager.createDirectory(at: checkout.appendingPathComponent("Sources", isDirectory: true), withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempRoot) }
+
+        // One file of every previewed kind, created by the agent.
+        let png = checkout.appendingPathComponent("shot.png")
+        let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 320, pixelsHigh: 200, bitsPerSample: 8,
+                                   samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                   colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        NSColor.systemIndigo.setFill(); NSRect(x: 0, y: 0, width: 320, height: 200).fill()
+        NSGraphicsContext.restoreGraphicsState()
+        try rep.representation(using: .png, properties: [:])!.write(to: png)
+        let md = checkout.appendingPathComponent("report.md")
+        try Data("# A report with a title long enough that it has to wrap onto a second line of the preview\n\nFirst paragraph of the report.\n".utf8).write(to: md)
+        let html = checkout.appendingPathComponent("page.html")
+        try Data("<html><body style='background:#123'><h1 style='color:white'>Hello</h1></body></html>".utf8).write(to: html)
+        let swift = checkout.appendingPathComponent("Sources/Writer.swift")
+        try Data("import Foundation\n\nstruct Writer {\n    func write() {}\n}\n".utf8).write(to: swift)
+        let pdf = checkout.appendingPathComponent("doc.pdf")
+        var box = CGRect(x: 0, y: 0, width: 612, height: 792)
+        guard let pdfContext = CGContext(pdf as CFURL, mediaBox: &box, nil) else { throw Failure(message: "no pdf context") }
+        pdfContext.beginPDFPage(nil); pdfContext.setFillColor(CGColor(gray: 0.2, alpha: 1))
+        pdfContext.fill(CGRect(x: 50, y: 600, width: 300, height: 100)); pdfContext.endPDFPage(); pdfContext.closePDF()
+
+        // Kinds: an edit to the markdown or source stays a plain row.
+        try expect(FilePreviewKind(url: md, action: .edit) == nil, "an edited markdown file must not get a preview")
+        try expect(FilePreviewKind(url: swift, action: .edit) == nil, "an edited source file must not get a preview")
+        try expect(FilePreviewKind(url: md, action: .add) == .document, "a created markdown file must get a preview")
+        try expect(FilePreviewKind(url: png, action: .edit) == .image, "an image earns a preview however it was touched")
+
+        // 1. A thumbnail renders for each kind, off the main thread, and is cached
+        //    by path and modification time.
+        let store = FilePreviewStore.shared
+        store.resetForChecks()
+        let kinds: [(URL, FilePreviewKind)] = [(png, .image), (md, .document), (html, .web), (swift, .code), (pdf, .pdf)]
+        for (url, kind) in kinds {
+            var ready = false
+            let immediate = store.preview(url, kind: kind, dark: true) { ready = true }
+            try expect(immediate == nil, "\(kind): the first request must not block the main thread for a picture")
+            let deadline = Date().addingTimeInterval(15)
+            while !ready && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+            guard let made = store.cached(url, kind: kind, dark: true) else {
+                throw Failure(message: "\(kind): no thumbnail was produced for \(url.lastPathComponent)")
+            }
+            try expect(made.image.height > 0 && made.blurred.height == made.image.height && made.aspect > 0.2,
+                       "\(kind): the thumbnail and its blurred copy must be real pictures")
+        }
+        let generated = store.generationCount
+        _ = store.preview(png, kind: .image, dark: true) {}
+        try expect(store.generationCount == generated, "an unchanged file must be served from the cache")
+        try fileManager.setAttributes([.modificationDate: Date().addingTimeInterval(60)], ofItemAtPath: png.path)
+        _ = store.preview(png, kind: .image, dark: true) {}
+        try expect(store.generationCount == generated + 1, "a file with a new modification time must be regenerated")
+        _ = store.preview(md, kind: .document, dark: false) {}
+        try expect(store.generationCount == generated + 2, "drawn text must be cached per appearance")
+
+        // 2. The strip, in an agent's transcript card, opens files beside the agent.
+        let harness = try makeSingleProjectHarness(root: checkout, tempRoot: tempRoot)
+        defer { harness.browserEngine.shutdown() }
+        let window = NSWindow(contentRect: harness.canvas.bounds, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = harness.canvas
+        let agentTile = Tile(id: UUID(), kind: .managedAgent, title: "agent",
+                             frame: TileFrame(x: 100, y: 80, width: 460, height: 360), zPosition: .fromLegacyRank(1),
+                             runtimeRef: nil, metadata: TileMetadata(launchProfileId: "managed"))
+        let agentView = ManagedAgentTileNSView(tile: agentTile, threadId: "thread-preview")
+        agentView.frame = NSRect(x: 0, y: 0, width: 460, height: 360)
+        harness.canvas.installProjectTile(tileView: agentView, for: agentTile)
+        let agentId = AgentID(rawValue: UUID())
+        harness.runtime.documentAgentTileIdsProvider = { [agentTileId = agentTile.id] in [agentId: agentTileId] }
+        let opener = AgentLocalFileOpener(
+            openDocument: { request in harness.runtime.openDocument(request) },
+            fileTile: { [weak canvas = harness.canvas] tileId in canvas?.tileView(for: tileId) as? FileTileNSView })
+        var results: [AgentLocalFileOpener.Result] = []
+
+        let strip = AgentFileStripView(frame: NSRect(x: 0, y: 0, width: 560, height: 120))
+        let host = NSView(frame: strip.frame); host.addSubview(strip)
+        let stripWindow = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        stripWindow.contentView = host
+        let files = [md, png, html].map {
+            AgentDiffFileSummary(displayName: $0.lastPathComponent, action: .add, fileURL: $0)
+        }
+        strip.apply(files: files, tokens: .transcript, theme: .dark, zoom: .default, perform: { action in
+            guard case let .openLocalFile(_, destination) = action else { return }
+            results.append(opener.open(destination: destination, checkoutRoot: checkout, sourceTileId: agentTile.id,
+                                       sourceAgentId: agentId, projectId: harness.runtime.activeController?.project.id))
+        }, blockID: AgentNodeID(rawValue: "preview-block")!)
+        let settle = Date().addingTimeInterval(15)
+        while strip.qaPlaceholderCount > 0 && Date() < settle { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+        strip.layoutSubtreeIfNeeded()
+        try expect(strip.qaThumbCount == 3 && strip.qaPlaceholderCount == 0, "the strip must show a thumbnail for each previewed file")
+        let frames = strip.qaThumbFrames
+        try expect(frames.allSatisfy { $0.width >= 96 && $0.height > 0 } && frames[0].maxX < frames[1].minX && frames[1].maxX < frames[2].minX,
+                   "thumbnails must sit in one row without overlapping: \(frames)")
+
+        func click(_ index: Int) {
+            let point = NSPoint(x: frames[index].midX, y: frames[index].midY)
+            let windowPoint = strip.convert(point, to: nil)
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                let event = NSEvent.mouseEvent(with: type, location: windowPoint, modifierFlags: [], timestamp: 0,
+                                               windowNumber: stripWindow.windowNumber, context: nil, eventNumber: 0,
+                                               clickCount: 1, pressure: 1)!
+                if type == .leftMouseDown { strip.mouseDown(with: event) } else { strip.mouseUp(with: event) }
+            }
+        }
+        func fileTiles() -> [Tile] { harness.canvas.allTilesInWorldFrames().filter { $0.kind == .file } }
+        func assertBesideAndClear(_ label: String) throws {
+            let tiles = harness.canvas.allTilesInWorldFrames()
+            guard let agent = tiles.first(where: { $0.id == agentTile.id }) else { throw Failure(message: "\(label): the agent tile vanished") }
+            for file in tiles where file.kind == .file {
+                let beside = file.frame.x >= agent.frame.x + agent.frame.width - 0.5
+                    || file.frame.y >= agent.frame.y + agent.frame.height - 0.5
+                try expect(beside, "\(label): \(file.title) must open beside the agent, got \(file.frame) next to \(agent.frame)")
+                try expect(file.zoneId == agent.zoneId, "\(label): \(file.title) must open in the agent's own zone")
+            }
+            for (i, a) in tiles.enumerated() {
+                for b in tiles[(i + 1)...] {
+                    let overlap = a.frame.x < b.frame.x + b.frame.width && b.frame.x < a.frame.x + a.frame.width
+                        && a.frame.y < b.frame.y + b.frame.height && b.frame.y < a.frame.y + a.frame.height
+                    try expect(!overlap, "\(label): \(a.title) and \(b.title) overlap")
+                }
+            }
+        }
+
+        click(0)
+        try expect(fileTiles().count == 1, "clicking a thumbnail must open exactly one file tile, got \(fileTiles().count)")
+        guard case .opened(let firstTile, _) = results.last else { throw Failure(message: "first click: expected .opened, got \(String(describing: results.last))") }
+        try assertBesideAndClear("first click")
+        click(1)
+        try expect(fileTiles().count == 2, "a different thumbnail must open its own tile")
+        try assertBesideAndClear("second file")
+        click(0)
+        guard case .revealed(let again, _) = results.last, again == firstTile else {
+            throw Failure(message: "clicking an open file again must reveal its tile, got \(String(describing: results.last))")
+        }
+        try expect(fileTiles().count == 2, "revealing an open file must not make a second tile")
+
+        // 3. Hover removes the fade and blur from the hovered thumbnail only, over
+        //    the transcript's own emphasis duration.
+        try expect(strip.qaFadeOpacity(at: 0) == 1 && strip.qaBlurOpacity(at: 0) == 1, "a resting thumbnail is faded and blurred")
+        AgentTranscriptMotion.qaWithMotion(enabled: true) {
+            strip.setHovered(1)
+            try? expect(strip.qaHasFadeAnimation(at: 1), "hover must animate the fade away")
+        }
+        try expect(strip.qaFadeOpacity(at: 1) == 0 && strip.qaBlurOpacity(at: 1) == 0, "the hovered thumbnail shows in full")
+        try expect(strip.qaFadeOpacity(at: 0) == 1, "an unhovered thumbnail stays faded")
+        strip.setHovered(nil)
+        try expect(strip.qaFadeOpacity(at: 1) == 1, "leaving restores the fade")
+        print("file preview strip: thumbnails for 5 kinds, cached by mtime, click opens beside the agent, second click reveals")
+    }
 }
 
 #endif

@@ -9079,10 +9079,10 @@ enum UIProbeGeometry {
         let leadingGutter = view.proseView.frame.minX - view.bounds.minX
         let trailingGutter = view.bounds.maxX - view.proseView.frame.maxX
         guard abs(leadingGutter - UserPromptView.leadingInset) <= 0.5,
-              trailingGutter <= 0.5 else {
+              abs(trailingGutter - UserPromptView.trailingInset) <= 0.5 else {
             throw fail(
-                "user prompt must sit \(UserPromptView.leadingInset)pt past its own rule and flush "
-                + "against its trailing edge: leading \(leadingGutter), trailing \(trailingGutter)"
+                "user prompt must sit \(UserPromptView.leadingInset)pt inside its tint on the left and "
+                + "\(UserPromptView.trailingInset)pt on the right: leading \(leadingGutter), trailing \(trailingGutter)"
             )
         }
         try expectUserPromptReadableMeasure(
@@ -9124,7 +9124,7 @@ enum UIProbeGeometry {
         // Corrected 2026-08-24 (A1): the card and its symmetric gutter are gone.
         // The prose spans everything past the rule's leading inset, with no
         // trailing gutter to subtract a second time.
-        let expected = surfaceWidth - UserPromptView.leadingInset
+        let expected = surfaceWidth - UserPromptView.leadingInset - UserPromptView.trailingInset
         guard abs(proseWidth - expected) <= 0.5 else {
             throw fail(String(
                 format: "user prompt is not the full readable measure inside its gutter: prose %.1fpt, expected %.1fpt of a %.0fpt surface",
