@@ -20,7 +20,7 @@ import Foundation
 extension ManagedModeChecks {
     /// What a Managed lead's brief names first. Held here as the expected
     /// outcome, not read back from the production constant.
-    static let expectedLeadPinnedTools: Set<String> = ["array_delegate", "array_message_agent", "array_status"]
+    static let expectedLeadPinnedTools: Set<String> = ["array_delegate", "array_message_agent", "array_status", "array_stop_agent"]
     static let alwaysLoadKey = "anthropic/alwaysLoad"
     // Independent delivery contract: never read the expected wording from
     // production, or changing both delivery paths could keep this check green.
