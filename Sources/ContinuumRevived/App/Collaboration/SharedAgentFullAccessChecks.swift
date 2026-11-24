@@ -217,6 +217,44 @@ enum SharedAgentFullAccessChecks {
                    && title.lowercased().contains("first prompt"),
                    "\(kind): an unnamed agent takes its name from what Sam typed, never the attribution (got \(title.debugDescription))")
 
+        // 1a. The composer and the sent prompt never disagree (23 Nov: "hit send
+        //     and it still is in the composer"). The relay saves Sam's prompt
+        //     but the answer is lost: the text stays while it is unconfirmed,
+        //     and clears exactly once when the retry confirms it.
+        await service.setLoseNextSendAnswer()
+        let lost = "PLAIN Sam's prompt whose answer is lost."
+        type(lost, into: samView); samView.qaPressSend()
+        try await eventually("\(kind): the lost answer never read unconfirmed (\(samView.controlsText))") {
+            samView.controlsText.hasPrefix("Not confirmed yet") || samModel.receipt?.command.text == lost
+        }
+        try await eventually("\(kind): Sam's composer still holds a prompt the relay confirmed (\(samView.composer.textView.string.debugDescription), \(samView.controlsText))") {
+            samModel.pending == nil && samModel.receipt?.command.text == lost && samView.composer.textView.string.isEmpty
+        }
+        await coordinator.pollOnce()
+        try await eventually("\(kind): the confirmed prompt never ran") { written(lost) == 1 }
+        try await idle()
+        await coordinator.pollOnce()
+        try expect(written(lost) == 1 && samView.composer.textView.string.isEmpty,
+                   "\(kind): a prompt whose answer was lost clears the composer once its retry is confirmed, and runs once")
+        // A second Send while the first is still in flight: the first clears
+        // only its own text, never the newer draft it did not send.
+        await service.setSendDelay(.milliseconds(400))
+        let slow = "PLAIN Sam's slow prompt.", typedAfter = "PLAIN Sam keeps typing while it sends."
+        type(slow, into: samView); samView.qaPressSend()
+        type(typedAfter, into: samView); samView.qaPressSend()
+        try await eventually("\(kind): the slow prompt never queued: \(samModel.message)") {
+            samModel.receipt?.command.text == slow && samModel.pending == nil
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        try expect(samView.composer.textView.string == typedAfter,
+                   "\(kind): a Send pressed while another is in flight keeps its own text; the first clears only what it sent (got \(samView.composer.textView.string.debugDescription))")
+        await service.setSendDelay(.zero)
+        samView.composer.apply(AgentComposerDraft(text: "", selection: NSRange(location: 0, length: 0), revision: 1))
+        await coordinator.pollOnce()
+        try await eventually("\(kind): the slow prompt never ran") { written(slow) == 1 }
+        try await idle()
+        await coordinator.pollOnce()
+
         // 1b. Sam's prompt is in every transcript, named: the owner's tile draws
         //     it as Sam's card (never the raw "From Sam / ---" wrapper), Sam reads
         //     it as his own and Priya as Sam's. The relay's member record names
@@ -487,6 +525,19 @@ enum SharedAgentFullAccessChecks {
         var receiptDelay: Duration = .zero
         func setReceiptDelay(_ value: Duration) { receiptDelay = value }
         func remove(_ person: SharedArea.ID<SharedArea.Person>) { members[person] = nil; epoch += 1 }
+        /// The relay saves the next teammate prompt but its answer is lost on
+        /// the way back, as a dropped connection does.
+        var loseNextSendAnswer = false
+        func setLoseNextSendAnswer() { loseNextSendAnswer = true }
+        /// How long a teammate's send takes to answer, as over a slow relay.
+        var sendDelay: Duration = .zero
+        func setSendDelay(_ value: Duration) { sendDelay = value }
+        func deliver(_ caller: Collaboration.Identity, _ request: Collaboration.AgentPromptRequest) async throws -> Collaboration.AgentDispatchReceipt {
+            if sendDelay > .zero, caller != owner { try await Task.sleep(for: sendDelay) }
+            let receipt = try send(caller, request)
+            if loseNextSendAnswer, caller != owner { loseNextSendAnswer = false; throw URLError(.networkConnectionLost) }
+            return receipt
+        }
         private func scope(_ caller: Collaboration.Identity) throws -> Collaboration.Scope {
             guard let role = members[caller.person] else { throw error(404, "unavailable") }
             return .init(area: document.id, epoch: epoch, role: role)
@@ -572,7 +623,7 @@ enum SharedAgentFullAccessChecks {
             func change(object: UUID, request: Collaboration.AgentControlMutation) async throws -> Collaboration.AgentControlState {
                 throw CollaborationClientError.server(status: 403, code: "forbidden")
             }
-            func send(object: UUID, request: Collaboration.AgentPromptRequest) async throws -> Collaboration.AgentDispatchReceipt { try await service.send(caller, request) }
+            func send(object: UUID, request: Collaboration.AgentPromptRequest) async throws -> Collaboration.AgentDispatchReceipt { try await service.deliver(caller, request) }
             func receipt(id: UUID) async throws -> Collaboration.AgentDispatchReceipt { try await service.receipt(caller, id) }
             func pending(host: UUID) async throws -> [Collaboration.AgentDispatchReceipt] { try await service.pending(caller) }
             func claim(id: UUID, request: Collaboration.AgentHostClaim) async throws -> Collaboration.AgentDispatchReceipt { try await service.claim(id, request, admit: false) }

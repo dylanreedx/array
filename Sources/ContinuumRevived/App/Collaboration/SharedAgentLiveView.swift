@@ -416,17 +416,32 @@ final class SharedAgentLiveView: NSView {
 
     /// Fire-and-forget from the composer; only a service-queued prompt clears
     /// the draft. Anything else leaves it to send again.
+    /// The composer and Send whose prompt is saved but not yet confirmed: it
+    /// clears once the saved request is delivered, never before.
+    private var unconfirmedSend: (composer: AgentComposerView, intent: AgentComposerView.SendIntent, request: UUID)?
+
     private func submit(_ text: String) {
-        guard !sending, let prompter, let object else { return }
-        sending = true; delivery = "Sending…"; render()
+        // The composer and the Send are fixed now: the host's chrome can swap
+        // the active composer, and a second Send overwrites its pending prompt,
+        // before this one is answered.
+        let target = activeComposer
+        guard !sending, let prompter, let object, let intent = target.pendingSendIntent else { return }
+        sending = true; delivery = "Sending…"; unconfirmedSend = nil; render()
         Task { @MainActor [weak self] in
             let outcome = await prompter.prompt(object: object, text: text)
             guard let self else { return }
             sending = false
             switch outcome {
-            case .queued: activeComposer.acceptCurrentSendIntent(); delivery = Self.deliveryText(prompter.receipt?.phase)
+            case .queued: target.acceptSendIntent(intent); delivery = Self.deliveryText(prompter.receipt?.phase)
             case .refused: delivery = prompter.message.hasPrefix("Refused") ? prompter.message : "Refused. " + prompter.message
-            case .unresolved: delivery = "Not confirmed yet. " + prompter.message
+            case .unresolved:
+                if let pending = prompter.pending, case .prompt(let request) = pending.action {
+                    // Saved and retried on the poll; the text stays until it lands.
+                    unconfirmedSend = (target, intent, request.id)
+                    delivery = "Not confirmed yet. " + prompter.message
+                } else {
+                    delivery = "Not sent. " + prompter.message
+                }
             }
             render()
         }
@@ -438,6 +453,14 @@ final class SharedAgentLiveView: NSView {
         guard let prompter, !sending, delivery != nil else { return }
         if prompter.pending != nil { await prompter.checkDelivery() }
         await prompter.refreshReceipt()
+        if let waiting = unconfirmedSend, prompter.pending == nil {
+            // The saved prompt was delivered (or given up): clear the composer
+            // once, and only for this prompt, only if it was not refused.
+            unconfirmedSend = nil
+            if let receipt = prompter.receipt, receipt.command.id == waiting.request, receipt.phase != .refused {
+                waiting.composer.acceptSendIntent(waiting.intent)
+            }
+        }
         let next = prompter.message.hasPrefix("Refused") && prompter.receipt?.phase == .refused
             ? prompter.message : Self.deliveryText(prompter.receipt?.phase)
         delivery = next

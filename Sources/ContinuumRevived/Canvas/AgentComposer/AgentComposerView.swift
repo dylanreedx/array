@@ -1080,6 +1080,20 @@ final class AgentComposerView: NSView, TokenThemed, ComposerTextViewObserver, Ag
         completeAcceptedSend(prompt, submittedRevision: pendingSubmittedRevision)
     }
 
+    /// One Send's text and draft revision, captured when the owner starts it.
+    /// A later Send overwrites the composer's pending prompt; acknowledging
+    /// this one clears the composer only while it still holds this text.
+    struct SendIntent: Equatable {
+        let prompt: String
+        let revision: UInt64?
+    }
+    var pendingSendIntent: SendIntent? {
+        pendingSubmittedPrompt.map { SendIntent(prompt: $0, revision: pendingSubmittedRevision) }
+    }
+    func acceptSendIntent(_ intent: SendIntent) {
+        completeAcceptedSend(intent.prompt, submittedRevision: intent.revision)
+    }
+
     func composerRequestedCompletionCommand(
         _ textView: ComposerTextView,
         command: ChoiceListCommand
