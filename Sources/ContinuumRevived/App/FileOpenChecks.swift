@@ -2697,6 +2697,112 @@ enum FileOpenChecks {
             print("file preview strip: three Writes in one turn draw one Changes card with three thumbnails; the edit keeps its card")
         }
         try groupedTurn()
+        // 5. The RESTORE path: a persisted claude session with earlier text turns and
+        //    one turn of three Writes is replayed the way the tile replays it
+        //    (capture, ingest, bind), and must draw the text on both sides of ONE
+        //    folded card. A fold that blanks a restored transcript fails here.
+        func restoredTurn() throws {
+            let sessionRoot = checkout.appendingPathComponent("outputs/strip", isDirectory: true)
+            try fileManager.createDirectory(at: sessionRoot, withIntermediateDirectories: true)
+            let files: [(String, String)] = [("notes.md", "# Strip Notes\n\n## Purpose\n\nSample.\n"),
+                                             ("landing.html", "<html><body><h1>Landing</h1></body></html>"),
+                                             ("badge.svg", "<svg xmlns='http://www.w3.org/2000/svg' width='200' height='120'><rect width='200' height='120' fill='#39c'/></svg>")]
+            var lines: [String] = []
+            func stamp(_ second: Int) -> String { String(format: "2026-11-24T05:41:%02d.000Z", second) }
+            func line(_ object: [String: Any]) {
+                if let data = try? JSONSerialization.data(withJSONObject: object), let text = String(data: data, encoding: .utf8) { lines.append(text) }
+            }
+            line(["type": "user", "timestamp": stamp(1), "message": ["role": "user", "content": "First, say hello."]])
+            line(["type": "assistant", "timestamp": stamp(2), "message": ["role": "assistant", "content": [["type": "text", "text": "Hello from the first turn."]]]])
+            line(["type": "user", "timestamp": stamp(10), "message": ["role": "user", "content": "Now create three files."]])
+            for (index, file) in files.enumerated() {
+                let path = sessionRoot.appendingPathComponent(file.0)
+                try Data(file.1.utf8).write(to: path)
+                let id = "toolu_restore_\(index)"
+                line(["type": "assistant", "timestamp": stamp(11 + index * 2), "message": ["role": "assistant", "content": [
+                    ["type": "tool_use", "id": id, "name": "Write", "input": ["file_path": path.path, "content": file.1]]]]])
+                line(["type": "user", "timestamp": stamp(12 + index * 2), "message": ["role": "user", "content": [
+                    ["type": "tool_result", "tool_use_id": id, "content": "File created successfully at: \(path.path)"]]]])
+            }
+            line(["type": "assistant", "timestamp": stamp(30), "message": ["role": "assistant", "content": [["type": "text", "text": "Done, all three files are written."]]]])
+
+            let thread = "restore-thread"
+            let transcript = ClaudeSessionTranscriptReader.parse(lines: lines, threadId: thread)
+            try expect(!transcript.steps.isEmpty, "the restored session must reconstruct steps")
+            // The real tile, restoring the way a relaunch does.
+            let tile = ManagedAgentTileNSView(tile: Tile(
+                id: UUID(), kind: .managedAgent, title: "restore", frame: TileFrame(x: 0, y: 0, width: 760, height: 760),
+                zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata(launchProfileId: "managed")))
+            tile.frame = NSRect(x: 0, y: 0, width: 760, height: 760)
+            let window = NSWindow(contentRect: tile.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = tile
+            window.orderFrontOffscreenForChecks()
+            defer { window.orderOut(nil) }
+            guard let canvas = tile.qaCanvasTranscript else { throw Failure(message: "the restored tile has no drawn transcript") }
+            canvas.bindToolDetailAgent(AgentID(rawValue: UUID()))   // what attaching to the agent does
+            tile.renderRehydratedPreviousSession(transcript)
+            let settle = Date().addingTimeInterval(20)
+            repeat {
+                tile.layoutSubtreeIfNeeded(); canvas.flushPendingVisualUpdate(); canvas.layoutSubtreeIfNeeded()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            } while (canvas.qaFileThumbs.count < 3 || canvas.qaFileThumbs.contains { !$0.hasPicture }) && Date() < settle
+            let text = canvas.qaLaidOutText
+            try expect(!canvas.qaPlacedBlockIDs.isEmpty, "a restored transcript with created files drew no blocks at all")
+            try expect(text.contains("Hello from the first turn."), "the restored text before the files must still draw; drew '\(text.prefix(300))'")
+            try expect(text.contains("Done, all three files are written."), "the restored text after the files must still draw; drew '\(text.prefix(300))'")
+            let created = canvas.qaChangesCards.filter { $0.files.allSatisfy { $0.action == .write || $0.action == .add } }
+            try expect(created.count == 1 && created[0].files.count == 3,
+                       "the restored turn must draw one folded card of three files, got \(canvas.qaChangesCards.map { $0.files.count })")
+            try expect(canvas.qaFileThumbs.count == 3, "the restored card must show three thumbnails, got \(canvas.qaFileThumbs.count)")
+            print("file preview strip: a restored session draws its text around one folded card of three files")
+        }
+        try restoredTurn()
+        // 6. A relaunch restores the document first and the host-local details later (or
+        //    never): the cards then come from the tile's fallback presentation. Folding
+        //    must hold on that path too, with text before and after.
+        func fallbackTurn() throws {
+            let canvas = AgentTranscriptCanvasView(toolDetailStore: AgentToolDetailStore())
+            canvas.frame = NSRect(x: 0, y: 0, width: 1_100, height: 640)
+            let window = NSWindow(contentRect: canvas.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = canvas
+            window.orderFrontOffscreenForChecks()
+            try canvas.updateRenderContext(AgentRenderContext(actions: AgentRenderActions({ _ in }), tokens: .transcript, appearance: .dark))
+            var projection = AgentTranscriptProjection(threadId: "fallback-thread")
+            try projection.appendUserPrompt(id: AgentNodeID(rawValue: "fallback-user")!, text: "Before the files.")
+            var entries = projection.document.entries
+            var filesByBlock: [AgentNodeID: AgentDiffFileSummary] = [:]
+            for (name, url) in [("shot", png), ("report", md), ("badge", svg)] {
+                let block = AgentBlock(id: AgentNodeID(rawValue: "fallback-diff-\(name)")!, revision: 1, kind: .diff,
+                                       payload: .diff(AgentDiffPayload(text: "", summary: "Write")))
+                entries.append(AgentEntry(id: AgentNodeID(rawValue: "fallback-entry-\(name)")!, revision: 1, role: .assistant,
+                                          provenance: .providerItem(provider: "runtime", itemID: "fb-\(name)"), blocks: [block]))
+                filesByBlock[block.id] = AgentDiffFileSummary(displayName: url.lastPathComponent, addedLineCount: 4, action: .write, fileURL: url)
+            }
+            var closing = AgentTranscriptProjection(threadId: "fallback-thread-2")
+            try closing.appendUserPrompt(id: AgentNodeID(rawValue: "fallback-user-2")!, text: "After the files.")
+            entries += closing.document.entries
+            canvas.setFallbackToolPresentation { block in
+                guard case var .diff(payload) = block.payload, let file = filesByBlock[block.id] else { return nil }
+                payload.files = [file]
+                var presented = block; presented.payload = .diff(payload)
+                return presented
+            }
+            let document = AgentDocument(version: 1, entries: entries)
+            try canvas.enqueue(document: document, patch: AgentDocumentPatch(
+                fromVersion: 0, toVersion: 1, inserted: document.entries.flatMap(\.blocks).map(\.id)), final: true)
+            let settle = Date().addingTimeInterval(20)
+            repeat {
+                canvas.flushPendingVisualUpdate(); canvas.layoutSubtreeIfNeeded()
+                RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            } while (canvas.qaFileThumbs.count < 3 || canvas.qaFileThumbs.contains { !$0.hasPicture }) && Date() < settle
+            let text = canvas.qaLaidOutText
+            try expect(!canvas.qaPlacedBlockIDs.isEmpty && text.contains("Before the files.") && text.contains("After the files."),
+                       "a transcript whose cards come from the fallback presentation drew '\(text.prefix(200))'")
+            try expect(canvas.qaChangesCards.count == 1 && canvas.qaChangesCards[0].files.count == 3,
+                       "fallback-presented Writes must fold into one card of three files, got \(canvas.qaChangesCards.map { $0.files.count })")
+            print("file preview strip: fallback-presented Writes fold into one card with the text around it")
+        }
+        try fallbackTurn()
         try exercise(drawn: true)
         try exercise(drawn: false)
         print("file preview strip: thumbnails cached by mtime; opens in Array on both transcript renderers")
