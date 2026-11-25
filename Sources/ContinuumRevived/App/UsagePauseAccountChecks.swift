@@ -249,13 +249,18 @@ func runUsageAccountFallbackChecks() async throws {
                     "\(helper.rawValue.uuidString.prefix(4)) must move to Spare (most headroom; Alt at 96% skipped), got \(String(describing: supervisor.accountOverrides[helper]))")
     }
     try await waitFor("the first move resumes") { supervisor.usageResumeLogForQA.count > before }
-    for round in 1..<helpers.count {
-        try await waitFor("each resume settles") { helpers.allSatisfy { !supervisor.isRunning($0) } }
+    // The lead's own turn on Work moves and resumes too, taking a slot: tick
+    // until every helper has had its resume, never more rounds than agents.
+    for round in 1...(helpers.count + 1) where !helpers.allSatisfy({ supervisor.usageResumeLogForQA.dropFirst(before).contains($0) }) {
+        try await waitFor("each resume settles") { (helpers + [lead]).allSatisfy { !supervisor.isRunning($0) } }
         now.addTimeInterval(supervisor.usageResumeStagger + 1)
+        // Past the first two resumes of an opening, the next needs a fresh
+        // reading with room (`--usage-resume-herd-check`); production probes.
+        reading(spare, 0.20)
         supervisor.runUsageResumeTick()
-        try await waitFor("resume \(round + 1) of \(helpers.count) starts") { supervisor.usageResumeLogForQA.count >= before + round + 1 }
+        try await waitFor("resume \(round + 1) starts") { supervisor.usageResumeLogForQA.count >= before + round + 1 }
     }
-    try await waitFor("every resumed turn settles; state \(helpers.map { "\(supervisor.records[$0]?.latestTerminalEvent.map { "\($0.outcome)" } ?? "none")/pause=\(supervisor.usagePause(for: $0) != nil)/running=\(supervisor.isRunning($0))/queue=\(supervisor.queuedMessages(for: $0).count)" }) log=\(supervisor.usageResumeLogForQA.count - before)") {
+    try await waitFor("every resumed turn settles; state \(helpers.map { "\(supervisor.records[$0]?.latestTerminalEvent.map { "\($0.outcome)" } ?? "none")/pause=\(supervisor.usagePause(for: $0) != nil)/running=\(supervisor.isRunning($0))/queue=\(supervisor.queuedMessages(for: $0).count)/dir=\(AgentSteeringQAFakes.argvLog(in: claudeBin).filter { [s = AgentSupervisor.claudeSessionId(for: $0)] in $0.argv.contains(s) }.map { $0.configDir == folder(spare) ? "spare" : $0.configDir == folder(work) ? "work" : "other" })" }) log=\(supervisor.usageResumeLogForQA.dropFirst(before).map { helpers.firstIndex(of: $0).map(String.init) ?? "?" })") {
         helpers.allSatisfy { !supervisor.isRunning($0) && supervisor.records[$0]?.latestTerminalEvent?.outcome == .succeeded }
     }
     for helper in helpers {

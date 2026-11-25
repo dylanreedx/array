@@ -338,10 +338,14 @@ usage stop is not a failure: the supervisor records a per-agent usage pause
 (`AgentSupervisor.openUsagePause`, the agent's own account and the stated
 reset) before the transient retry, failure signal, helper result or queue see
 the turn, and delivers it as an interrupted turn carrying the CLI's line. Its
-lead receives ONE delivery headed `finished: paused for Claude usage; Array
-resumes it at 10:20 PM` (or `…when usage frees up` with no stated reset, or
-`…when someone resumes it` with Resume automatically off), never `failed`; the
-spawn-result file carries the same words. Array then resumes the SAME session
+lead receives ONE delivery headed `finished: paused for Claude usage until
+10:20 PM. Array does not resume a lead's helper by itself: message it (now or
+later) and it resumes on the same session once usage is back` (or `…until usage
+frees up` with no stated reset, or `…when someone resumes it` with Resume
+automatically off), never `failed`; the spawn-result file carries the same
+words. An agent with no live lead reads `…; Array resumes it at 10:20 PM`
+instead, because only for it is that true (2026-11-25: a helper was promised
+"Array resumes it at 3:50 PM" and was left paused at 3:50). Array then resumes the SAME session
 on the SAME harness with one continuation turn — at the reset, at a later
 success on the same account, or at a reading under 99% — oldest stop first,
 one agent per `usageResumeStagger` (20 s), never a fresh session or another
@@ -365,6 +369,28 @@ helper with a Claude session continues THAT agent; a spawned replacement marks
 the old one `supersededBy`, cancelling its queue with a note to each sender.
 Witnesses: `--usage-pause-account-switch-check`,
 `--usage-account-fallback-check`, `--helper-retry-session-check`.
+
+One verdict, every path (2026-11-25). `AgentSupervisor.usagePauseVerdict` is
+the single answer to whether a usage-paused agent runs: `resumes` (its next
+turn's account has room and nothing holds it), `waitsForLead` (usage is back on
+its own account but a helper with a live lead waits for that lead, so one reset
+does not resume everything), or `waitsForUsage`. The resume tick, the lead's
+"moved … and is resuming it there" line, the lead NOTE `Usage is back, but
+Array left these helpers paused … Each resumes on its own session when you
+message it, or from its Resume button`, message delivery and the rail's Resume
+all read it. A helper Array moved to an account with room is `resumes`, never
+held for its lead, so the "is resuming it there" line is true; if the target
+has no room either the line says so and gives the reset instead. A message (not
+a note) waiting in a usage-paused agent's queue is an ask: when the account its
+next turn uses has room the message resumes it at once on its own session
+(continuation, then the message) and is delivered `queued`, never `held`; the
+rail's Resume does the same. Only with no room is a message `held`, and its
+`heldReason` names the reset time (`Array resumes it at 1:00 PM, when usage
+returns …`), or a usage reading with no stated reset, or a person's Resume
+when automatic resume is off. Before this the tick held every helper with a
+lead whatever the notice said, and a lead's message was held for usage while
+the note told it the message would resume the helper. Witness:
+`--usage-hold-truth-check`.
 
 Progress text and output emitted after a result was delivered (the +16 s case,
 or a report filed after the turn) become durable queue NOTES (`helperNote`), one

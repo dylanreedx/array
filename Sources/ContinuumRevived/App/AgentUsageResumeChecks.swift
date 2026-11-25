@@ -15,7 +15,7 @@ import Foundation
 /// supervisor, its helper-completion courier and its resume clock:
 /// 1. the stop is a per-agent usage pause on the agent's own account, with the
 ///    reset, delivered as interrupted, never failed;
-/// 2. the lead is told "paused for Claude usage; Array resumes it at …";
+/// 2. the lead is told "paused for Claude usage until …" and that a message resumes it;
 /// 3. a later success on the same account ends every pause on it (the Nov 16
 ///    shape) and resumes them staggered, oldest first, one at a time;
 /// 4. each resume is the SAME session on the SAME harness, a continuation, and
@@ -122,9 +122,11 @@ func runAgentUsageResumeChecks() async throws {
     // 2. The lead hears the truth.
     now.addTimeInterval(30)
     await supervisor.flushHelperCompletions()
+    // A lead's helper is not resumed by the reset alone, so the lead is told
+    // the reset time and that its message resumes it (`--usage-hold-truth-check`).
+    let pausedNotice = "finished: paused for Claude usage until "
     try await waitFor("the lead must be told its helpers paused for Claude usage") {
-        received("finished: paused for Claude usage; Array resumes it at")
-            || supervisor.queuedMessages(for: lead).contains { $0.text.contains("finished: paused for Claude usage; Array resumes it at") }
+        received(pausedNotice) || supervisor.queuedMessages(for: lead).contains { $0.text.contains(pausedNotice) }
     }
     try require(!received("finished: failed") && !supervisor.queuedMessages(for: lead).contains { $0.text.contains("finished: failed") },
                 "the lead must never be told a usage stop failed")

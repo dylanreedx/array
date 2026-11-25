@@ -947,7 +947,7 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
                 supervisor?.clearQueuedMessages(for: agentID)
             }
             composer.onResumeQueue = { [weak supervisor] in
-                supervisor?.resumeQueue(for: agentID)
+                supervisor?.resumeQueueByPerson(agentID)
             }
             // T5b: the rail's per-item verbs. Send-now on a follow-up is D2's
             // force send; on a held steer it hands the steer over at once.

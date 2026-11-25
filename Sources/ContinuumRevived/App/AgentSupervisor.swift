@@ -2447,7 +2447,17 @@ final class AgentSupervisor {
         case .usage: why = "is paused because its account hit its usage limit"
         }
         if queuePauseReasons[id] == .usage {
-            return "Held (\(pending) pending from you): \(name) \(why). Array resumes it when usage returns and then runs held messages in order; nobody needs to press Resume. A held message older than 24 h is bundled into a 'while you were away' note on its next turn, never dropped."
+            // When, from the same pause the resume tick reads: a message only
+            // stays held while no account its next turn could use has room.
+            let when: String
+            if let pause = usagePauses[id], !pause.resumesAutomatically {
+                when = "It waits for someone to press Resume, then runs held messages in order"
+            } else if let reset = usagePauses[id]?.resetsAt {
+                when = "Array resumes it at \(AgentUsagePause.clock(reset, now: usagePauseNow())), when usage returns, and then runs held messages in order; nobody needs to press Resume"
+            } else {
+                when = "Array resumes it as soon as a usage reading shows room and then runs held messages in order; nobody needs to press Resume"
+            }
+            return "Held (\(pending) pending from you): \(name) \(why). \(when). A held message older than 24 h is bundled into a 'while you were away' note on its next turn, never dropped."
         }
         return "Held (\(pending) pending from you): \(name) \(why). Held messages run in order, each as sent, only when the user resumes it; one held longer than 24 h is bundled into a 'while you were away' note on its next turn, never dropped, and you are told."
     }
@@ -6014,7 +6024,9 @@ final class AgentSupervisor {
             // A paused recipient keeps every held message, in order: "do A"
             // then "also do B" are both instructions. Age, not recency, retires
             // them (`bundleStaleAgentMessages`).
-            reevaluateUsagePause(for: id)
+            // A message is an ask: with room it resumes the agent now, on its own
+            // session, and runs after the continuation; without, it re-asks.
+            if !resumeUsagePauseOnAsk(id) { reevaluateUsagePause(for: id) }
             // New traffic is never held by a relaunch: a message from a live agent
             // releases the queue and carries the held backlog in front of it as one
             // bundle. Only the backlog stays quiet. No wake into an exhausted account.
@@ -10259,9 +10271,56 @@ final class AgentSupervisor {
     }
 
     private func usagePauseDue(_ id: AgentID, _ pause: AgentUsagePause, now: Date) -> Bool {
-        guard pause.resumesAutomatically else { return false }
+        pause.resumesAutomatically && usageRoomNow(id, pause, now: now)
+    }
+
+    /// The account this agent's next turn signs in as has room: the pause was
+    /// freed, it was left behind on another account, or its reset passed.
+    private func usageRoomNow(_ id: AgentID, _ pause: AgentUsagePause, now: Date) -> Bool {
         if usagePauseFreedNow(id, pause) { return true }
         return pause.resetsAt.map { $0 <= now } ?? false
+    }
+
+    /// Where a usage-paused agent stands. The ONE answer every path reads: the
+    /// resume tick, the lead's notice, the "left paused" note, message
+    /// delivery and Resume. Before this, the tick held every helper with a
+    /// live lead while the failover notice said it was resuming and the note
+    /// said a message would resume it; the message was held instead.
+    private enum UsagePauseVerdict: Equatable {
+        /// Usage is there and nothing holds it: the tick resumes it (staggered).
+        case resumes
+        /// Usage is back on its own account, but a helper waits for its lead
+        /// so one reset does not resume everything: a message or Resume runs it.
+        case waitsForLead
+        /// No room on the account its next turn uses (or automatic resume is
+        /// off): it waits for the reset, a reading, or a person.
+        case waitsForUsage
+    }
+
+    private func usagePauseVerdict(_ id: AgentID, _ pause: AgentUsagePause, now: Date) -> UsagePauseVerdict {
+        guard usagePauseDue(id, pause, now: now) else { return .waitsForUsage }
+        // A move to another account with room is not a reset of the spent
+        // one, and a waiting message is the lead's ask: neither is held.
+        if usageHoldingLead(of: id) != nil, !usagePauseLeftBehind(id, pause, now: now), !usageResumeAsked(id) {
+            return .waitsForLead
+        }
+        return .resumes
+    }
+
+    /// Someone asked this agent for work: a message (not a note) waits in its queue.
+    private func usageResumeAsked(_ id: AgentID) -> Bool {
+        (queuedWorkItemsCache[id] ?? []).contains { item in
+            if case .prompt(let m) = item { return !m.helperNote && !m.isSteer }
+            return false
+        }
+    }
+
+    /// A message or a Resume press for a usage-paused agent: if the account its
+    /// next turn uses has room, it resumes now on its own session, ahead of the
+    /// stagger (one agent, by someone's decision). False leaves it paused.
+    private func resumeUsagePauseOnAsk(_ id: AgentID) -> Bool {
+        guard let pause = usagePauses[id], usageRoomNow(id, pause, now: usagePauseNow()) else { return false }
+        return resumeUsagePaused(id)
     }
 
     /// A pause belongs to the account that ran out. Once the CLI's account in
@@ -10336,12 +10395,27 @@ final class AgentSupervisor {
         let name = held?.label ?? "its account"
         if let moved = accountOverrides[id], moved != pause.accountId, let target = accounts.first(where: { $0.id == moved }) {
             let until = pause.resetsAt.map { " (limit until \(AgentUsagePause.clock($0, now: now)))" } ?? ""
-            return "paused for \(pause.providerName) usage on account \(name)\(until), then Array moved it to \(target.label) and is resuming it there on the same session. That is one account's limit, not all of \(pause.providerName): do not restart or re-brief it."
+            let head = "paused for \(pause.providerName) usage on account \(name)\(until), then Array moved it to \(target.label)"
+            if usagePauseVerdict(id, pause, now: now) == .resumes {
+                return head + " and is resuming it there on the same session. That is one account's limit, not all of \(pause.providerName): do not restart or re-brief it."
+            }
+            return head + ", which has no room either. Array resumes it on the same session when usage returns; do not restart or re-brief it."
         }
-        let base = pause.leadStatus(now: now)
+        // A helper with a live lead is never resumed by a reset alone
+        // (`usagePauseVerdict`): promising "Array resumes it at 3:50 PM" and
+        // then leaving it paused at 3:50 is the lie this replaces.
+        let leadHeld = pause.resumesAutomatically && usageHoldingLead(of: id) != nil
+        let base: String
+        if leadHeld {
+            let until = pause.resetsAt.map { "until \(AgentUsagePause.clock($0, now: now))" } ?? "until usage frees up"
+            base = "paused for \(pause.providerName) usage \(until). Array does not resume a lead's helper by itself: message it (now or later) and it resumes on the same session once usage is back"
+        } else {
+            base = pause.leadStatus(now: now)
+        }
         guard pause.harness != .pi, held != nil else { return base }
         if let room = fallbackAccount(for: pause.harness, excluding: pause.accountId ?? "", now: now) {
-            return base + ". That is account \(name)'s limit only: \(room.label) has room (Settings > Agents > Accounts, or leave it to resume). It resumes on the same session; do not restart it."
+            let route = leadHeld ? "Settings > Agents > Accounts, or message it" : "Settings > Agents > Accounts, or leave it to resume"
+            return base + ". That is account \(name)'s limit only: \(room.label) has room (\(route)). It resumes on the same session; do not restart it."
         }
         let others = accounts.filter { $0.harness == pause.harness && $0.id != pause.accountId }
         return base + (others.isEmpty ? ". That is account \(name)'s limit." : ". That is account \(name)'s limit, and no other \(pause.providerName) account has room.")
@@ -10356,12 +10430,16 @@ final class AgentSupervisor {
             usagePauses[id] = nil
             usageFreed.remove(id)
         }
-        let allDue = usagePauses.filter { usagePauseDue($0.key, $0.value, now: now) }
-        // A helper whose lead exists never resumes by itself: its lead decides.
+        // A helper whose lead exists does not resume on a reset by itself: its
+        // lead decides (`usagePauseVerdict`).
         var heldByLead: [AgentID: [AgentID]] = [:]
         var due: [(key: AgentID, value: AgentUsagePause)] = []
-        for entry in allDue {
-            if let lead = usageHoldingLead(of: entry.key) { heldByLead[lead, default: []].append(entry.key) } else { due.append(entry) }
+        for entry in usagePauses {
+            switch usagePauseVerdict(entry.key, entry.value, now: now) {
+            case .resumes: due.append(entry)
+            case .waitsForLead: if let lead = usageHoldingLead(of: entry.key) { heldByLead[lead, default: []].append(entry.key) }
+            case .waitsForUsage: break
+            }
         }
         // Leads (and plain agents) before orphaned helpers, then oldest stop.
         due.sort {
@@ -10547,7 +10625,17 @@ final class AgentSupervisor {
         usageResumeTask?.cancel()
         usageResumeTask = nil
         let now = usagePauseNow()
-        let live = usagePauses.filter { records[$0.key] != nil && $0.value.resumesAutomatically && usageHoldingLead(of: $0.key) == nil }
+        // Everything the tick will resume (a moved helper too), and every
+        // pause still waiting for usage except a lead's helper nobody has
+        // asked for: its reset resumes nothing, so it wakes nothing.
+        let live = usagePauses.filter { entry in
+            guard records[entry.key] != nil, entry.value.resumesAutomatically else { return false }
+            switch usagePauseVerdict(entry.key, entry.value, now: now) {
+            case .resumes: return true
+            case .waitsForLead: return false
+            case .waitsForUsage: return usageHoldingLead(of: entry.key) == nil || usageResumeAsked(entry.key)
+            }
+        }
         guard !live.isEmpty else { return }
         var wake = live.compactMap { entry -> Date? in
             guard usagePauseFreedNow(entry.key, entry.value) || (entry.value.resetsAt.map { $0 <= now } ?? false) else { return entry.value.resetsAt }
@@ -15052,6 +15140,13 @@ final class AgentSupervisor {
         queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
         appendAgentDiagnostics("held agent messages bundled: count=\(settled.count) oldest=\(stale.map(\.hours).max() ?? 0) h; delivered as one note, none dropped", agentID: id)
         notifyTurnCapabilitiesChanged(id)
+    }
+
+    /// The rail's Resume, a person's ask: a usage-paused agent resumes on its
+    /// own session (continuation, then its queue) when its account has room.
+    func resumeQueueByPerson(_ id: AgentID) {
+        if usagePauses[id] != nil, resumeUsagePauseOnAsk(id) { return }
+        resumeQueue(for: id)
     }
 
     /// Explicit resume after an interrupt, distinct from the next Send: this

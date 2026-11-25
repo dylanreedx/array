@@ -484,6 +484,7 @@ check --undo-toast-placement-check
 check --unified-model-boot-check
 check --update-channel-check
 check --usage-account-fallback-check
+check --usage-hold-truth-check
 check --usage-pause-account-switch-check
 check --usage-resume-herd-check
 check --usage-stop-queue-check
@@ -1049,6 +1050,7 @@ leg run_app_check .build/debug/Array --undo-toast-placement-check
 leg run_app_check .build/debug/Array --unified-model-boot-check
 leg run_app_check .build/debug/Array --update-channel-check
 leg run_app_check .build/debug/Array --usage-account-fallback-check
+leg run_app_check .build/debug/Array --usage-hold-truth-check
 leg run_app_check .build/debug/Array --usage-pause-account-switch-check
 leg run_app_check .build/debug/Array --usage-resume-herd-check
 leg run_app_check .build/debug/Array --usage-stop-queue-check

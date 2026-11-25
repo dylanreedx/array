@@ -1972,6 +1972,8 @@ run_app_check .build/debug/Array --usage-account-fallback-check
 run_app_check .build/debug/Array --helper-retry-session-check
 # A usage stop holds a queue for usage (never as a Stop) and the reset releases it.
 run_app_check .build/debug/Array --usage-stop-queue-check
+# Failover, the "usage back" note, a lead's message and the hold agree (2026-11-25).
+run_app_check .build/debug/Array --usage-hold-truth-check
 run_app_check .build/debug/Array --agent-account-manage-check
 # Real installed-provider warning/compaction/task-retention acceptance spends
 # subscription usage. Opt in explicitly; ordinary matrix runs stay offline.

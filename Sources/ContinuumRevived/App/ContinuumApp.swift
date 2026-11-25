@@ -4589,6 +4589,21 @@ enum ContinuumApp {
             NSApp.run()
         }
 
+        // Every usage-pause path agrees: failover, "usage back" note, a lead's message.
+        if CommandLine.arguments.contains("--usage-hold-truth-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await runUsageHoldTruthChecks()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
+
         // A usage stop holds a queue for usage and releases it at the reset.
         if CommandLine.arguments.contains("--usage-stop-queue-check") {
             _ = NSApplication.shared
