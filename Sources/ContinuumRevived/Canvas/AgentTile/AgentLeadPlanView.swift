@@ -207,17 +207,11 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
     private var pileWidth: CGFloat { orbs.isEmpty ? 0 : CGFloat(orbs.count) * (orbSide - overlap) + overlap }
     private var chevronSize: CGFloat { PlanMetrics.s(Space.l, zoom) }
 
-    private static func rank(_ p: PlanGlance.Phase) -> Int {
-        switch p { case .needsYou, .failed: 0; case .working: 1; case .idle: 2; default: 3 }
-    }
-
     /// Up to four helpers, most pressing first; ties keep creation order, so
     /// the pile only changes when a helper's state does.
     private func rebuildPile() {
         guard let glance else { orbs.forEach { $0.removeFromSuperview() }; orbs = []; return }
-        let ranked = glance.helpers.enumerated().filter { $0.element.phase != .done }
-            .sorted { (Self.rank($0.element.phase), $0.offset) < (Self.rank($1.element.phase), $1.offset) }
-            .prefix(4).map(\.element)
+        let ranked = PlanGlance.pressing(glance.helpers.filter { $0.phase != .done }).prefix(4)
         var next: [PlanOrbView] = []
         for h in ranked {
             let kind = PlanOrbView.Kind.agent(h.id, working: true)

@@ -90,23 +90,20 @@ struct PlanGlance: Equatable {
     var strays: [Helper] { helpers.filter { $0.step == nil } }
     /// What waits on Dylan, counted exactly as the popover marks it: the
     /// decision, each step whose state is Needs you or Failed, and each helper
-    /// outside the plan that needs him (named in the "Also" line).
+    /// outside the plan that needs him (an "Also" row).
     var needsYou: Int {
         (decision == nil ? 0 : 1) + steps.filter { Self.isAttention($0.phase) }.count
             + strays.filter { Self.isAttention($0.phase) }.count
     }
-    /// Helpers outside the plan, only where they say something live: who needs
-    /// him, who is running, who is idle. Finished work is not news.
-    var alsoText: String? {
-        let s = strays
-        var parts: [String] = []
-        let attention = s.filter { Self.isAttention($0.phase) }.count
-        let w = s.filter { $0.phase == .working }.count, i = s.filter { $0.phase == .idle }.count
-        if attention > 0 { parts.append("\(attention) need\(attention == 1 ? "s" : "") you") }
-        if w > 0 { parts.append("\(w) running") }
-        if i > 0 { parts.append("\(i) idle") }
-        return parts.isEmpty ? nil : "Also · " + parts.joined(separator: " · ")
+    /// Most pressing first, as the line's pile stacks them: needing him or
+    /// failed, then running, then idle; ties keep creation order.
+    static func pressing(_ hs: [Helper]) -> [Helper] {
+        func rank(_ p: Phase) -> Int { switch p { case .needsYou, .failed: 0; case .working: 1; case .idle: 2; default: 3 } }
+        return hs.enumerated().sorted { (rank($0.element.phase), $0.offset) < (rank($1.element.phase), $1.offset) }.map(\.element)
     }
+    /// Helpers the plan does not name, live ones only (finished work is not
+    /// news): the card's "Also" rows, so every helper is a click away.
+    var also: [Helper] { hasPlan ? Self.pressing(strays.filter { $0.phase != .done }) : [] }
 
     static func age(_ seconds: TimeInterval?) -> String? {
         guard let s = seconds, s >= 60 else { return nil }
@@ -432,6 +429,8 @@ final class PlanListView: NSView {
     private(set) var glance: PlanGlance
     private(set) var zoom: AgentPageZoom
     private(set) var orbs: [PlanOrbView?] = []
+    /// The "Also" rows' orbs, one per shown unlinked helper.
+    private(set) var alsoOrbs: [PlanOrbView] = []
     let rail = ComposerReplyOptionRailView(frame: .zero)
     var onReveal: ((AgentID) -> Void)?
     var onChoose: ((String) -> Void)?
@@ -458,7 +457,7 @@ final class PlanListView: NSView {
     func apply(_ g: PlanGlance) {
         let oldOptions = glance.options, oldDecision = glance.decision
         glance = g
-        if let r = hoveredRow, r >= g.steps.count || g.helperID(of: g.steps[r]) == nil { hoveredRow = nil }
+        hovered = nil
         var next: [PlanOrbView?] = []
         for (i, s) in g.steps.enumerated() {
             let kind = PlanOrbs.kind(s, in: g)
@@ -476,13 +475,24 @@ final class PlanListView: NSView {
         }
         for (i, o) in orbs.enumerated() where o != nil && (i >= next.count || next[i] !== o) { o?.removeFromSuperview() }
         orbs = next
+        var nextAlso: [PlanOrbView] = []
+        for h in alsoShown {
+            let kind = PlanOrbView.Kind.agent(h.id, working: true)
+            if let o = alsoOrbs.first(where: { $0.kind == kind }) { o.phase = h.phase; nextAlso.append(o); continue }
+            let o = PlanOrbView(kind: kind, side: PlanMetrics.orbSide(zoom), phase: h.phase)
+            addSubview(o)
+            if window != nil { o.show(now: Date()) }
+            nextAlso.append(o)
+        }
+        for o in alsoOrbs where !nextAlso.contains(where: { $0 === o }) { o.removeFromSuperview() }
+        alsoOrbs = nextAlso
         if rail.qaOptions.isEmpty || oldOptions != g.options || oldDecision != g.decision {
             rail.setOptions(g.decision == nil ? [] : g.options.map { AgentReplyOption(label: $0) })
         }
         rail.isHidden = g.decision == nil || g.options.isEmpty
-        setAccessibilityHelp(g.steps.enumerated().map { i, s in
+        setAccessibilityHelp((g.steps.enumerated().map { i, s in
             ["\(i + 1). \(s.title)", g.ownerWord(s), PlanGlance.word(s.phase, ago: g.ago(of: s))].compactMap { $0 }.joined(separator: ", ")
-        }.joined(separator: "; "))
+        } + g.also.map { "Also: \($0.name), \(PlanOrbHover.stateText($0))" }).joined(separator: "; "))
         needsLayout = true
         needsDisplay = true
         window?.invalidateCursorRects(for: self)
@@ -520,8 +530,27 @@ final class PlanListView: NSView {
     private var stateWidth: CGFloat {
         let meta = PlanMetrics.meta(zoom)
         return (glance.steps.compactMap { PlanGlance.word($0.phase, ago: glance.ago(of: $0)) }
+            + alsoShown.map(PlanOrbHover.stateText)
             + ["Needs you"]).map { PlanInk.pillWidth($0, font: meta, zoom: zoom) }.max() ?? 0
     }
+
+    // The "Also" section: a heading, then one row per unlinked helper with the
+    // step rows' metrics, capped at six; the rest fold into an "N more" row
+    // that opens the lead, whose sidebar entry lists every helper.
+    static let alsoCap = 6
+    private var alsoShown: [PlanGlance.Helper] {
+        let a = glance.also
+        return a.count > Self.alsoCap ? Array(a.prefix(Self.alsoCap - 1)) : a
+    }
+    private var alsoMore: Int { glance.also.count - alsoShown.count }
+    private var alsoHeadHeight: CGFloat { glance.also.isEmpty ? 0 : PlanMetrics.s(Space.xl, zoom) }
+    private var alsoTop: CGFloat { rowsTop + CGFloat(glance.steps.count) * rowHeight }
+    /// The `j`th "Also" row; `alsoShown.count` is the "N more" row.
+    func alsoRowRect(_ j: Int) -> NSRect {
+        NSRect(x: 0, y: alsoTop + alsoHeadHeight + CGFloat(j) * rowHeight, width: bounds.width, height: rowHeight)
+    }
+    var qaAlsoNames: [String] { alsoShown.map(\.name) }
+    var qaAlsoMore: Int { alsoMore }
     /// The owner column's right edge, for the steadiness witness.
     var ownerColumnRight: CGFloat { bounds.width - pad - stateWidth - PlanMetrics.s(Space.l, zoom) }
 
@@ -529,13 +558,13 @@ final class PlanListView: NSView {
     /// natural width, between a floor and `maxWidth`.
     func preferredSize(maxWidth: CGFloat) -> NSSize {
         let meta = PlanMetrics.meta(zoom)
-        let titles = glance.steps.map { PlanInk.width($0.title, PlanMetrics.title(zoom)) }.max() ?? 0
+        let titles = (glance.steps.map(\.title) + alsoShown.map(\.name)).map { PlanInk.width($0, PlanMetrics.title(zoom)) }.max() ?? 0
         let gap = PlanMetrics.s(Space.l, zoom)
         var w = titleX + titles + gap + ownerWidth + gap + stateWidth + pad
         if let d = glance.decision { w = max(w, questionX + PlanInk.width(d, meta) + pad) }
         w = min(max(w, PlanMetrics.s(360, zoom)), maxWidth)
         var h = rowsTop + CGFloat(glance.steps.count) * rowHeight
-        if glance.alsoText != nil { h += rowHeight }
+        h += alsoHeadHeight + CGFloat(alsoShown.count + (alsoMore > 0 ? 1 : 0)) * rowHeight
         return NSSize(width: ceil(w), height: ceil(h + PlanMetrics.s(Space.m, zoom)))
     }
 
@@ -553,6 +582,10 @@ final class PlanListView: NSView {
             let r = rowRect(i)
             o?.frame = NSRect(x: orbX, y: r.midY - side / 2, width: side, height: side)
         }
+        for (j, o) in alsoOrbs.enumerated() {
+            let r = alsoRowRect(j)
+            o.frame = NSRect(x: orbX, y: r.midY - side / 2, width: side, height: side)
+        }
         let band = bandRect, m = PlanMetrics.s(Space.m, zoom)
         // The chips start where the question's text starts.
         rail.frame = NSRect(x: questionX, y: band.minY + m + decisionLineHeight,
@@ -561,25 +594,30 @@ final class PlanListView: NSView {
 
     override func resetCursorRects() {
         for (i, s) in glance.steps.enumerated() where glance.helperID(of: s) != nil { addCursorRect(rowRect(i), cursor: .pointingHand) }
+        for j in 0..<(alsoShown.count + (alsoMore > 0 ? 1 : 0)) { addCursorRect(alsoRowRect(j), cursor: .pointingHand) }
     }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    /// The helper row under the pointer: a whole row reveals its helper, so the
+    /// A row that goes somewhere: a helper's step, an "Also" helper, or the
+    /// "N more" row, which opens the lead.
+    private struct Target: Equatable { var rect: NSRect; var id: AgentID }
+    /// The row under the pointer: a whole row reveals its helper, so the
     /// whole row takes the choice list's row hover.
-    private(set) var hoveredRow: Int? { didSet { if hoveredRow != oldValue { needsDisplay = true } } }
-    private func helperRow(at p: NSPoint) -> Int? {
-        glance.steps.indices.first { rowRect($0).contains(p) && glance.helperID(of: glance.steps[$0]) != nil }
+    private var hovered: Target? { didSet { if hovered != oldValue { needsDisplay = true } } }
+    private func target(at p: NSPoint) -> Target? {
+        for (i, s) in glance.steps.enumerated() where rowRect(i).contains(p) {
+            return glance.helperID(of: s).map { Target(rect: rowRect(i), id: $0) }
+        }
+        for (j, h) in alsoShown.enumerated() where alsoRowRect(j).contains(p) { return Target(rect: alsoRowRect(j), id: h.id) }
+        if alsoMore > 0, alsoRowRect(alsoShown.count).contains(p) { return Target(rect: alsoRowRect(alsoShown.count), id: glance.leadID) }
+        return nil
     }
-    override func mouseEntered(with event: NSEvent) { hoveredRow = helperRow(at: convert(event.locationInWindow, from: nil)) }
-    override func mouseMoved(with event: NSEvent) { hoveredRow = helperRow(at: convert(event.locationInWindow, from: nil)) }
-    override func mouseExited(with event: NSEvent) { hoveredRow = nil }
+    override func mouseEntered(with event: NSEvent) { hovered = target(at: convert(event.locationInWindow, from: nil)) }
+    override func mouseMoved(with event: NSEvent) { hovered = target(at: convert(event.locationInWindow, from: nil)) }
+    override func mouseExited(with event: NSEvent) { hovered = nil }
 
     override func mouseDown(with event: NSEvent) {
-        let p = convert(event.locationInWindow, from: nil)
-        for (i, s) in glance.steps.enumerated() where rowRect(i).contains(p) {
-            if let id = glance.helperID(of: s) { onReveal?(id) }
-            return
-        }
+        if let t = target(at: convert(event.locationInWindow, from: nil)) { onReveal?(t.id) }
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -598,10 +636,10 @@ final class PlanListView: NSView {
             PlanInk.pill("Needs you", .needsYou, x: pad, midY: mid, font: meta, theme: theme, zoom: zoom)
             PlanInk.text(d, x: questionX, midY: mid, maxX: band.maxX - PlanMetrics.s(Space.m, zoom), font: meta, color: PlanInk.primary(theme))
         }
-        if let r = hoveredRow, r < glance.steps.count {
+        if let r = hovered?.rect {
             AgentSurfaceRole.rowHover.color.nsColor(for: theme).setFill()
             let corner = CGFloat(zoom.scaled(CornerStyle.current.radius(CornerRole.card.base)))
-            NSBezierPath(roundedRect: rowRect(r).insetBy(dx: PlanMetrics.s(Space.s, zoom), dy: 0), xRadius: corner, yRadius: corner).fill()
+            NSBezierPath(roundedRect: r.insetBy(dx: PlanMetrics.s(Space.s, zoom), dy: 0), xRadius: corner, yRadius: corner).fill()
         }
         let gap = PlanMetrics.s(Space.l, zoom)
         let stateLeft = bounds.width - pad - stateWidth
@@ -622,9 +660,26 @@ final class PlanListView: NSView {
             PlanInk.text(s.title, x: titleX, midY: mid, maxX: titleMax, font: PlanMetrics.title(zoom),
                          color: s.phase == .done ? PlanInk.secondary(theme) : PlanInk.primary(theme))
         }
-        if let also = glance.alsoText {
-            let mid = rowRect(glance.steps.count).midY
-            PlanInk.text(also, x: titleX, midY: mid, maxX: bounds.width - pad, font: meta, color: PlanInk.secondary(theme))
+        guard !glance.also.isEmpty else { return }
+        PlanInk.text("Also", x: titleX, midY: alsoTop + alsoHeadHeight / 2, maxX: bounds.width - pad, font: meta, color: PlanInk.secondary(theme))
+        for (j, h) in alsoShown.enumerated() {
+            let mid = alsoRowRect(j).midY
+            // The state as the line's orb hover says it: the sidebar's glyph and
+            // the plan's state ink, right-aligned in the state column.
+            let ink = PlanOrbHover.stateInk(h.phase, theme: theme)
+            let word = PlanOrbHover.stateText(h)
+            var x = bounds.width - pad - PlanInk.width(word, meta)
+            PlanInk.text(word, x: x, midY: mid, maxX: bounds.width - pad, font: meta, color: ink)
+            if let glyph = PlanOrbHover.glyph(h.phase, pointSize: meta.pointSize, ink: ink) {
+                x -= glyph.size.width + PlanMetrics.s(Space.xs, zoom)
+                glyph.draw(in: NSRect(x: x, y: (mid - glyph.size.height / 2).rounded(), width: glyph.size.width, height: glyph.size.height),
+                           from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+            }
+            PlanInk.text(h.name, x: titleX, midY: mid, maxX: stateLeft - gap, font: PlanMetrics.title(zoom), color: PlanInk.primary(theme))
+        }
+        if alsoMore > 0 {
+            PlanInk.text("\(alsoMore) more", x: titleX, midY: alsoRowRect(alsoShown.count).midY, maxX: bounds.width - pad,
+                         font: meta, color: PlanInk.secondary(theme))
         }
     }
 }

@@ -134,7 +134,7 @@ extension ManagedLeadPlanChecks {
             + g.strays.filter { PlanGlance.isAttention($0.phase) }.count
         try expect(g.steps.map(\.phase) == [.working, .failed, .todo, .todo, .todo], "step states: \(g.steps.map(\.phase))")
         try expect(marked == 2 && line.sentence.contains("2 need you"), "the line's count \(line.sentence) is not the 2 marks the popover shows")
-        try expect(g.alsoText == "Also · 2 idle", "the Also line says more than it should: \(g.alsoText ?? "nil")")
+        try expect(g.also.map(\.phase) == [.idle, .idle], "the Also rows are not the two idle helpers: \(g.also.map { "\($0.name) \($0.phase)" })")
 
         // 3. A click opens it, with the shared entrance.
         var clicks = 100
@@ -202,7 +202,7 @@ extension ManagedLeadPlanChecks {
         supervisor.qaDeliver(.turnStarted(threadId: AgentSupervisor.threadId(for: helpers.strays[0]), turnId: "t2"), to: helpers.strays[0], now: Date())
         supervisor.qaDeliver(.sessionStateChanged(.running), to: helpers.strays[0], now: Date())
         try await AgentPresenceChecks.eventually("the open plan did not take the change") {
-            line.list?.glance.alsoText == "Also · 1 running · 1 idle"
+            line.list?.glance.also.map(\.phase) == [.working, .idle]
         }
         try expect(line.isOpen, "a helper's change closed the plan")
 
@@ -325,6 +325,41 @@ extension ManagedLeadPlanChecks {
         try await AgentPresenceChecks.eventually("the pile did not shrink to two orbs: \(line.qaPile.count)") { line.qaPile.count == 2 }
         try cutPass("pile2")
         print("Lead plan orb cut: " + cuts.joined(separator: "; "))
+
+        // 11. Every helper is reachable from the card. A plan whose steps are
+        // all the lead's own leaves its live helpers unlinked: they are the
+        // card's "Also" rows, most pressing first, and a click on one reveals
+        // that helper and closes the card.
+        guard supervisor.declareStatus(AgentDeclaredStatus(now: "Researching", plan: [
+            AgentPlanStep(title: "Search for the next event", owner: "lead"),
+            AgentPlanStep(title: "Write the preview", owner: "lead")], declaredAt: Date(), planDeclaredAt: Date()), for: lead) else {
+            throw WorkspaceAgentReportChecks.Failure(description: "lead-plan-popover: the lead-owned plan was refused")
+        }
+        try await AgentPresenceChecks.eventually("the plan did not become the lead's own") {
+            line.glance.map { $0.steps.count == 2 && $0.steps.allSatisfy { $0.owner == .lead } } == true
+        }
+        func pressing(_ p: PlanGlance.Phase) -> Int { switch p { case .needsYou, .failed: 0; case .working: 1; case .idle: 2; default: 3 } }
+        let unlinked = (line.glance?.helpers ?? []).enumerated().filter { $0.element.phase != .done }
+            .sorted { (pressing($0.element.phase), $0.offset) < (pressing($1.element.phase), $1.offset) }.map(\.element)
+        try expect(unlinked.count == 2, "the lead-owned plan should leave two live helpers, not \(unlinked.map(\.name))")
+        // Back to his zoom and size, settled, so the card's anchor holds still.
+        _ = tile.setPageZoom(.default)
+        tile.frame = NSRect(x: 0, y: 0, width: 960, height: 800)
+        tile.wakeChrome(); tile.layoutSubtreeIfNeeded()
+        try? await Task.sleep(for: .milliseconds(300))
+        tile.layoutSubtreeIfNeeded()
+        await clickLine()
+        guard line.isOpen, let card = line.list, let cardPanel = line.popover.panel else {
+            throw WorkspaceAgentReportChecks.Failure(description: "lead-plan-popover: the lead-owned plan did not open: open \(line.isOpen), hidden \(line.isHidden), window \(line.window === window), key \(window.isKeyWindow), frame \(line.frame), dismissal \(line.popover.qaLastSelfDismissal ?? "-"), sentence \(line.sentence)")
+        }
+        card.layoutSubtreeIfNeeded()
+        let second = card.alsoRowRect(1)
+        revealed = []
+        clicks += 1
+        click(cardPanel, at: card.convert(NSPoint(x: second.midX, y: second.midY), to: nil), number: clicks)
+        try expect(revealed == [unlinked[1].id] && !line.isOpen,
+                   "clicking the Also row of \(unlinked[1].name) did not reveal it and close the card: revealed \(revealed), open \(line.isOpen)")
+        print("Lead plan also: with every step the lead's own, \(unlinked.map { "\($0.name) (\($0.phase))" }.joined(separator: ", ")) are the card's Also rows; clicking the second reveals \(unlinked[1].name) and closes the card")
 
         print("Lead plan popover passed: in the status row, \(line.sentence); opens above the line inside the tile with the shared entrance; a second click closes it with the shared exit and does not reopen; Escape closes; stays open through a helper's change; an orb or row in the plan reveals its helper, the line itself never does; a chip answers into the composer; chips start at the question; the count follows the decision; each orb in the pile cuts an even gap out of the one behind it")
     }
