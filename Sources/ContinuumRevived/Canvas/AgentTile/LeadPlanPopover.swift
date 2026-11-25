@@ -506,15 +506,23 @@ final class PlanOrbTipView: NSView {
     /// shrink and grow together, and text keeps its 100% layout.
     private(set) var scale: CGFloat = 1
     override var isFlipped: Bool { true }
-    private var font: NSFont { .token(.caption, zoom: zoom) }
-    private var padH: CGFloat { PlanMetrics.s(Space.m, zoom) }
-    private var padV: CGFloat { PlanMetrics.s(Space.s, zoom) }
+    /// The name in the plan line's own type, so the card reads at the size of
+    /// the words beside it; the state one step down the ladder, as a sidebar
+    /// row's secondary line sits under its title.
+    private var nameFont: NSFont { PlanMetrics.meta(zoom) }
+    private var stateFont: NSFont { .token(.caption, zoom: zoom) }
+    /// Across, a choice row's text inset (`ChoiceRowView.textInset` with no
+    /// leading slot, 10 pt); down, the old inset grown by the type's own step
+    /// (9 -> 11 pt), on the 2 pt grid.
+    private var padH: CGFloat { PlanMetrics.s(10, zoom) }
+    private var padV: CGFloat { PlanMetrics.s(Space.s + Space.xs, zoom) }
     private var lineGap: CGFloat { PlanMetrics.s(Space.xs, zoom) }
-    private var maxText: CGFloat { PlanMetrics.s(220, zoom) }
-    private var lineHeight: CGFloat { ceil(font.ascender - font.descender) }
+    private var maxText: CGFloat { PlanMetrics.s(260, zoom) }
+    private func lineHeight(_ f: NSFont) -> CGFloat { ceil(f.ascender - f.descender) }
     private var radius: CGFloat { CGFloat(zoom.scaled(CornerStyle.current.radius(CornerRole.popover.base))) }
-    /// The caption as it lands on screen.
-    var qaFontSize: CGFloat { font.pointSize * scale }
+    /// The two lines' type as it lands on screen.
+    var qaNameFontSize: CGFloat { nameFont.pointSize * scale }
+    var qaStateFontSize: CGFloat { stateFont.pointSize * scale }
 
     /// On screen, the card is its 100% size times the canvas scale.
     var scaledSize: NSSize {
@@ -541,13 +549,14 @@ final class PlanOrbTipView: NSView {
     var qaLines: [String] { helper.map { [$0.name, PlanOrbHover.stateText($0)] } ?? [] }
     var qaSymbol: String? { helper.flatMap { PlanOrbHover.symbol($0.phase) } }
 
-    private var glyphSide: CGFloat { font.pointSize }
+    private var glyphSide: CGFloat { stateFont.pointSize }
 
     override var intrinsicContentSize: NSSize {
         guard let h = helper else { return .zero }
-        let state = (PlanOrbHover.symbol(h.phase) == nil ? 0 : glyphSide + lineGap) + PlanInk.width(PlanOrbHover.stateText(h), font)
-        let w = min(maxText, max(PlanInk.width(h.name, font), state))
-        return NSSize(width: ceil(w + 2 * padH), height: ceil(2 * lineHeight + lineGap + 2 * padV))
+        let state = (PlanOrbHover.symbol(h.phase) == nil ? 0 : glyphSide + lineGap) + PlanInk.width(PlanOrbHover.stateText(h), stateFont)
+        let w = min(maxText, max(PlanInk.width(h.name, nameFont), state))
+        return NSSize(width: ceil(w + 2 * padH),
+                      height: ceil(lineHeight(nameFont) + lineGap + lineHeight(stateFont) + 2 * padV))
     }
 
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); needsDisplay = true }
@@ -563,8 +572,9 @@ final class PlanOrbTipView: NSView {
         shape.lineWidth = edge
         shape.stroke()
         let maxX = bounds.maxX - padH
-        let first = padV + lineHeight / 2, second = first + lineHeight + lineGap
-        PlanInk.text(h.name, x: padH, midY: first, maxX: maxX, font: font, color: PlanInk.primary(theme))
+        let first = padV + lineHeight(nameFont) / 2
+        let second = padV + lineHeight(nameFont) + lineGap + lineHeight(stateFont) / 2
+        PlanInk.text(h.name, x: padH, midY: first, maxX: maxX, font: nameFont, color: PlanInk.primary(theme))
         let ink = PlanOrbHover.stateInk(h.phase, theme: theme)
         var x = padH
         if let glyph = PlanOrbHover.glyph(h.phase, pointSize: glyphSide, ink: ink) {
@@ -572,7 +582,7 @@ final class PlanOrbTipView: NSView {
                        from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
             x += glyph.size.width + lineGap
         }
-        PlanInk.text(PlanOrbHover.stateText(h), x: x, midY: second, maxX: maxX, font: font, color: ink)
+        PlanInk.text(PlanOrbHover.stateText(h), x: x, midY: second, maxX: maxX, font: stateFont, color: ink)
     }
 }
 

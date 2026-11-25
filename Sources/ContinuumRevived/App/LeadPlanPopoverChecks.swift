@@ -399,7 +399,11 @@ extension ManagedLeadPlanChecks {
             try expect(abs(surface.midX - orbOnScreen.midX) <= 1 && surface.minY >= orbOnScreen.maxY
                        && surface.minY - orbOnScreen.maxY <= PlanMetrics.s(Space.m, line.zoom) * CGFloat(z),
                        "at zoom \(z) the card \(surface) is not centred just above its orb \(orbOnScreen)")
-            measured.append((z, card.qaFontSize, surface.size))
+            // The name in the line's own type at every zoom; the state a step down.
+            let lineText = PlanMetrics.meta(line.zoom).pointSize * line.canvasScale
+            try expect(abs(card.qaNameFontSize - lineText) < 0.01 && card.qaStateFontSize < card.qaNameFontSize,
+                       "at zoom \(z) the card's name is \(card.qaNameFontSize) pt beside the line's \(lineText) pt (state \(card.qaStateFontSize) pt)")
+            measured.append((z, card.qaNameFontSize, surface.size))
             pointer(at: NSPoint(x: line.bounds.maxX - 4, y: line.bounds.midY))
             try expect(line.qaTipPanel?.isVisible != true, "the card stayed after the pointer left the orb at zoom \(z)")
         }
