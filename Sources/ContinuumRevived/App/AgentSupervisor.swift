@@ -10299,12 +10299,25 @@ final class AgentSupervisor {
 
     private func usagePauseVerdict(_ id: AgentID, _ pause: AgentUsagePause, now: Date) -> UsagePauseVerdict {
         guard usagePauseDue(id, pause, now: now) else { return .waitsForUsage }
-        // A move to another account with room is not a reset of the spent
-        // one, and a waiting message is the lead's ask: neither is held.
-        if usageHoldingLead(of: id) != nil, !usagePauseLeftBehind(id, pause, now: now), !usageResumeAsked(id) {
-            return .waitsForLead
-        }
-        return .resumes
+        return usagePauseWaitsForLead(id, pause, now: now) ? .waitsForLead : .resumes
+    }
+
+    /// A reset alone will not resume this pause: a helper with a live lead,
+    /// not moved to an account with room, that nobody has asked for yet (a
+    /// move is not a reset of the spent account, and a waiting message is the
+    /// lead's ask). The verdict, the lead's notice and the sidebar all read it.
+    private func usagePauseWaitsForLead(_ id: AgentID, _ pause: AgentUsagePause, now: Date) -> Bool {
+        pause.resumesAutomatically && usageHoldingLead(of: id) != nil
+            && !usagePauseLeftBehind(id, pause, now: now) && !usageResumeAsked(id)
+    }
+
+    /// The sidebar's usage facts for its rows, from the same pauses and the
+    /// same rule as the resume tick: "Paused · usage" only for an agent's own
+    /// pause, and "Array resumes it at the reset" only where that is true.
+    func stampSidebarUsage(_ rows: [AgentInboxRow]) -> [AgentInboxRow] {
+        let now = usagePauseNow()
+        let waiting = Set(usagePauses.filter { usagePauseWaitsForLead($0.key, $0.value, now: now) }.keys.map(\.rawValue))
+        return SidebarUsageLive.stamp(rows, pausedAgents: Set(usagePauses.keys.map(\.rawValue)), waitingForLead: waiting)
     }
 
     /// Someone asked this agent for work: a message (not a note) waits in its queue.
@@ -10404,7 +10417,7 @@ final class AgentSupervisor {
         // A helper with a live lead is never resumed by a reset alone
         // (`usagePauseVerdict`): promising "Array resumes it at 3:50 PM" and
         // then leaving it paused at 3:50 is the lie this replaces.
-        let leadHeld = pause.resumesAutomatically && usageHoldingLead(of: id) != nil
+        let leadHeld = usagePauseWaitsForLead(id, pause, now: now)
         let base: String
         if leadHeld {
             let until = pause.resetsAt.map { "until \(AgentUsagePause.clock($0, now: now))" } ?? "until usage frees up"

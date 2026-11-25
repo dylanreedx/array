@@ -401,6 +401,17 @@ steers, helper notes and helper results stay queued as before. Before this,
 two messages held at 11:07 each ran as a turn of their own after a retry had
 finished the brief. Witness: `--usage-hold-truth-check` (case 4).
 
+The sidebar reads the same rule. The host stamps rows through
+`AgentSupervisor.stampSidebarUsage`, which marks a helper waiting for its lead
+(`usageWaitsForLead`); the usage incident then reads `its lead resumes it by
+messaging it` (or `Array resumes 2 at the reset; 1 wait for their lead` when
+mixed) and says `Array resumes it at the reset` only where the reset will. The
+queue rail's Resume calls `resumeQueueByPerson`: a usage-paused agent with room
+resumes on its session (continuation with any held messages as a note), even
+with automatic resume off. Witnesses: `--usage-hold-truth-check` (cases 2, 3
+and 5, the rail pressed on a mounted tile) and the AgentUI checks' sidebar
+ledger arm.
+
 Progress text and output emitted after a result was delivered (the +16 s case,
 or a report filed after the turn) become durable queue NOTES (`helperNote`), one
 per helper, lead and kind, replaced while they wait. A note never starts a turn:

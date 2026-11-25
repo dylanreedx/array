@@ -286,6 +286,11 @@ func runSidebarLedgerCoreChecks() {
         expect(one?.actionTitle == SidebarFailureCause.usageResumeTitle && one?.actionTitle == "Open"
                && one?.title == "Waiting for Claude usage" && one?.detail == "1 agent in 1 family · Array resumes it at the reset",
                "one account: the usage action is Open — got \(one?.actionTitle ?? "nil") / \(one?.detail ?? "nil")")
+        var waiting = live
+        waiting.usageWaitsForLead = true
+        let held = SidebarIncidents.build(rows: [waiting]).first { $0.kind == .cause(.usageLimit) }
+        expect(held?.detail == "1 agent in 1 family · its lead resumes it by messaging it",
+               "a helper waiting for its lead is never promised a resume at the reset — got \(held?.detail ?? "nil")")
         live.usageCanSwitchAccount = true
         let two = SidebarIncidents.build(rows: [live]).first { $0.kind == .cause(.usageLimit) }
         expect(two?.actionTitle == "Open", "a second signed-in account: still Open, never Switch in the sidebar")

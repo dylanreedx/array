@@ -1,4 +1,5 @@
 import AppKit
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
 
@@ -19,7 +20,10 @@ import Foundation
 /// 3. no account has room: the message is held, and the hold says when the
 ///    helper resumes;
 /// 4. the same sender sends newer instructions, then a retryOf resumes it:
-///    the held messages ride the retry turn as one note and never replay.
+///    the held messages ride the retry turn as one note and never replay;
+/// 5. the rail's Resume (automatic resume off) resumes the pause on its
+///    session, through `resumeQueueByPerson`.
+/// Cases 2 and 3 also read the sidebar's usage line through the host's stamp.
 @MainActor
 func runUsageHoldTruthChecks() async throws {
     struct Failure: Error, CustomStringConvertible { let description: String }
@@ -92,6 +96,15 @@ func runUsageHoldTruthChecks() async throws {
     let lead = supervisor.spawn(role: nil, prompt: nil, cwd: cwd, harness: .claudeCode, model: model, thinking: "low")
     let helper = supervisor.spawn(role: nil, prompt: nil, cwd: cwd, harness: .claudeCode, model: model, thinking: "low",
                                   parentAgentID: lead, displayName: "Sticky header helper")
+    /// The sidebar's usage incident for the helper, through the host's stamp.
+    func sidebarUsageDetail() -> String? {
+        var row = AgentInboxRow(id: helper.rawValue, title: "Sticky header helper", projectName: "Array", state: .ready,
+                                createdAt: now.addingTimeInterval(-600), parentId: lead.rawValue, harness: "claude",
+                                terminalEvent: AgentTerminalEvent(sequence: 1, turnID: nil, outcome: .failed, endedAt: now))
+        row.failureDetail = "You've hit your 5-hour limit · resets 1pm"
+        let stamped = supervisor.stampSidebarUsage([row])
+        return SidebarIncidents.build(rows: stamped).first { $0.kind == .cause(.usageLimit) }?.detail
+    }
     func state() -> String {
         "pause=\(supervisor.usagePause(for: helper) != nil) running=\(supervisor.isRunning(helper)) override=\(String(describing: supervisor.accountOverrides[helper])) queue=\(supervisor.queuedMessages(for: helper).count) outcome=\(String(describing: supervisor.records[helper]?.latestTerminalEvent?.outcome))"
     }
@@ -146,6 +159,9 @@ func runUsageHoldTruthChecks() async throws {
     try await waitFor("the pause notice must tell the lead its message resumes the helper") {
         leadHeard(lead, "Array does not resume a lead's helper by itself: message it")
     }
+    // The sidebar reads the same rule: no "Array resumes it at the reset".
+    try require(sidebarUsageDetail() == "1 agent in 1 family · its lead resumes it by messaging it",
+                "the sidebar must say the lead resumes it, got \(sidebarUsageDetail() ?? "nil")")
     let asked = supervisor.deliverAgentMessage("GO-AHEAD-FROM-LEAD", from: lead, to: helper, hops: 1)
     try require(asked.delivery != .held && asked.delivery != .refused,
                 "the lead's message is the resume the note promised, got \(asked.delivery) \(supervisor.agentMessageHoldReason(for: helper, sender: lead) ?? "")")
@@ -176,6 +192,9 @@ func runUsageHoldTruthChecks() async throws {
     let clock = AgentUsagePause.clock(spentReset, now: now)
     try require(why.contains("usage limit") && why.contains("resumes it at \(clock)"),
                 "the hold must say when the helper resumes (\(clock)), got: \(why)")
+    // A message now waits: the reset resumes it, and the sidebar may say so.
+    try require(sidebarUsageDetail() == "1 agent in 1 family · Array resumes it at the reset",
+                "with a message waiting the reset resumes it, got \(sidebarUsageDetail() ?? "nil")")
     try await Task.sleep(for: .milliseconds(300))
     try require(!received("WAIT-FOR-RESET") && supervisor.usageResumeLogForQA.count == atSpent,
                 "a held message must not run into a spent account; \(state())")
@@ -209,5 +228,54 @@ func runUsageHoldTruthChecks() async throws {
                     "\(needle) rides the retry turn as a note, once, got \(carried.count) frame(s): \(carried.map { String($0.prefix(600)) })")
     }
     print("usage-hold-truth-check: 4 a retry carries held messages, no replay: PASS")
+
+    // 5. The rail's Resume is a person's ask. Automatic resume is off, a
+    //    message is held, usage returns: only the button resumes it, on its
+    //    session, with the held message as a note.
+    now = Date()
+    try exhaust([work, personal])
+    try require(supervisor.send("PLAIN fifth task", to: helper), "helper send refused")
+    try await waitFor("the helper pauses again; \(state())") { !supervisor.isRunning(helper) && supervisor.usagePause(for: helper) != nil }
+    supervisor.setUsageAutoResume(false, for: helper)
+    try require(supervisor.deliverAgentMessage("AFTER-AUTO-OFF", from: lead, to: helper, hops: 1).delivery == .held,
+                "with no room the message is held")
+    guard let offReset = supervisor.usagePause(for: helper)?.resetsAt else { throw Failure(description: "no reset on the fifth pause") }
+    try exhaust([])
+    now = offReset.addingTimeInterval(5)
+    let atRail = supervisor.usageResumeLogForQA.count
+    supervisor.runUsageResumeTick()
+    try await Task.sleep(for: .milliseconds(300))
+    try require(supervisor.usagePause(for: helper) != nil && frames("AFTER-AUTO-OFF").isEmpty,
+                "automatic resume is off: nothing resumes it by itself; \(state())")
+    let tile = ManagedAgentTileNSView(tile: Tile(
+        id: UUID(), kind: .managedAgent, title: "usage-hold-truth-check",
+        frame: TileFrame(x: 0, y: 0, width: 560, height: 520),
+        zPosition: .fromLegacyRank(1), runtimeRef: nil, metadata: TileMetadata(launchProfileId: "managed")))
+    tile.frame = NSRect(x: 0, y: 0, width: 560, height: 520)
+    tile.bindV2ComposerState(
+        draftStore: AgentComposerDraftStore(applicationSupportDirectory: root.appendingPathComponent("drafts", isDirectory: true),
+                                            debounceInterval: 60),
+        promptHistory: AgentPromptHistory())
+    tile.attach(agentID: helper, supervisor: supervisor)
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 520),
+                          styleMask: [.borderless], backing: .buffered, defer: false)
+    window.contentView = tile
+    window.orderFrontOffscreenForChecks()
+    defer { window.orderOut(nil) }
+    guard let rail = tile.qaComposerForChecks?.qaQueueRail else { throw Failure(description: "the tile has no composer") }
+    try await waitFor("the rail offers Resume for the held queue; \(state())") {
+        window.layoutIfNeeded(); tile.layoutSubtreeIfNeeded()
+        return rail.qaResumeIsOffered
+    }
+    try require(rail.qaPressResume(), "the rail's Resume button could not be pressed")
+    try await waitFor("Resume resumes the usage pause on its session; \(state())") {
+        supervisor.usageResumeLogForQA.dropFirst(atRail).contains(helper) && supervisor.usagePause(for: helper) == nil
+    }
+    try await waitFor("it settles; \(state())") { !supervisor.isRunning(helper) && supervisor.queuedMessages(for: helper).isEmpty }
+    try await Task.sleep(for: .milliseconds(500))
+    let carried = frames("AFTER-AUTO-OFF")
+    try require(carried.count == 1 && carried[0].contains("held while you were paused"),
+                "the held message rides the resumed turn as a note, once, got \(carried.count) frame(s)")
+    print("usage-hold-truth-check: 5 the rail's Resume resumes the pause: PASS")
     print("usage-hold-truth-check: PASS")
 }

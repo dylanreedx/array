@@ -1111,6 +1111,9 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
     /// Another signed-in account of the row's CLI exists to switch to. Never
     /// assumed: most people have one subscription per provider.
     public var usageCanSwitchAccount: Bool = false
+    /// Its usage pause will not end at the reset by itself: a helper whose lead
+    /// resumes it by messaging it. Stamped from the supervisor's rule.
+    public var usageWaitsForLead: Bool = false
     /// The last REAL turn: the latest prompt or turn start. Unlike
     /// `lastActiveAt` and the terminal stamp, a relaunch, an interrupt, Clear,
     /// archive or a read mark never moves it. History orders and dates by it.
@@ -1339,6 +1342,7 @@ public struct AgentInboxRow: Equatable, Sendable, Identifiable {
         row.isStanding = source.isStanding
         row.usageExhaustedNow = source.usageExhaustedNow
         row.usageCanSwitchAccount = source.usageCanSwitchAccount
+        row.usageWaitsForLead = source.usageWaitsForLead
         row.lastTurnAt = source.lastTurnAt
         return row
     }

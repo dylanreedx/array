@@ -42,8 +42,9 @@ public enum SidebarFailureCause: String, CaseIterable, Equatable, Sendable {
     /// cannot continue until you act.
     public var isBlocking: Bool {
         switch self {
-        // A usage pause needs nobody: Array resumes it at the reset. It is
-        // never a Needs-you item (usage-resume, step 8).
+        // A usage pause needs nobody to act now: Array resumes it at the reset,
+        // or its lead does by messaging it. It is never a Needs-you item
+        // (usage-resume, step 8).
         case .signInExpired, .couldNotStart: return true
         case .usageLimit, .providerBusy, .interruptedByRestart, .taskError: return false
         }
@@ -463,7 +464,16 @@ public enum SidebarIncidents {
             switch group.cause {
             case .usageLimit:
                 title = "Waiting for \(provider) usage"
-                detail = "\(agents) in \(familyWord) · Array resumes \(count == 1 ? "it" : "them") at the reset"
+                // Only what is true: a helper waiting for its lead is not
+                // resumed at the reset (`AgentSupervisor.stampSidebarUsage`).
+                let waiting = group.rows.filter(\.usageWaitsForLead).count
+                if waiting == 0 {
+                    detail = "\(agents) in \(familyWord) · Array resumes \(count == 1 ? "it" : "them") at the reset"
+                } else if waiting == count {
+                    detail = "\(agents) in \(familyWord) · " + (count == 1 ? "its lead resumes it by messaging it" : "their leads resume them by messaging them")
+                } else {
+                    detail = "\(agents) in \(familyWord) · Array resumes \(count - waiting) at the reset; \(waiting) wait for their lead"
+                }
             case .signInExpired:
                 title = "\(provider) sign-in expired"
                 detail = count == 1 ? where1 : "\(agents) in \(familyWord)"
@@ -753,10 +763,12 @@ public enum SidebarUsageLive {
     /// usage pause (set at the stop, cleared at the reset, by a later success
     /// on the same account, or by a reading under 100%). Neither another
     /// account's reading nor an old failure's words make it one.
-    public static func stamp(_ rows: [AgentInboxRow], pausedAgents: Set<UUID>) -> [AgentInboxRow] {
+    public static func stamp(_ rows: [AgentInboxRow], pausedAgents: Set<UUID>,
+                             waitingForLead: Set<UUID> = []) -> [AgentInboxRow] {
         rows.map { row in
             var stamped = row
             stamped.usageExhaustedNow = pausedAgents.contains(row.id)
+            stamped.usageWaitsForLead = pausedAgents.contains(row.id) && waitingForLead.contains(row.id)
             stamped.usageCanSwitchAccount = false
             return stamped
         }

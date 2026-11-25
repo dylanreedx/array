@@ -17889,15 +17889,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
         )
         .filter { agentActivity.managedAgentIdentities.contains($0.id) }
         // Usage-resume: "Paused · usage" is the agent's OWN pause, not the
-        // account in use's live reading.
-        let paused = Set(agentSupervisor.usagePauses.keys.map(\.rawValue))
+        // account in use's live reading; who resumes it is the supervisor's rule.
         if only != nil {
-            return SidebarUsageLive.stamp(
-                unconfirmedFreeze.apply(rows: builtRows, unobserved: unobserved), pausedAgents: paused)
+            return agentSupervisor.stampSidebarUsage(
+                unconfirmedFreeze.apply(rows: builtRows, unobserved: unobserved))
         }
-        return SidebarUsageLive.stamp(withExternalSessions(
+        return agentSupervisor.stampSidebarUsage(withExternalSessions(
             unconfirmedFreeze.apply(rows: builtRows, unobserved: unobserved),
-            registry: registry, now: now), pausedAgents: paused)
+            registry: registry, now: now))
     }
 
     // Ticket: docs/38-tickets/90-agent-ux/P3.16-inbox-lists-agents-only.md
