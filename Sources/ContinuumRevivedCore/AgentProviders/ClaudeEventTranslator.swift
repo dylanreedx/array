@@ -40,6 +40,10 @@ public struct ClaudeEventTranslator {
     /// and outcome. `itemKinds` cannot say: every unknown tool is
     /// `.commandExecution` there.
     private var shellToolUseIDs = Set<String>()
+    /// A main-conversation shell call's command, directory and start, until its
+    /// result: the files it NAMES are checked then (`AgentShellMadeFiles`). Only
+    /// the made files' locations leave, on the host-local channel.
+    private var shellCalls: [String: (command: String, directory: URL?, startedAt: Date)] = [:]
     /// A claude `Write`'s file facts, by tool_use id, until its result says whether
     /// the file was created or overwritten (the call alone cannot know).
     private var writeFileChanges: [String: (fields: [(key: String, value: String)], changes: [AgentToolDetailObservation.FileChange])] = [:]
@@ -438,7 +442,12 @@ public struct ClaudeEventTranslator {
             // side channel, one level richer: whitelisted argument FIELDS
             // (query/url/pattern/basename/description, and a SHELL's command),
             // bound at construction and store-sanitized on top.
-            if !isSubagent, AgentShellObservation.isShellTool(name) { shellToolUseIDs.insert(id) }
+            if !isSubagent, AgentShellObservation.isShellTool(name) {
+                shellToolUseIDs.insert(id)
+                if let command = (block["input"] as? [String: Any])?["command"] as? String {
+                    shellCalls[id] = (command, workingDirectory, now())
+                }
+            }
             if !isSubagent, name.lowercased() == "write" {
                 let input = block["input"] as? [String: Any] ?? [:]
                 writeFileChanges[id] = (
@@ -582,6 +591,13 @@ public struct ClaudeEventTranslator {
                     outcome: isError ? .failed : .completed,
                     errorMessage: nil
                 )], for: toolUseId)
+            }
+            if !isSubagent, let call = shellCalls.removeValue(forKey: toolUseId) {
+                events += madeFileEvents(
+                    shellItemID: toolUseId, toolName: "Bash",
+                    made: AgentShellMadeFiles.detect(
+                        command: call.command, workingDirectory: call.directory,
+                        startedAt: call.startedAt, endedAt: now()))
             }
             let semantics = semanticSignalsByItemID.removeValue(forKey: toolUseId) ?? []
             if !isError {
@@ -1016,6 +1032,22 @@ public struct ClaudeEventTranslator {
         default:
             return (nil, nil)
         }
+    }
+
+    /// The files a shell call made, as their own file-change item right after the
+    /// shell's row: the turn's Changes card folds it in like a `Write`.
+    private func madeFileEvents(
+        shellItemID: String, toolName: String, made: [AgentShellMadeFiles.Made]
+    ) -> [AgentRuntimeEvent] {
+        guard !made.isEmpty else { return [] }
+        let itemID = AgentShellMadeFiles.itemID(forShellItem: shellItemID)
+        onRuntimeObservation?(.toolDetail(itemId: itemID, detail: AgentToolDetailObservation(
+            phase: .started, toolName: toolName,
+            fileChanges: made.map(\.fileChange), affectedFiles: made.map(\.url), observedAt: now())))
+        return [
+            .itemStarted(threadId: threadId, itemId: itemID, kind: .fileChange, title: toolName),
+            .itemCompleted(threadId: threadId, itemId: itemID, kind: .fileChange, status: .completed),
+        ]
     }
 
     /// Internal: `ClaudeSessionTranscriptReader` calls it on the restore, so a

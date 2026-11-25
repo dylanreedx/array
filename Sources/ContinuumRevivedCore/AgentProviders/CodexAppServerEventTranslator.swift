@@ -106,6 +106,9 @@ public struct CodexAppServerEventTranslator {
     public static let resumedMarker = "arrayResumed"
     private var recountedCompactionTokensByThread: [String: Int] = [:]
     private var workingDirectory: URL?
+    /// A running command's text, directory and start, until it completes: the
+    /// files it NAMES are checked then (`AgentShellMadeFiles`).
+    private var shellCalls: [String: (command: String, directory: URL?, startedAt: Date)] = [:]
     private let now: @Sendable () -> Date
 
     public var onRuntimeObservation: (@Sendable (AgentRuntimeObservation) -> Void)?
@@ -342,6 +345,9 @@ public struct CodexAppServerEventTranslator {
             // "Shell", never the command. The command (unwrapped) and, when it
             // is not the agent's home, the cwd ride the host-local side channel
             // only (launch polish, item J).
+            if let command = Self.rawCommand(item["command"]) {
+                shellCalls[itemId] = (command, Self.commandDirectory(item["cwd"]) ?? workingDirectory, now())
+            }
             if let onRuntimeObservation {
                 var fields: [(key: String, value: String)] = []
                 if let command = AgentShellObservation.commandField(item["command"], defaults: settingsDefaults) {
@@ -381,6 +387,9 @@ public struct CodexAppServerEventTranslator {
                     toolName: "Edit",
                     fields: changeBasenames(item).map { (key: "file", value: $0) },
                     fileChanges: fileDetails(item),
+                    affectedFiles: ([firstChangePath(item)].compactMap { $0 } + otherChangePaths(item)).compactMap {
+                        Self.resolvedTarget($0, workingDirectory: workingDirectory)
+                    },
                     observedAt: now()
                 )))
             }
@@ -542,11 +551,29 @@ public struct CodexAppServerEventTranslator {
                     reportedDuration: reported,
                     observedAt: now())))
             }
-            return [.itemCompleted(
+            var events: [AgentRuntimeEvent] = [.itemCompleted(
                 threadId: threadId,
                 itemId: itemId,
                 kind: .commandExecution,
                 status: exitCode == 0 ? .completed : .failed)]
+            if let call = shellCalls.removeValue(forKey: itemId) {
+                let made = AgentShellMadeFiles.detect(
+                    command: call.command, workingDirectory: call.directory,
+                    startedAt: call.startedAt, endedAt: now())
+                if !made.isEmpty {
+                    // Its own file-change item, right after the command's row:
+                    // the turn's Changes card folds it in like a patch.
+                    let madeID = AgentShellMadeFiles.itemID(forShellItem: itemId)
+                    onRuntimeObservation?(.toolDetail(itemId: madeID, detail: AgentToolDetailObservation(
+                        phase: .started, toolName: "Shell",
+                        fileChanges: made.map(\.fileChange), affectedFiles: made.map(\.url), observedAt: now())))
+                    events += [
+                        .itemStarted(threadId: threadId, itemId: madeID, kind: .fileChange, title: "Shell"),
+                        .itemCompleted(threadId: threadId, itemId: madeID, kind: .fileChange, status: .completed),
+                    ]
+                }
+            }
+            return events
 
         case "fileChange":
             let ok = (item["status"] as? String) == "completed"
@@ -802,7 +829,22 @@ public struct CodexAppServerEventTranslator {
 
     private static let maximumObservedPathBytes = 4_096
 
-    private static func resolvedTarget(_ raw: String, workingDirectory: URL?) -> URL? {
+    /// A command as codex ran it: the script of a `[shell, -lc, script]` argv,
+    /// or the string itself.
+    static func rawCommand(_ value: Any?) -> String? {
+        if let text = value as? String { return text.isEmpty ? nil : text }
+        if let argv = value as? [String], let last = argv.last, !last.isEmpty { return last }
+        return nil
+    }
+
+    /// A command's directory: a path, or the `file://` URL a rollout records.
+    static func commandDirectory(_ value: Any?) -> URL? {
+        guard let raw = value as? String, !raw.isEmpty else { return nil }
+        if let url = URL(string: raw), url.isFileURL { return url.standardizedFileURL }
+        return (raw as NSString).isAbsolutePath ? URL(fileURLWithPath: raw).standardizedFileURL : nil
+    }
+
+    static func resolvedTarget(_ raw: String, workingDirectory: URL?) -> URL? {
         guard isSafePathText(raw) else { return nil }
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }

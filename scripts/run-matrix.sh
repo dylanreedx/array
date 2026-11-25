@@ -2769,6 +2769,11 @@ run_app_check .build/debug/Array --transcript-turn-cards-check
 # (`renderRehydratedPreviousSession`) end to end, pins that two edits to one path
 # stay two cards, and pins that no card prints a count it did not measure.
 run_app_check .build/debug/Array --file-card-check
+# The Changes card's thumbnail strip, and the files agents make through the
+# shell and inside codex's exec tool: a claude session and a codex rollout
+# restored through the real tile must show every made file, and no file the
+# command only read or left in a temp folder.
+run_app_check .build/debug/Array --transcript-file-strip-check
 run_app_check .build/debug/Array --shell-tool-row-check
 # The host-local tool-detail supply: immutable scope, expiry, and the real
 # translator sequences (claude search + delegation, pi delegation, codex exit

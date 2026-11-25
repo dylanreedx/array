@@ -3363,7 +3363,20 @@ enum ContinuumApp {
             do {
                 _ = NSApplication.shared
                 try FileOpenChecks.runFilePreviewOpenCheck()
+                // Files made through the shell and inside codex's exec reach the card.
+                try ShellMadeFilesChecks.run()
                 print("ContinuumRevivedFilePreviewOpenChecks passed")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+        if let index = CommandLine.arguments.firstIndex(of: "--transcript-file-strip-stills"),
+           index + 1 < CommandLine.arguments.count {
+            _ = NSApplication.shared
+            do {
+                try ShellMadeFilesChecks.run(stillsDirectory: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
                 Foundation.exit(0)
             } catch {
                 fputs("FAIL: \(error)\n", stderr)

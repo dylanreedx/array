@@ -382,6 +382,11 @@ public struct AgentToolDetailObservation: Equatable, Sendable {
     /// command's start and end in the same millisecond, so that gap read 0.0s
     /// whatever the command took.
     public let reportedDuration: TimeInterval?
+    /// Full locations of the files in `fileChanges`, host-local like the
+    /// activity channel's target: the card's thumbnail and open action need the
+    /// real file, and `fileChanges` keeps only basenames. Every changed file is
+    /// here, not just the first (a codex patch, a shell that made several).
+    public let affectedFiles: [URL]
     public let observedAt: Date
 
     public init(
@@ -394,6 +399,7 @@ public struct AgentToolDetailObservation: Equatable, Sendable {
         parentItemID: String? = nil,
         shellOutcome: AgentShellStatus? = nil,
         reportedDuration: TimeInterval? = nil,
+        affectedFiles: [URL] = [],
         observedAt: Date
     ) {
         self.phase = phase
@@ -408,6 +414,7 @@ public struct AgentToolDetailObservation: Equatable, Sendable {
         self.parentItemID = AgentToolDetailDisplaySanitizer.parentItemID(parentItemID)
         self.shellOutcome = shellOutcome
         self.reportedDuration = reportedDuration.flatMap { $0.isFinite && $0 >= 0 ? $0 : nil }
+        self.affectedFiles = Array(affectedFiles.filter(\.isFileURL).prefix(24))
         self.observedAt = observedAt
     }
 
@@ -417,7 +424,7 @@ public struct AgentToolDetailObservation: Equatable, Sendable {
             && lhs.outputPreview == rhs.outputPreview && lhs.exitCode == rhs.exitCode
             && lhs.fileChanges == rhs.fileChanges && lhs.parentItemID == rhs.parentItemID
             && lhs.shellOutcome == rhs.shellOutcome && lhs.reportedDuration == rhs.reportedDuration
-            && lhs.observedAt == rhs.observedAt
+            && lhs.affectedFiles == rhs.affectedFiles && lhs.observedAt == rhs.observedAt
     }
 }
 

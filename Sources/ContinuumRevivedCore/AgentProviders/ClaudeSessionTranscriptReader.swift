@@ -40,6 +40,9 @@ public enum ClaudeSessionTranscriptReader {
 
     static func normalize(lines: [String], settingsDefaults: UserDefaults = .standard) -> [NormalizedTranscriptMessage] {
         var out: [NormalizedTranscriptMessage] = []
+        // A shell call's command, directory and start, until its result names
+        // the files it made (`AgentShellMadeFiles`), exactly as the live stream.
+        var shellCalls: [String: ShellCall] = [:]
         for line in lines {
             guard let object = ManagedTranscriptRehydrator.jsonObject(line),
                   let type = object["type"] as? String else { continue }
@@ -50,6 +53,9 @@ public enum ClaudeSessionTranscriptReader {
             let timestamp = ManagedTranscriptRehydrator.timestamp(object["timestamp"])
             defer {
                 for index in firstOutput..<out.count { out[index].timestamp = timestamp }
+            }
+            let directory = (object["cwd"] as? String).flatMap {
+                ($0 as NSString).isAbsolutePath ? URL(fileURLWithPath: $0) : nil
             }
 
             switch type {
@@ -91,10 +97,17 @@ public enum ClaudeSessionTranscriptReader {
                 // message too, without `isMeta`; `origin` says who sent it.
                 if ((object["origin"] as? [String: Any])?["kind"] as? String) == "task-notification" { continue }
                 guard let message = object["message"] as? [String: Any] else { continue }
-                appendUserMessage(message["content"], into: &out)
+                appendUserMessage(message["content"], shellCalls: &shellCalls, endedAt: timestamp, into: &out)
             case "assistant":
                 guard let message = object["message"] as? [String: Any],
                       let blocks = message["content"] as? [[String: Any]] else { continue }
+                for block in blocks where (block["type"] as? String) == "tool_use" {
+                    guard let id = block["id"] as? String, let name = block["name"] as? String,
+                          AgentShellObservation.isShellTool(name),
+                          let command = (block["input"] as? [String: Any])?["command"] as? String,
+                          let timestamp else { continue }
+                    shellCalls[id] = ShellCall(name: name, command: command, directory: directory, startedAt: timestamp)
+                }
                 appendAssistantMessage(blocks, settingsDefaults: settingsDefaults, into: &out)
             default:
                 continue
@@ -121,7 +134,12 @@ public enum ClaudeSessionTranscriptReader {
     /// A `user` line is either a real prompt (content is a String, or text
     /// blocks) or the carrier for tool_result completions of the assistant's
     /// prior tool calls (content is a list of tool_result blocks).
-    private static func appendUserMessage(_ content: Any?, into out: inout [NormalizedTranscriptMessage]) {
+    struct ShellCall { let name: String; let command: String; let directory: URL?; let startedAt: Date }
+
+    private static func appendUserMessage(
+        _ content: Any?, shellCalls: inout [String: ShellCall], endedAt: Date?,
+        into out: inout [NormalizedTranscriptMessage]
+    ) {
         if let text = content as? String {
             if let visible = visiblePromptText(text) {
                 out.append(NormalizedTranscriptMessage(role: .userPrompt, text: visible))
@@ -140,6 +158,13 @@ public enum ClaudeSessionTranscriptReader {
                     role: .toolResult, toolCallId: toolUseId, toolFailed: isError,
                     createdFileChanges: isError ? [] : ClaudeEventTranslator.createdFileChanges(
                         writes, resultContent: block["content"])))
+                if let call = shellCalls.removeValue(forKey: toolUseId), let endedAt {
+                    out += NormalizedTranscriptMessage.madeFiles(
+                        shellItemID: toolUseId, toolName: call.name,
+                        made: AgentShellMadeFiles.detect(
+                            command: call.command, workingDirectory: call.directory,
+                            startedAt: call.startedAt, endedAt: endedAt))
+                }
             case "text":
                 if let text = block["text"] as? String { promptText += text }
             default:

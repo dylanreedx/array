@@ -118,6 +118,13 @@ struct NormalizedTranscriptMessage: Equatable {
         /// boundary, so the card would otherwise lose the directory it needs to
         /// tell two `index.ts` apart.
         var absolutePath: String? = nil
+        /// Every changed file's unabbreviated location, when the call changed
+        /// more than one (a codex patch, a shell's made files); the first is
+        /// `absolutePath`'s job otherwise.
+        var affectedPaths: [String] = []
+        /// The item's kind when its name alone would bucket it wrongly: a
+        /// shell's made files are a file change, not a second command.
+        var kind: ItemKind? = nil
         /// `array_message_agent`'s text, the one argument its live row carries
         /// (`AgentToolDetailObservation.messageTextKey`), so a restored row says
         /// what was sent too.
@@ -150,6 +157,21 @@ struct NormalizedTranscriptMessage: Equatable {
     /// toolResult: the file facts this result settles (a `Write` whose result says
     /// the file was created), replayed as the live stream does.
     var createdFileChanges: [AgentToolDetailObservation.FileChange] = []
+    /// A shell call's made files as their own file-change item and its result,
+    /// right after the shell's own: the live stream's shape, replayed.
+    static func madeFiles(
+        shellItemID: String, toolName: String, made: [AgentShellMadeFiles.Made]
+    ) -> [NormalizedTranscriptMessage] {
+        guard !made.isEmpty else { return [] }
+        let id = AgentShellMadeFiles.itemID(forShellItem: shellItemID)
+        return [
+            .init(role: .assistant, toolCalls: [.init(
+                id: id, name: toolName, fileChanges: made.map(\.fileChange),
+                affectedPaths: made.map(\.url.path), kind: .fileChange)], countsAsMessage: false),
+            .init(role: .toolResult, toolCallId: id),
+        ]
+    }
+
     /// B6.3 — compaction: pi's persisted `tokensBefore`, the one real field its
     /// session-file `compaction` entry carries (see `AgentCompactionPayload`'s
     /// doc comment for what it does not carry).
@@ -278,7 +300,7 @@ public enum ManagedTranscriptRehydrator {
                         threadId: threadId, turnId: turnId, streamKind: .assistant, delta: message.text)))
                 }
                 for call in message.toolCalls {
-                    let kind = itemKind(forTool: call.name)
+                    let kind = call.kind ?? itemKind(forTool: call.name)
                     itemKinds[call.id] = kind
                     itemNames[call.id] = call.name
                     // Surface the command in the title so a rehydrated card reads
@@ -317,6 +339,9 @@ public enum ManagedTranscriptRehydrator {
                                 phase: .started,
                                 toolName: call.name,
                                 fileChanges: call.fileChanges,
+                                affectedFiles: call.affectedPaths
+                                    .filter { ($0 as NSString).isAbsolutePath }
+                                    .map { URL(fileURLWithPath: $0).standardizedFileURL },
                                 observedAt: now()))))
                     }
                     // One observation, as the live frame sends it: a second

@@ -22,6 +22,11 @@ public enum CodexSessionTranscriptReader {
 
     static func normalize(lines: [String]) -> [NormalizedTranscriptMessage] {
         var out: [NormalizedTranscriptMessage] = []
+        // When the last tool call began: a command's made files were born after it.
+        var lastCallTimestamp: Date?
+        // The files the last `apply_patch` call named, so the same change's
+        // completed item is not restored a second time.
+        var lastPatchNames: [String] = []
         for line in lines {
             guard let object = ManagedTranscriptRehydrator.jsonObject(line),
                   let envelope = object["type"] as? String,
@@ -56,6 +61,38 @@ public enum CodexSessionTranscriptReader {
                 }
             // Codex 0.159+ writes what was said as completed items instead of
             // user_message/agent_message; a rollout never carries both.
+            // Codex 0.159+ runs patches and commands inside its `exec` tool, so
+            // the rollout's only record of a file change, or of a command that
+            // made files, is the completed item itself.
+            case ("event_msg", "item_completed")
+                where ((payload["item"] as? [String: Any])?["type"] as? String) == "FileChange":
+                guard let item = payload["item"] as? [String: Any],
+                      let id = item["id"] as? String else { continue }
+                let changes = fileChanges(item["changes"])
+                guard !changes.isEmpty else { continue }
+                let names = changes.map(\.change.path)
+                if names == lastPatchNames { lastPatchNames = []; continue }
+                let paths = changes.map(\.path).filter { ($0 as NSString).isAbsolutePath }
+                out.append(.init(
+                    role: .assistant,
+                    toolCalls: [.init(
+                        id: id, name: "apply_patch", fileChanges: changes.map(\.change),
+                        absolutePath: paths.first, affectedPaths: paths)],
+                    countsAsMessage: false))
+                out.append(.init(role: .toolResult, toolCallId: id,
+                                 toolFailed: ["failed", "declined"].contains((item["status"] as? String)?.lowercased() ?? "")))
+            case ("event_msg", "item_completed")
+                where ((payload["item"] as? [String: Any])?["type"] as? String) == "CommandExecution":
+                guard let item = payload["item"] as? [String: Any],
+                      let id = item["id"] as? String,
+                      let command = CodexAppServerEventTranslator.rawCommand(item["command"]),
+                      let startedAt = lastCallTimestamp, let endedAt = timestamp else { continue }
+                out += NormalizedTranscriptMessage.madeFiles(
+                    shellItemID: id, toolName: "Shell",
+                    made: AgentShellMadeFiles.detect(
+                        command: command,
+                        workingDirectory: CodexAppServerEventTranslator.commandDirectory(item["cwd"]),
+                        startedAt: startedAt, endedAt: endedAt))
             case ("event_msg", "item_completed"):
                 guard let item = payload["item"] as? [String: Any],
                       let role: NormalizedTranscriptMessage.Role = switch item["type"] as? String {
@@ -75,6 +112,7 @@ public enum CodexSessionTranscriptReader {
                  ("response_item", "custom_tool_call"):
                 guard let id = payload["call_id"] as? String ?? payload["id"] as? String,
                       let name = payload["name"] as? String, !name.isEmpty else { continue }
+                lastCallTimestamp = timestamp ?? lastCallTimestamp
                 // TR-01 — `arguments` stays unrestored (it is a command body for
                 // `exec_command`, and that is the sensitive payload). The one
                 // exception is the patch itself: `apply_patch` states which
@@ -88,6 +126,7 @@ public enum CodexSessionTranscriptReader {
                 let changes = envelope.isEmpty
                     ? []
                     : CodexFileChangeReader.fileChanges(applyPatchEnvelope: envelope)
+                if !changes.isEmpty { lastPatchNames = changes.map(\.path) }
                 out.append(.init(
                     role: .assistant,
                     toolCalls: [.init(
@@ -108,6 +147,34 @@ public enum CodexSessionTranscriptReader {
             }
         }
         return out
+    }
+
+    /// A completed `FileChange` item's changes: the rollout keys them by path
+    /// (`{path: {type, content | unified_diff}}`); app-server lists them.
+    private static func fileChanges(_ value: Any?) -> [(path: String, change: AgentToolDetailObservation.FileChange)] {
+        var listed: [[String: Any]] = []
+        if let byPath = value as? [String: Any] {
+            for (path, raw) in byPath.sorted(by: { $0.key < $1.key }) {
+                var change = raw as? [String: Any] ?? [:]
+                change["path"] = path
+                listed.append(change)
+            }
+        } else if let list = value as? [[String: Any]] {
+            listed = list
+        }
+        return listed.prefix(24).compactMap { change in
+            guard let path = change["path"] as? String, !path.isEmpty else { return nil }
+            var shaped = change
+            if shaped["diff"] == nil { shaped["diff"] = change["unified_diff"] }
+            guard var detail = CodexFileChangeReader.fileDetails(["changes": [shaped]]).first else { return nil }
+            // An added file's content is all of it: its lines are its count.
+            if detail.action == .add, detail.addedLines == nil, let content = change["content"] as? String {
+                let lines = content.split(separator: "\n", omittingEmptySubsequences: false).count
+                    - (content.hasSuffix("\n") ? 1 : 0)
+                detail = .init(action: .add, path: path, addedLines: UInt(max(0, lines)))
+            }
+            return (path, detail)
+        }
     }
 
     private static func cleanText(_ value: Any?) -> String? {

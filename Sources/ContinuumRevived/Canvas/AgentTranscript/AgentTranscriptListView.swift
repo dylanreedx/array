@@ -3468,6 +3468,7 @@ final class AgentTranscriptListView: NSView, RichInlineTextSelectionContainer {
                 identity: identity,
                 toolName: detail.toolName ?? title,
                 arguments: detail.fields.map { AgentToolDetailField(key: $0.key, value: $0.value) },
+                affectedFiles: detail.affectedFiles,
                 fileChanges: detail.fileChanges,
                 parentItemID: detail.parentItemID,
                 startedAt: detail.observedAt
