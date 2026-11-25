@@ -1016,6 +1016,13 @@ final class ChoicePopoverController {
         observers.append(center.addObserver(
             forName: NSApplication.didResignActiveNotification, object: NSApp, queue: .main
         ) { [weak self] _ in MainActor.assumeIsolated { self?.dismissItself("resignActive") } })
+        // Posting goes on BEFORE the observer: a silenced anchor (tile chrome
+        // mutes its subtree) whose frame changed while the popover was closed
+        // gets that change posted the moment posting resumes, and an observer
+        // already listening would read it as the anchor moving and close the
+        // popover it is opening.
+        anchor.postsFrameChangedNotifications = true
+        anchor.keepsPostingFrameChanges = true
         observers.append(center.addObserver(
             forName: NSView.frameDidChangeNotification, object: anchor, queue: .main
         ) { [weak self] _ in
@@ -1033,8 +1040,6 @@ final class ChoicePopoverController {
                 }
             }
         })
-        anchor.postsFrameChangedNotifications = true
-        anchor.keepsPostingFrameChanges = true
         anchorWindowObservation = anchor.observe(\.window, options: [.old, .new]) { [weak self] _, change in
             // `window` is optional, so KVO wraps both values in a second Optional.
             let oldWindow = change.oldValue ?? nil
