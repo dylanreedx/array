@@ -140,12 +140,32 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         setAccessibilityRole(.button)
         popover.animatesPresentation = true
         isHidden = true
-        // One area for the whole line, orbs included: crossing from orb to orb,
-        // or orb to words, never leaves it. It follows the visible rect itself.
-        let area = NSTrackingArea(rect: .zero, options: [.activeInKeyWindow, .mouseEnteredAndExited, .mouseMoved, .inVisibleRect],
-                                  owner: self)
+        trackFill()
+    }
+
+    /// The line's whole section, its hover fill included: one control for
+    /// hover and click, so there is no dead gap between orbs, words, pill and
+    /// chevron, nor in the fill's pad past the line's own bounds.
+    private var fillRect: NSRect { bounds.insetBy(dx: -PlanMetrics.s(Space.s, zoom), dy: 0) }
+
+    /// One area for the whole section, orbs included: crossing from orb to
+    /// orb, or orb to words, never leaves it.
+    private func trackFill() {
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        let area = NSTrackingArea(rect: fillRect, options: [.activeInKeyWindow, .mouseEnteredAndExited, .mouseMoved], owner: self)
         addTrackingArea(area)
         hoverArea = area
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        let changed = newSize != frame.size
+        super.setFrameSize(newSize)
+        if changed { trackFill() }
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard !isHidden, alphaValue > 0 else { return nil }
+        return fillRect.contains(convert(point, from: superview)) ? self : nil
     }
     @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
 
@@ -298,7 +318,7 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         if let fill = lineFill(theme) {
             fill.setFill()
             let r = CGFloat(zoom.scaled(CornerStyle.current.radius(CornerRole.card.base)))
-            NSBezierPath(roundedRect: bounds.insetBy(dx: -PlanMetrics.s(Space.s, zoom), dy: 0), xRadius: r, yRadius: r).fill()
+            NSBezierPath(roundedRect: fillRect, xRadius: r, yRadius: r).fill()
         }
         let start = pileWidth + (orbs.isEmpty ? 0 : gap)
         let mid = bounds.midY
@@ -479,13 +499,9 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         }
     }
 
+    /// Anywhere on the section, an orb included, opens or closes the plan;
+    /// going to a helper is the plan's own job, from its row.
     override func mouseDown(with event: NSEvent) {
-        // A helper's orb reveals that helper, as its orb in the plan does.
-        if case let .agent(id, _)? = orb(at: convert(event.locationInWindow, from: nil))?.kind {
-            if isOpen { close() }
-            onRevealOwner?(id)
-            return
-        }
         // The popover's own outside-click handling closed it on this very
         // click: that click was the close.
         if closedThisTurn { return }

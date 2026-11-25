@@ -138,7 +138,7 @@ extension ManagedLeadPlanChecks {
 
         // 3. A click opens it, with the shared entrance.
         var clicks = 100
-        func clickLine() async {
+        func clickLine(at x: CGFloat? = nil, y: CGFloat? = nil) async {
             // A real second click comes on a later pass of the event loop, and
             // lands on a line that has stopped moving (a reveal glides the camera).
             try? await Task.sleep(for: .milliseconds(30))
@@ -150,7 +150,7 @@ extension ManagedLeadPlanChecks {
                 last = now
             }
             clicks += 1
-            let p = line.convert(NSPoint(x: line.bounds.maxX - 8, y: line.bounds.midY), to: nil)
+            let p = line.convert(NSPoint(x: x ?? line.bounds.maxX - 8, y: y ?? line.bounds.midY), to: nil)
             click(window, at: p, number: clicks)
         }
         await clickLine()
@@ -234,6 +234,61 @@ extension ManagedLeadPlanChecks {
                                                                 declaredAt: Date(), planDeclaredAt: Date()), for: lead), "status refused")
         try await AgentPresenceChecks.eventually("the count did not drop with the decision") { line.sentence.contains("1 needs you") }
 
+        // 9b. The whole section is one control: a click anywhere on the line,
+        // an orb, the gap after the pile or the hover fill's pad, opens the
+        // plan and reveals nothing; a second click there closes it. Going to
+        // a helper is the popover's job, from its row or its orb.
+        revealed = []
+        line.layoutSubtreeIfNeeded()
+        guard let lineOrb = line.qaPile.first?.frame, let pileEnd = line.qaPile.map(\.frame.maxX).max() else {
+            throw WorkspaceAgentReportChecks.Failure(description: "lead-plan-popover: no orb on the line")
+        }
+        let fillPad = PlanMetrics.s(Space.s, line.zoom)
+        let targets: [(String, CGFloat, CGFloat)] = [
+            ("an orb", lineOrb.midX, lineOrb.midY),
+            ("the gap after the pile", pileEnd + 2, line.bounds.midY),
+            ("the fill's left pad", line.bounds.minX - fillPad / 2, line.bounds.midY),
+            ("the fill's right pad", line.bounds.maxX + fillPad / 2, line.bounds.midY),
+        ]
+        var sectionClicks: [String] = []
+        for (what, x, y) in targets {
+            await clickLine(at: x, y: y)
+            try expect(line.isOpen && revealed.isEmpty,
+                       "a click on \(what) of the line did not open the plan: open \(line.isOpen), revealed \(revealed)")
+            await clickLine(at: x, y: y)
+            try expect(!line.isOpen, "a second click on \(what) did not close the plan")
+            sectionClicks.append(what)
+        }
+        // In the popover, a helper's whole row takes the row hover and reveals it.
+        await clickLine()
+        guard let rows = line.list, let rowsPanel = line.popover.panel,
+              let row = rows.glance.steps.indices.first(where: { rows.glance.helperID(of: rows.glance.steps[$0]) != nil }),
+              let rowHelper = rows.glance.helperID(of: rows.glance.steps[row]) else {
+            throw WorkspaceAgentReportChecks.Failure(description: "lead-plan-popover: no helper row in the open plan")
+        }
+        let rowRect = rows.rowRect(row)
+        let rowProbe = NSPoint(x: rowRect.minX + PlanMetrics.s(Space.m, line.zoom), y: rowRect.midY)
+        func rowPixel() throws -> NSColor? {
+            let rep = try UIProbe.bitmap(of: rows, id: "lead-plan-rows")
+            let k = CGFloat(rep.pixelsWide) / rows.bounds.width
+            return rep.colorAt(x: Int(rowProbe.x * k), y: Int(rowProbe.y * k))
+        }
+        let resting = try rowPixel()
+        if let move = NSEvent.mouseEvent(with: .mouseMoved, location: rows.convert(NSPoint(x: rowRect.midX, y: rowRect.midY), to: nil),
+                                         modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: rowsPanel.windowNumber,
+                                         context: nil, eventNumber: 0, clickCount: 0, pressure: 0) {
+            rows.mouseEntered(with: move); rows.mouseMoved(with: move)
+        }
+        let hovered = try rowPixel()
+        try expect(resting != hovered, "a hovered helper row in the plan shows no hover fill: \(String(describing: resting)) then \(String(describing: hovered))")
+        clicks += 1
+        click(rowsPanel, at: rows.convert(NSPoint(x: rowRect.midX, y: rowRect.midY), to: nil), number: clicks)
+        try expect(revealed == [rowHelper], "clicking a helper's row in the plan did not reveal it: \(revealed)")
+        try expect(!line.isOpen, "revealing from a row left the plan open")
+        print("Lead plan section: a click on \(sectionClicks.joined(separator: ", ")) opens the plan and reveals nothing, a second closes it; a helper row takes the row hover and reveals its helper")
+        tile.frame = NSRect(x: 0, y: 0, width: 960, height: 800)
+        tile.wakeChrome(); tile.layoutSubtreeIfNeeded()
+
         // 10. The pile is an avatar stack: each front orb cuts an even gap out
         // of the one behind it, at every rung, in both appearances, and again
         // when helpers leave the pile.
@@ -271,7 +326,7 @@ extension ManagedLeadPlanChecks {
         try cutPass("pile2")
         print("Lead plan orb cut: " + cuts.joined(separator: "; "))
 
-        print("Lead plan popover passed: in the status row, \(line.sentence); opens above the line inside the tile with the shared entrance; a second click closes it with the shared exit and does not reopen; Escape closes; stays open through a helper's change; an orb reveals its helper; a chip answers into the composer; chips start at the question; the count follows the decision; each orb in the pile cuts an even gap out of the one behind it")
+        print("Lead plan popover passed: in the status row, \(line.sentence); opens above the line inside the tile with the shared entrance; a second click closes it with the shared exit and does not reopen; Escape closes; stays open through a helper's change; an orb or row in the plan reveals its helper, the line itself never does; a chip answers into the composer; chips start at the question; the count follows the decision; each orb in the pile cuts an even gap out of the one behind it")
     }
 
     /// Renders the line and, for each orb and the one behind it, reads the

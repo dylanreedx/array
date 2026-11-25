@@ -447,6 +447,7 @@ final class PlanListView: NSView {
         rail.applyPageZoom(zoom)
         rail.onSelect = { [weak self] answer in self?.onChoose?(answer) }
         addSubview(rail)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.activeAlways, .mouseEnteredAndExited, .mouseMoved, .inVisibleRect], owner: self))
         setAccessibilityElement(true)
         setAccessibilityRole(.list)
         setAccessibilityLabel("Plan")
@@ -457,6 +458,7 @@ final class PlanListView: NSView {
     func apply(_ g: PlanGlance) {
         let oldOptions = glance.options, oldDecision = glance.decision
         glance = g
+        if let r = hoveredRow, r >= g.steps.count || g.helperID(of: g.steps[r]) == nil { hoveredRow = nil }
         var next: [PlanOrbView?] = []
         for (i, s) in g.steps.enumerated() {
             let kind = PlanOrbs.kind(s, in: g)
@@ -561,6 +563,17 @@ final class PlanListView: NSView {
         for (i, s) in glance.steps.enumerated() where glance.helperID(of: s) != nil { addCursorRect(rowRect(i), cursor: .pointingHand) }
     }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    /// The helper row under the pointer: a whole row reveals its helper, so the
+    /// whole row takes the choice list's row hover.
+    private(set) var hoveredRow: Int? { didSet { if hoveredRow != oldValue { needsDisplay = true } } }
+    private func helperRow(at p: NSPoint) -> Int? {
+        glance.steps.indices.first { rowRect($0).contains(p) && glance.helperID(of: glance.steps[$0]) != nil }
+    }
+    override func mouseEntered(with event: NSEvent) { hoveredRow = helperRow(at: convert(event.locationInWindow, from: nil)) }
+    override func mouseMoved(with event: NSEvent) { hoveredRow = helperRow(at: convert(event.locationInWindow, from: nil)) }
+    override func mouseExited(with event: NSEvent) { hoveredRow = nil }
+
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         for (i, s) in glance.steps.enumerated() where rowRect(i).contains(p) {
@@ -584,6 +597,11 @@ final class PlanListView: NSView {
             let mid = band.minY + PlanMetrics.s(Space.m, zoom) + decisionLineHeight / 2
             PlanInk.pill("Needs you", .needsYou, x: pad, midY: mid, font: meta, theme: theme, zoom: zoom)
             PlanInk.text(d, x: questionX, midY: mid, maxX: band.maxX - PlanMetrics.s(Space.m, zoom), font: meta, color: PlanInk.primary(theme))
+        }
+        if let r = hoveredRow, r < glance.steps.count {
+            AgentSurfaceRole.rowHover.color.nsColor(for: theme).setFill()
+            let corner = CGFloat(zoom.scaled(CornerStyle.current.radius(CornerRole.card.base)))
+            NSBezierPath(roundedRect: rowRect(r).insetBy(dx: PlanMetrics.s(Space.s, zoom), dy: 0), xRadius: corner, yRadius: corner).fill()
         }
         let gap = PlanMetrics.s(Space.l, zoom)
         let stateLeft = bounds.width - pad - stateWidth
