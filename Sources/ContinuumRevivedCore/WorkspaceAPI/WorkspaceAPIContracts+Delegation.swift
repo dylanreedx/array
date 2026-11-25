@@ -319,6 +319,10 @@ public struct AgentRevealResult: Codable, Equatable, Sendable {
 /// collected the existing way.
 public enum AgentMessageDelivery: String, Codable, Sendable {
     case delivered, queued, held, refused
+    /// Stored for the recipient without starting a turn: it shows in the
+    /// recipient's tile and reaches its next turn. The default for a message
+    /// to any agent that is not the sender's own helper.
+    case note
 }
 
 public struct AgentMessageRequest: Codable, Equatable, Sendable {
@@ -334,6 +338,10 @@ public struct AgentMessageRequest: Codable, Equatable, Sendable {
     /// REQUIRED: without it a retry after a dropped answer double-prompts a
     /// running agent.
     public var idempotencyKey: String?
+    /// Start a turn on the recipient. A message to the sender's own helper
+    /// always does; to anyone else (its parent, a peer) it is a note unless
+    /// this is true.
+    public var wake: Bool?
 
     /// 8 KB of UTF-8. A brief longer than this belongs in a fresh delegation,
     /// not in a turn the child has to read in one go.
@@ -343,12 +351,14 @@ public struct AgentMessageRequest: Codable, Equatable, Sendable {
         agentId: AgentID,
         text: String,
         presentationPolicy: WorkspacePresentationPolicy = .preserveAll,
-        idempotencyKey: String? = nil
+        idempotencyKey: String? = nil,
+        wake: Bool? = nil
     ) {
         self.agentId = agentId
         self.text = text
         self.presentationPolicy = presentationPolicy
         self.idempotencyKey = idempotencyKey
+        self.wake = wake
     }
 
     /// Pure bounds, shared by the host and the checks: nil when the request is
@@ -369,7 +379,7 @@ public struct AgentMessageRequest: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case agentId, text, presentationPolicy, presentation, idempotencyKey
+        case agentId, text, presentationPolicy, presentation, idempotencyKey, wake
     }
 
     /// Tolerant of the model-facing shape (`presentation`, any subset of
@@ -382,6 +392,7 @@ public struct AgentMessageRequest: Codable, Equatable, Sendable {
         presentationPolicy = try WorkspacePresentationPolicy.decodeCanonicalOrShort(
             from: c, canonical: .presentationPolicy, short: .presentation, base: .preserveAll)
         idempotencyKey = try c.decodeIfPresent(String.self, forKey: .idempotencyKey)
+        wake = try c.decodeIfPresent(Bool.self, forKey: .wake)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -390,6 +401,7 @@ public struct AgentMessageRequest: Codable, Equatable, Sendable {
         try c.encode(text, forKey: .text)
         try c.encode(presentationPolicy, forKey: .presentationPolicy)
         try c.encodeIfPresent(idempotencyKey, forKey: .idempotencyKey)
+        try c.encodeIfPresent(wake, forKey: .wake)
     }
 }
 
@@ -412,6 +424,9 @@ public struct AgentMessageResult: Codable, Equatable, Sendable {
     public var refusalReason: String?
     /// Why the message waits for the user, when `delivery == .held`.
     public var heldReason: String?
+    /// Said plainly when `delivery == .note`, so a sender that needed action
+    /// knows to pass wake.
+    public var noteReason: String?
     public var presentation: ArtifactOpenResult.Presentation
     public var presentationEffects: WorkspacePresentationEffects
 

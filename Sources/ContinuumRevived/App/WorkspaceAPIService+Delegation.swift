@@ -907,10 +907,17 @@ extension WorkspaceAPIService {
         let childWasRunning = supervisor.isRunning(childId)
         let context = AgentMessageQueueContext(caller: agentId, recipient: childId,
             operationId: requestId, idempotencyKey: idempotencyKey, payloadHash: payloadHash)
-        let delivery = supervisor.deliverAgentMessage(text, from: agentId, to: childId, hops: hops, context: context)
+        // Only a message DOWN to the sender's own helper wakes by default. To a
+        // parent or a peer it is a note unless the sender passed wake: an
+        // acknowledgement must never spend a turn on the agent it answers.
+        let asNote = request.wake != true && !Self.isDescendant(childId, of: agentId, in: supervisor.records)
+        let delivery: (delivery: AgentMessageDelivery, position: Int?, error: String?) = asNote
+            ? (supervisor.deliverAgentNote(text, from: agentId, to: childId) ? .note : .refused, nil, nil)
+            : supervisor.deliverAgentMessage(text, from: agentId, to: childId, hops: hops, context: context)
         if let error = delivery.error {
             return failNothingDelivered(.durabilityFailed, error)
         }
+        if delivery.delivery == .note { result.noteReason = Self.noteReason }
         if delivery.delivery != .refused {
             result.delivery = delivery.delivery
             result.queuePosition = delivery.position
@@ -992,7 +999,8 @@ extension WorkspaceAPIService {
             case let .result(object):
                 let delivery = object["delivery"]?.string.flatMap(AgentMessageDelivery.init(rawValue:)) ?? .refused
                 let reason = delivery == .held ? object["heldReason"]?.string
-                    : delivery == .refused ? object["refusalReason"]?.string : nil
+                    : delivery == .refused ? object["refusalReason"]?.string
+                    : delivery == .note ? object["noteReason"]?.string : nil
                 entries.append(.init(agentId: recipient, delivery: delivery, operationId: object["operationId"]?.string, reason: reason))
             case let .error(error):
                 entries.append(.init(agentId: recipient, delivery: .refused, reason: "\(error.code.rawValue): \(error.message)"))
@@ -1017,6 +1025,19 @@ extension WorkspaceAPIService {
         guard sameProject(caller, target.projectId) || ownCheckoutHandle(caller) == ownCheckoutHandle(target) else { return false }
         if permission == .free { return true }
         return target.parentAgentID == caller.id || caller.parentAgentID == target.id
+    }
+
+    static let noteReason = "Delivered as a note; it will not start a turn. The agent sees it in its tile and in its next turn. Pass wake: true only if the recipient must act now."
+
+    /// True when `id` is `ancestor`'s helper, or a helper's helper.
+    static func isDescendant(_ id: AgentID, of ancestor: AgentID, in records: [AgentID: AgentRecord]) -> Bool {
+        var seen: Set<AgentID> = []
+        var cursor = records[id]?.parentAgentID
+        while let parent = cursor, seen.insert(parent).inserted {
+            if parent == ancestor { return true }
+            cursor = records[parent]?.parentAgentID
+        }
+        return false
     }
 
     /// The most agent-started turns in a row, with no prompt from the user

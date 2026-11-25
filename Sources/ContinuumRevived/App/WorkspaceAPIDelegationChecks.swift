@@ -1226,7 +1226,8 @@ func runWorkspaceAPIDelegationChecks(crossHarness: Bool = false, inspectLaunch: 
     try expect(supervisor.send("BUSY-HOLD-routing", to: childId), "start routing hold")
     _ = await childReceived("BUSY-HOLD-routing")
     let payloadA: [String: Any] = ["agentId": childIdString, "text": "QCALL-A", "idempotencyKey": "route-a"]
-    let payloadB: [String: Any] = ["agentId": childIdString, "text": "QCALL-B", "idempotencyKey": "route-b"]
+    // caller2 did not create the child: without wake its message is a note.
+    let payloadB: [String: Any] = ["agentId": childIdString, "text": "QCALL-B", "idempotencyKey": "route-b", "wake": true]
     let admissionA = try result(dispatch("agent.message", payloadA, requestId: "route-op-a"), "queue A")
     let admissionB = try result(api.dispatch(agentId: caller2, requestId: "route-op-b", op: "agent.message", payload: payloadB), "queue B")
     try expect(admissionA["delivery"]?.string == "queued" && admissionB["delivery"]?.string == "queued", "both callers queue")

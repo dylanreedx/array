@@ -6064,6 +6064,29 @@ final class AgentSupervisor {
         return (.delivered, nil, nil)
     }
 
+    /// `agent.message` as a NOTE: another agent's words that never start a
+    /// turn. Stored durably as a helper note in `id`'s queue, so it shows in
+    /// the tile's queue rail at once, joins a running turn at its next tool
+    /// call, and otherwise rides along with the recipient's next turn. An
+    /// acknowledgement or FYI to a parent or peer goes this way, so it cannot
+    /// spend a turn on the recipient.
+    func deliverAgentNote(_ text: String, from senderID: AgentID, to id: AgentID) -> Bool {
+        guard let store = submissionRecoveryStore, records[id] != nil else { return false }
+        let body = agentMessageText("Note (it did not start a turn; act on it only if it changes your work): " + text, from: senderID)
+        let noteID = UUID()
+        let previous = queueOpTasks[id]
+        queueOpTasks[id] = Task { @MainActor [weak self] in
+            if let previous { await previous.value }
+            guard let self else { return }
+            do { try await store.upsertHelperNote(id: noteID, text: body, for: id) }
+            catch { self.warn("Agent note could not be stored durably.") }
+            self.queuedWorkItemsCache[id] = await store.queuedWorkItems(for: id)
+            self.notifyTurnCapabilitiesChanged(id)
+            if self.runners[id] != nil { self.handOverHeldSteers(for: id) }
+        }
+        return true
+    }
+
     func queuedAgentMessage(caller: AgentID, key: String? = nil, operationId: String? = nil) throws -> AgentMessageOutbox.Entry? {
         if let key { return try agentMessageOutbox.lookup(caller: caller, key: key) }
         return try agentMessageOutbox.entries().first { $0.context.caller == caller && $0.context.operationId == operationId }

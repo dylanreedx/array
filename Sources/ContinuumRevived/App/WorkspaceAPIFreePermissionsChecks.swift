@@ -139,7 +139,9 @@ func runWorkspaceAPIFreePermissionsChecks() async throws {
         try expect(settled, "agents must settle between turns; the fake pi settles at once")
     }
     func message(_ from: AgentID, _ to: AgentID, _ text: String) -> WorkspaceAPIService.Reply {
-        dispatch(from, "agent.message", ["agentId": to.rawValue.uuidString, "text": text, "idempotencyKey": "key-\(UUID().uuidString)"])
+        // wake: these legs are about reach, and a message to anyone but the
+        // sender's own helper is otherwise a note that starts no turn.
+        dispatch(from, "agent.message", ["agentId": to.rawValue.uuidString, "text": text, "idempotencyKey": "key-\(UUID().uuidString)", "wake": true])
     }
     func delivered(_ from: AgentID, _ to: AgentID, _ marker: String, _ what: String, in root: URL? = nil) async throws {
         try await idle(from, to)

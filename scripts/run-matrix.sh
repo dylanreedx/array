@@ -1764,6 +1764,9 @@ run_app_check .build/debug/Array --workspace-codex-hook-check
 run_app_check .build/debug/Array --workspace-agent-report-check
 run_app_check .build/debug/Array --helper-command-evidence-check
 run_app_check .build/debug/Array --helper-message-result-check
+# array_message_agent to a parent or peer is a note (no turn) unless wake:
+# true; it shows in the tile and reaches the next turn; down-messages wake.
+run_app_check .build/debug/Array --agent-message-note-check
 run_app_check .build/debug/Array --helper-wake-setting-check
 run_app_check .build/debug/Array --helper-provider-retry-check
 run_app_check .build/debug/Array --helper-completion-check

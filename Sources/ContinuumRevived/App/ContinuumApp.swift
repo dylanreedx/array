@@ -2958,6 +2958,19 @@ enum ContinuumApp {
             }
             NSApp.run()
         }
+        if CommandLine.arguments.contains("--agent-message-note-check") {
+            _ = NSApplication.shared
+            Task { @MainActor in
+                do {
+                    try await AgentMessageNoteChecks.run()
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
         if CommandLine.arguments.contains("--helper-wake-setting-check") {
             _ = NSApplication.shared
             Task { @MainActor in
@@ -25704,7 +25717,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
             // imply it.
             let target = prompt.targetAgentDisplayName ?? "another agent"
             alert.messageText = "Allow \(prompt.agentDisplayName) to send a message to \(target)?"
-            detail = "The agent asked Array to start a new turn on \(target), in \(prompt.checkoutDisplayName), using text the agent wrote.\n\nWhile you are asked first, an agent can message only the children it created and the agent that created it. It never interrupts a turn that is running."
+            detail = "The agent asked Array to message \(target), in \(prompt.checkoutDisplayName), using text the agent wrote. A message to a helper it created starts a turn; to anyone else it is a note that starts no turn unless the agent asked to wake them.\n\nWhile you are asked first, an agent can message only the children it created and the agent that created it. It never interrupts a turn that is running."
         } else if [.browserOpen, .browserNavigate, .browserClick, .browserType, .browserPressKey, .browserScroll, .browserWaitFor, .browserEvaluate].contains(prompt.op) {
             alert.messageText = "Allow \(prompt.agentDisplayName) to use a browser in \(prompt.checkoutDisplayName)?"
             detail = "The agent can open its own browser tiles, read pages, and interact with them. Your browser tiles require a separate hand-over, and other domains require separate approval."

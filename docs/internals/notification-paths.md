@@ -147,6 +147,24 @@ push, widget or Live Activity sender, and Settings has no switch for it.
 Witness: `--board-upkeep-check` (one nudge per stale card across two sweeps,
 nothing inside the grace period, the tile's stale mark).
 
+Agent notes (2026-11-25) are `array_message_agent` calls that start no turn, so
+they have no path ID: no Mac banner, sound, badge, phone push, widget or Live
+Activity sender, and no turn-end alert, because no turn runs.
+- Trigger: an `agent.message` whose recipient is not the sender's own helper
+  (or a helper's helper), without `wake: true`. The sender's parent, a sibling
+  and an unrelated agent all get notes. A message down to the sender's own
+  helper, and `wake: true` to anyone, wake as before.
+- Delivery: one durable helper note in the recipient's queue, shown at once in
+  its tile's queue rail. It joins the recipient's running or next turn at a
+  tool call, or rides along with the next helper result it receives, and is
+  then gone. Notes alone never start a turn. The sender's result is
+  `delivery: note` with a `noteReason` telling it to pass `wake: true` only if
+  the recipient must act now.
+- Unchanged: internal agent messages on this page (helper completion, the
+  watchdog, board upkeep), `array_report`, held/paused queues and idempotency.
+Witness: `--agent-message-note-check` (no turn on an idle lead or peer, in the
+tile, in the next turn once, `wake: true` and down-messages still wake).
+
 Helper completion wakes (0.7.41) are internal agent messages, using the existing
 supervisor send/composer queue. They add no direct Mac banner, sound, badge,
 phone push, widget or Live Activity sender. The per-lead setting that once disabled
