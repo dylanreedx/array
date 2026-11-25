@@ -430,13 +430,15 @@ final class PlanOrbTip {
     /// The status row's account card and the sidebar's agent card wait this long.
     static let dwellTime: TimeInterval = 0.15
 
-    func show(_ h: PlanGlance.Helper, over orb: NSView, zoom: AgentPageZoom) {
+    /// `scale` is the canvas's magnification of the line on screen: the card
+    /// is drawn at the size the line and its orbs are, not at 100%.
+    func show(_ h: PlanGlance.Helper, over orb: NSView, zoom: AgentPageZoom, scale: CGFloat) {
         dwell?.cancel()
         dwell = nil
         // Already up: it follows the pointer from orb to orb at once.
-        if panel?.isVisible == true { place(h, over: orb, zoom: zoom); return }
+        if panel?.isVisible == true { place(h, over: orb, zoom: zoom, scale: scale); return }
         let work = DispatchWorkItem { [weak self, weak orb] in
-            MainActor.assumeIsolated { if let orb { self?.place(h, over: orb, zoom: zoom) } }
+            MainActor.assumeIsolated { if let orb { self?.place(h, over: orb, zoom: zoom, scale: scale) } }
         }
         dwell = work
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.dwellTime, execute: work)
@@ -450,14 +452,14 @@ final class PlanOrbTip {
         panel.orderOut(nil)
     }
 
-    private func place(_ h: PlanGlance.Helper, over orb: NSView, zoom: AgentPageZoom) {
+    private func place(_ h: PlanGlance.Helper, over orb: NSView, zoom: AgentPageZoom, scale: CGFloat) {
         dwell = nil
         guard let window = orb.window else { return }
         let view = self.view ?? PlanOrbTipView()
         self.view = view
         view.appearance = window.effectiveAppearance
-        view.apply(h, zoom: zoom)
-        let size = view.intrinsicContentSize
+        view.apply(h, zoom: zoom, scale: scale)
+        let size = view.scaledSize
         let panel = self.panel ?? {
             let p = NSPanel(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless, .nonactivatingPanel],
                             backing: .buffered, defer: false)
@@ -474,7 +476,7 @@ final class PlanOrbTip {
         self.panel = panel
         panel.appearance = window.effectiveAppearance
         let anchor = window.convertToScreen(orb.convert(orb.bounds, to: nil))
-        let gap = PlanMetrics.s(Space.xs, zoom)
+        let gap = PlanMetrics.s(Space.xs, zoom) * scale
         var frame = NSRect(x: (anchor.midX - size.width / 2).rounded(), y: (anchor.maxY + gap).rounded(),
                            width: size.width, height: size.height)
         if let screen = window.screen?.visibleFrame {
@@ -498,6 +500,11 @@ final class PlanOrbTip {
 final class PlanOrbTipView: NSView {
     private(set) var helper: PlanGlance.Helper?
     private var zoom: AgentPageZoom = .default
+    /// The canvas's magnification. The card is laid out and drawn at the plan
+    /// line's own metrics and its bounds are scaled by this, exactly as the
+    /// canvas scales the tile: type, padding, corner, glyph and edge all
+    /// shrink and grow together, and text keeps its 100% layout.
+    private(set) var scale: CGFloat = 1
     override var isFlipped: Bool { true }
     private var font: NSFont { .token(.caption, zoom: zoom) }
     private var padH: CGFloat { PlanMetrics.s(Space.m, zoom) }
@@ -506,13 +513,28 @@ final class PlanOrbTipView: NSView {
     private var maxText: CGFloat { PlanMetrics.s(220, zoom) }
     private var lineHeight: CGFloat { ceil(font.ascender - font.descender) }
     private var radius: CGFloat { CGFloat(zoom.scaled(CornerStyle.current.radius(CornerRole.popover.base))) }
+    /// The caption as it lands on screen.
+    var qaFontSize: CGFloat { font.pointSize * scale }
 
-    func apply(_ h: PlanGlance.Helper, zoom: AgentPageZoom) {
+    /// On screen, the card is its 100% size times the canvas scale.
+    var scaledSize: NSSize {
+        let size = intrinsicContentSize
+        return NSSize(width: (size.width * scale).rounded(.up), height: (size.height * scale).rounded(.up))
+    }
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        guard scale > 0 else { return }
+        setBoundsSize(NSSize(width: newSize.width / scale, height: newSize.height / scale))
+    }
+
+    func apply(_ h: PlanGlance.Helper, zoom: AgentPageZoom, scale: CGFloat) {
         helper = h
         self.zoom = zoom
+        self.scale = scale
         wantsLayer = true
-        layer?.cornerRadius = radius
+        layer?.cornerRadius = radius * scale
         invalidateIntrinsicContentSize()
+        setFrameSize(frame.size)
         needsDisplay = true
     }
 

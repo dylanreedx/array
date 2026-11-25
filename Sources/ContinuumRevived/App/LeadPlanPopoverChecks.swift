@@ -361,6 +361,64 @@ extension ManagedLeadPlanChecks {
                    "clicking the Also row of \(unlinked[1].name) did not reveal it and close the card: revealed \(revealed), open \(line.isOpen)")
         print("Lead plan also: with every step the lead's own, \(unlinked.map { "\($0.name) (\($0.phase))" }.joined(separator: ", ")) are the card's Also rows; clicking the second reveals \(unlinked[1].name) and closes the card")
 
+        // 12. The orb card is the size of the tile on the canvas: hosted in the
+        // real world plane at three camera zooms, its type and frame scale
+        // with the zoom and it stays centred just above its orb; a zoom under
+        // a showing card takes it away, as it does the plan.
+        let plane = CanvasWorldPlaneView()
+        tile.removeFromSuperview()
+        plane.frame = NSRect(x: 0, y: 0, width: 960, height: 800)
+        host.contentView = plane
+        plane.addSubview(tile)
+        tile.frame = NSRect(x: 0, y: 0, width: 960, height: 800)
+        _ = tile.setPageZoom(.default)
+        tile.wakeChrome(); tile.layoutSubtreeIfNeeded()
+        try expect(line.window === window, "lead-plan-popover: the line left its window on the plane")
+        func camera(_ z: Double) {
+            let lineWorld = line.convert(line.bounds, to: plane)
+            let view = plane.frame.size
+            plane.applyCamera(viewportSize: view, worldOrigin: CGPoint(x: lineWorld.midX - view.width / (2 * z), y: lineWorld.midY - view.height / (2 * z)), zoom: z)
+            plane.layoutSubtreeIfNeeded()
+        }
+        func pointer(at p: NSPoint) {
+            if let e = NSEvent.mouseEvent(with: .mouseMoved, location: line.convert(p, to: nil), modifierFlags: [],
+                                          timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                          context: nil, eventNumber: 0, clickCount: 0, pressure: 0) { line.mouseMoved(with: e) }
+        }
+        var measured: [(Double, CGFloat, NSSize)] = []
+        for z in [1.0, 0.6, 1.5] {
+            camera(z)
+            try expect(abs(line.canvasScale - CGFloat(z)) < 0.01, "the line's canvas scale is \(line.canvasScale) at zoom \(z)")
+            guard let orb = line.qaPile.first else { throw WorkspaceAgentReportChecks.Failure(description: "lead-plan-popover: no orb at zoom \(z)") }
+            pointer(at: NSPoint(x: line.bounds.maxX - 4, y: line.bounds.midY))
+            pointer(at: NSPoint(x: orb.frame.midX, y: orb.frame.midY))
+            try await AgentPresenceChecks.eventually("no orb card at zoom \(z)") { line.qaTipPanel?.isVisible == true }
+            guard let panel = line.qaTipPanel, let card = line.qaTipView else { throw WorkspaceAgentReportChecks.Failure(description: "lead-plan-popover: no card at zoom \(z)") }
+            let surface = panel.frame.insetBy(dx: ChoicePanelShadowView.margin, dy: ChoicePanelShadowView.margin)
+            let orbOnScreen = window.convertToScreen(orb.convert(orb.bounds, to: nil))
+            try expect(abs(surface.midX - orbOnScreen.midX) <= 1 && surface.minY >= orbOnScreen.maxY
+                       && surface.minY - orbOnScreen.maxY <= PlanMetrics.s(Space.m, line.zoom) * CGFloat(z),
+                       "at zoom \(z) the card \(surface) is not centred just above its orb \(orbOnScreen)")
+            measured.append((z, card.qaFontSize, surface.size))
+            pointer(at: NSPoint(x: line.bounds.maxX - 4, y: line.bounds.midY))
+            try expect(line.qaTipPanel?.isVisible != true, "the card stayed after the pointer left the orb at zoom \(z)")
+        }
+        let (_, font1, size1) = measured[0]
+        for (z, font, size) in measured.dropFirst() {
+            let k = CGFloat(z)
+            try expect(abs(font - font1 * k) <= 1 && abs(size.width - size1.width * k) <= 1 && abs(size.height - size1.height * k) <= 1,
+                       "at zoom \(z) the card is \(font) pt, \(size); at 1.0 it is \(font1) pt, \(size1)")
+        }
+        // A zoom under a showing card takes it away.
+        camera(1.0)
+        if let orb = line.qaPile.first {
+            pointer(at: NSPoint(x: orb.frame.midX, y: orb.frame.midY))
+            try await AgentPresenceChecks.eventually("no orb card before the zoom") { line.qaTipPanel?.isVisible == true }
+        }
+        camera(1.5)
+        try expect(line.qaTipPanel?.isVisible != true, "a canvas zoom left the orb card at its old size")
+        print("Lead plan orb card zoom: " + measured.map { "\($0.0)x \(String(format: "%.1f", $0.1)) pt \(Int($0.2.width))x\(Int($0.2.height))" }.joined(separator: ", ") + "; centred above its orb at each; hidden by a zoom under it")
+
         print("Lead plan popover passed: in the status row, \(line.sentence); opens above the line inside the tile with the shared entrance; a second click closes it with the shared exit and does not reopen; Escape closes; stays open through a helper's change; an orb or row in the plan reveals its helper, the line itself never does; a chip answers into the composer; chips start at the question; the count follows the decision; each orb in the pile cuts an even gap out of the one behind it")
     }
 

@@ -362,6 +362,35 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
     /// The hovered orb's card, in its own child panel above the orb.
     private let tip = PlanOrbTip()
 
+    /// How much the canvas magnifies this line on screen; 1 off the canvas.
+    var canvasScale: CGFloat {
+        guard bounds.width > 0 else { return 1 }
+        let w = convert(bounds, to: nil).width
+        return w > 0 ? w / bounds.width : 1
+    }
+    /// The card and the plan are drawn at the scale they opened at. Neither
+    /// follows a canvas zoom live (the choice popover never has), so both go
+    /// when the canvas zooms under them; a hover brings the card back at the
+    /// new size.
+    private var planeWatch: NSObjectProtocol?
+    private var shownScale: CGFloat = 1
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let planeWatch { NotificationCenter.default.removeObserver(planeWatch) }
+        planeWatch = nil
+        guard window != nil,
+              let plane = sequence(first: superview, next: { $0?.superview }).first(where: { $0 is CanvasWorldPlaneView }) ?? nil
+        else { return }
+        planeWatch = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: plane, queue: nil) { [weak self] _ in
+            MainActor.assumeIsolated { self?.canvasMoved() }
+        }
+    }
+    private func canvasMoved() {
+        guard tip.panel?.isVisible == true || isOpen, abs(canvasScale - shownScale) > 0.001 else { return }
+        tip.dismiss(animated: false)
+        if isOpen { close() }
+    }
+
     override class func defaultAnimation(forKey key: NSAnimatablePropertyKey) -> Any? {
         key == "hoverAmount" ? CABasicAnimation() : super.defaultAnimation(forKey: key)
     }
@@ -445,7 +474,8 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
     /// The hovered orb's helper, in a card above that orb; none while the
     /// plan is open.
     private func showOrbHover() {
-        if !isOpen, let h = helper(for: hoveredOrb), let orb = hoveredOrb { tip.show(h, over: orb, zoom: zoom) }
+        shownScale = canvasScale
+        if !isOpen, let h = helper(for: hoveredOrb), let orb = hoveredOrb { tip.show(h, over: orb, zoom: zoom, scale: canvasScale) }
         else { tip.dismiss(animated: true) }
     }
 
@@ -476,6 +506,7 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         list.onReveal = { [weak self] id in self?.close(); self?.onRevealOwner?(id) }
         list.onChoose = { [weak self] answer in self?.close(); self?.onChoose?(answer) }
         tip.dismiss(animated: false)
+        shownScale = canvasScale
         let surface = PlanPopoverSurfaceView(list)
         surface.onCancel = { [weak self] in self?.close() }
         let size = list.preferredSize(maxWidth: popoverMaxWidth)
