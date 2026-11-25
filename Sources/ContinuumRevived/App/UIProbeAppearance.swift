@@ -410,6 +410,10 @@ enum UIProbeAppearance {
             ("appearance.onboardingContent", NSSize(width: 620, height: 600), {
                 OnboardingContentView(frame: NSRect(x: 0, y: 0, width: 620, height: 600))
             }),
+            // ⌘K Open file's loading row: two card fills, the resting bars and the band.
+            ("appearance.paletteSkeletonRow", NSSize(width: 620, height: 46), {
+                CommandCenterSkeletonCell(index: 0)
+            }),
             // P1.11 made the canvas a `TokenThemed` conformer, so `declaredConformers()`
             // requires it here — and the canvas fill is the background half of the
             // `borderStrong`-on-`canvas` pair this ticket's Goal names.
@@ -1007,6 +1011,9 @@ enum UIProbeAppearance {
         "ToolbarChoicesMenuView",
         "ToolbarChoiceRowView",
         "OnboardingContentView",
+        // ⌘K Open file's skeleton row: `cardUserMessage` bars under a `cardMessage`
+        // band, both SurfaceToken fills on the palette's overlay.
+        "CommandCenterSkeletonCell",
         // P5.5 acceptance: the legacy TranscriptCardView/TranscriptProseView owners
         // were deleted with the compatibility path; the v2 tiles the Lab now vends
         // paint the composer shell on every managed-agent surface, so the composer
@@ -2090,6 +2097,9 @@ enum UIProbeAppearance {
             }),
             AdoptedSurface(id: "onboardingContent", size: NSSize(width: 620, height: 600), make: {
                 OnboardingContentView(frame: NSRect(x: 0, y: 0, width: 620, height: 600))
+            }),
+            AdoptedSurface(id: "paletteSkeletonRow", size: NSSize(width: 620, height: 46), make: {
+                CommandCenterSkeletonCell(index: 0)
             })
         ]
     }

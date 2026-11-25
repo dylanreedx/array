@@ -31,6 +31,17 @@ enum PaletteOpenFileChecks {
         try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: dir).appendingPathComponent(name + ".png"))
     }
 
+    private static func shotBothAppearances(_ palette: LaunchProfilePalette, _ window: NSWindow, _ name: String) {
+        guard ProcessInfo.processInfo.environment["CONTINUUM_PALETTE_SHOTS"] != nil else { return }
+        let previous = window.appearance
+        for (suffix, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+            window.appearance = NSAppearance(named: appearance)
+            palette.panelViewForQA?.layoutSubtreeIfNeeded()
+            shot(palette, "\(name)-\(suffix)")
+        }
+        window.appearance = previous
+    }
+
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
         if !condition() { throw Failure(description: message) }
     }
@@ -233,13 +244,21 @@ enum PaletteOpenFileChecks {
         guard let fifth = delegate.qaProfilePaletteAfterOpening() else { throw Failure(description: "reopen") }
         fifth.typeForQA("open file"); fifth.keyForQA(keyCode: 36)
         fifth.typeForQA("K")
-        try expect(fifth.fileEmptyTextForQA == "Searching…" && fifth.fileRowsForQA.isEmpty,
-                   "a search in flight must say Searching…, not the empty-query rows or placeholder; got text=\(String(describing: fifth.fileEmptyTextForQA)) rows=\(fifth.fileRowsForQA.map(\.path))")
-        shot(fifth, "kevin-searching")
+        // In flight: skeleton rows under the Files header the results will use, no words.
+        try expect(fifth.skeletonRowCountForQA == CommandCenterSkeletonCell.rowCount && fifth.sectionTitlesForQA == ["Files"]
+                   && fifth.fileRowsForQA.isEmpty && fifth.fileEmptyTextForQA == nil,
+                   "a search in flight must show skeleton rows under Files and no text; got skeletons=\(fifth.skeletonRowCountForQA) sections=\(fifth.sectionTitlesForQA) text=\(String(describing: fifth.fileEmptyTextForQA)) rows=\(fifth.fileRowsForQA.map(\.path))")
+        let shimmering = fifth.skeletonShimmeringForQA ?? []
+        let still = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        try expect(shimmering.count == CommandCenterSkeletonCell.rowCount && shimmering.allSatisfy { $0 == !still },
+                   "skeleton rows shimmer unless Reduce Motion is on (reduce=\(still)); got \(shimmering)")
+        shotBothAppearances(fifth, window, "skeleton")
         fifth.typeForQA("")
         try typeThroughEvents("Kevin-context.md", in: window)
         try pump(fifth) { fifth.fileRowsForQA.contains { $0.name == "KEVIN-CONTEXT.md" } }
-        shot(fifth, "kevin-found")
+        try expect(fifth.skeletonRowCountForQA == 0 && fifth.sectionTitlesForQA == ["Files"],
+                   "results replace the skeleton rows under the same header; skeletons=\(fifth.skeletonRowCountForQA) sections=\(fifth.sectionTitlesForQA)")
+        shotBothAppearances(fifth, window, "results")
         try expect(fifth.fileRowsForQA.first?.path == "alignment-2026-10/mapping-process/whit-compare/KEVIN-CONTEXT.md",
                    "the exact name in another case must rank first, got \(fifth.fileRowsForQA.map(\.path))")
         let scans = delegate.qaPaletteFileIndexScans - scansBefore

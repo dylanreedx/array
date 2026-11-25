@@ -238,6 +238,17 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     var panelHeightForQA: CGFloat { paletteView?.frame.height ?? 0 }
     var isChoosingFileForQA: Bool { navigationLevel == .files }
     var fileRowsForQA: [PaletteFileRow] { displayEntries.compactMap { if case let .file(row) = $0 { return row }; return nil } }
+    var skeletonRowCountForQA: Int { displayEntries.filter { if case .skeleton = $0 { return true }; return false }.count }
+    /// The skeleton cells as the table lays them out: nil when there are none.
+    var skeletonShimmeringForQA: [Bool]? {
+        guard let tableView else { return nil }
+        tableView.layoutSubtreeIfNeeded()
+        let cells = displayEntries.indices.compactMap { row -> CommandCenterSkeletonCell? in
+            guard case .skeleton = displayEntries[row] else { return nil }
+            return tableView.view(atColumn: 0, row: row, makeIfNecessary: true) as? CommandCenterSkeletonCell
+        }
+        return cells.isEmpty ? nil : cells.map(\.isShimmeringForQA)
+    }
     var sectionTitlesForQA: [String] { displayEntries.compactMap { if case let .section(title) = $0 { return title }; return nil } }
     var footerTextForQA: String { footerLabel?.stringValue ?? "" }
     var filteredDisplayNamesForQA: [String] { filtered.map(\.displayName) }
@@ -1237,6 +1248,8 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             return CommandCenterSectionCell(title: title)
         case let .file(file):
             return CommandCenterItemCell(file: file)
+        case let .skeleton(index):
+            return CommandCenterSkeletonCell(index: index)
         case let .item(item):
             return CommandCenterItemCell(
                 item: item,
@@ -1537,7 +1550,7 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         switch entry {
         case let .item(item): return item.row.isSelectable
         case .file: return true
-        case .section: return false
+        case .section, .skeleton: return false
         }
     }
 
@@ -1570,12 +1583,13 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         }
         fileSearchToken += 1
         let token = fileSearchToken
-        // Until the first answer, say a search is running: the empty-query rows and the
-        // "Type to search" line read as a search that found nothing (0.7.63).
+        // Until the first answer, skeleton rows stand where the results will: the
+        // empty-query rows and the "Type to search" line read as a search that found
+        // nothing (0.7.63). Results already showing stay until the next answer.
         if !showingFileResults || displayEntries.isEmpty {
             showingFileResults = false
-            displayEntries = []
-            reloadFileEntries(emptyText: "Searching…")
+            displayEntries = [.section("Files")] + (0..<CommandCenterSkeletonCell.rowCount).map(CommandCenterDisplayEntry.skeleton)
+            reloadFileEntries(emptyText: "")
         }
         fileSearchPending = true
         onSearchFiles?(trimmed) { [weak self] rows in
@@ -1723,6 +1737,8 @@ private enum CommandCenterDisplayEntry {
     case section(String)
     case item(CommandCenterItem)
     case file(PaletteFileRow)
+    /// A stand-in for a file row while the project is listed; the index varies its bars.
+    case skeleton(Int)
 
     var isSection: Bool {
         if case .section = self { return true }
@@ -1890,6 +1906,119 @@ final class CommandCenterSectionCell: NSTableCellView {
             index == 0 ? String(word) : word.first?.isLetter == true ? word.lowercased() : String(word)
         }.joined(separator: " ")
     }
+}
+
+/// A file row's stand-in while Open file lists the project: the row's own geometry (the
+/// icon's box at 14, the name over its folder at 42) as quiet bars, so the results take
+/// their places without moving anything. The bars are a surface fill one step off the
+/// palette; a fill one step nearer the palette passes over them in a soft band, the inbox's
+/// working-title shimmer (`InboxShimmerOverlay`) on the same shared clock, so every row's
+/// band moves in step. Reduce Motion leaves the bars still.
+final class CommandCenterSkeletonCell: NSTableCellView, TokenThemed {
+    static let rowCount = 4
+    static let period: CFTimeInterval = InboxShimmerOverlay.period * 1.5
+    static let band: CGFloat = 160
+    static let animationKey = "palette.skeleton.shimmer"
+    private static let nameWidths: [CGFloat] = [176, 132, 204, 152]
+    private static let folderWidths: [CGFloat] = [112, 88, 136, 100]
+
+    private let index: Int
+    private let base = CALayer()
+    private let highlight = CALayer()
+    private let band = CAGradientLayer()
+    var reduceMotion: () -> Bool = { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+
+    init(index: Int) {
+        self.index = index
+        super.init(frame: .zero)
+        wantsLayer = true
+        for group in [base, highlight] {
+            for _ in 0..<3 { group.addSublayer(CALayer()) }
+            layer?.addSublayer(group)
+        }
+        band.startPoint = CGPoint(x: 0, y: 0.5)
+        band.endPoint = CGPoint(x: 1, y: 0.5)
+        band.colors = [NSColor.clear.cgColor, NSColor.black.cgColor, NSColor.clear.cgColor]
+        band.locations = [0, 0.5, 1]
+        highlight.mask = band
+        applyTokens()
+        setAccessibilityElement(false)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTokens()
+    }
+
+    func applyTokens() {
+        // The palette is a translucent panel (~#FDFDFD light, ~#2E2E2E dark), lighter than
+        // every dark card fill: dark bars sit a step BELOW it, light bars a step under white.
+        let dark = effectiveTokenTheme == .dark
+        let resting = (dark ? SurfaceToken.tileBody : .cardUserMessage).color.nsColor(in: self).cgColor
+        let lit = SurfaceToken.tileChrome.color.nsColor(in: self).cgColor
+        base.sublayers?.forEach { $0.backgroundColor = resting }
+        highlight.sublayers?.forEach { $0.backgroundColor = lit }
+    }
+
+    /// The bars, from the real row's metrics: the 18pt icon box at 14, text at 42, a
+    /// 13.5pt name line over an 11.5pt folder line, one point apart, centred in 46.
+    private func barFrames() -> [CGRect] {
+        let mid = bounds.midY
+        let name = Self.nameWidths[index % Self.nameWidths.count]
+        let folder = Self.folderWidths[index % Self.folderWidths.count]
+        let room = max(0, bounds.width - 42 - 14)
+        return [
+            CGRect(x: 15, y: mid - 8, width: 16, height: 16),
+            CGRect(x: 42, y: mid + 7.5 - 5, width: min(name, room), height: 10),
+            CGRect(x: 42, y: mid - 9 - 4, width: min(folder, room), height: 8),
+        ]
+    }
+
+    override func layout() {
+        super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let frames = barFrames()
+        for group in [base, highlight] {
+            group.frame = bounds
+            for (bar, frame) in zip(group.sublayers ?? [], frames) {
+                bar.frame = frame
+                bar.cornerRadius = frame.height == 16 ? 4 : frame.height / 2
+            }
+        }
+        band.bounds = CGRect(x: 0, y: 0, width: Self.band, height: max(1, bounds.height))
+        band.position = CGPoint(x: -Self.band, y: bounds.midY)
+        CATransaction.commit()
+        animate()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        animate()
+    }
+
+    private func animate() {
+        let still = reduceMotion()
+        highlight.isHidden = still
+        guard window != nil, !still, bounds.width > 0 else {
+            band.removeAnimation(forKey: Self.animationKey)
+            return
+        }
+        guard band.animation(forKey: Self.animationKey) == nil else { return }
+        let reach = (barFrames().map(\.maxX).max() ?? 0) + Self.band / 2
+        let sweep = CABasicAnimation(keyPath: "position.x")
+        sweep.fromValue = -Self.band / 2
+        sweep.toValue = reach
+        sweep.duration = Self.period
+        sweep.repeatCount = .infinity
+        sweep.isRemovedOnCompletion = false
+        sweep.beginTime = InboxOwnershipClock.beginTime(period: Self.period, phase: 0, in: band)
+        band.add(sweep, forKey: Self.animationKey)
+    }
+
+    var isShimmeringForQA: Bool { !highlight.isHidden && band.animation(forKey: Self.animationKey) != nil }
 }
 
 /// One file in the Open file step. The row the @ menu draws for a file: name over its
