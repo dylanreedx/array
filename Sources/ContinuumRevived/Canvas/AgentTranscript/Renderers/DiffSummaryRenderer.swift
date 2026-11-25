@@ -642,7 +642,12 @@ final class AgentDiffSummaryView: NSView, CornerStyled {
             sawLowerBound = sawLowerBound || file.countsAreLowerBound || !file.lineCountsAreKnown
         }
         let noun = files.count == 1 ? "file" : "files"
-        guard !measured.isEmpty else { return "\(files.count) \(noun) · line counts unavailable" }
+        // A picture, pdf or other binary has no lines, so a missing count says
+        // nothing about it. Only a text file's unknown count is worth saying.
+        let unknownText = files.filter { !$0.hasAnyKnownCount && !$0.isBinary }.count
+        guard !measured.isEmpty else {
+            return unknownText == 0 ? "\(files.count) \(noun)" : "\(files.count) \(noun) · line counts unavailable"
+        }
         // A created file has nothing it replaced: its count is the lines it holds,
         // read plainly ("+16"), never as a floor over "−0" or "−?". A file written
         // over an existing one knows only what it wrote, so it is said in words
@@ -655,7 +660,7 @@ final class AgentDiffSummaryView: NSView, CornerStyled {
         } else {
             stat = "\(sawLowerBound ? "≥ " : "")+\(additions) −\(removals)"
         }
-        let unmeasured = files.count - measured.count
+        let unmeasured = unknownText
         guard unmeasured > 0 else { return "\(files.count) \(noun) · \(stat)" }
         let unmeasuredNoun = unmeasured == 1 ? "file" : "files"
         return "\(files.count) \(noun) · \(stat) · \(unmeasured) \(unmeasuredNoun) without counts"
@@ -909,6 +914,16 @@ final class AgentOpenReviewButton: NSButton {
 
 
 extension AgentDiffFileSummary {
+    static let binaryExtensions: Set<String> = [
+        "png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "tif", "tiff", "bmp", "ico", "icns",
+        "pdf", "mov", "mp4", "m4v", "mp3", "m4a", "wav", "zip", "gz", "tgz", "dmg",
+        "docx", "xlsx", "pptx", "key", "pages", "numbers", "sqlite", "db", "ttf", "otf", "woff", "woff2",
+    ]
+    /// A file with no lines to count (a picture, a pdf, an archive).
+    fileprivate var isBinary: Bool {
+        let name = fileURL?.lastPathComponent ?? displayName.components(separatedBy: " → ").last ?? displayName
+        return Self.binaryExtensions.contains((name as NSString).pathExtension.lowercased())
+    }
     /// The operation made the file: it replaced nothing, so it has no removed count.
     /// Created, as the tool's own result said (claude's Write reports a new file).
     fileprivate var isCreation: Bool { action == .add }

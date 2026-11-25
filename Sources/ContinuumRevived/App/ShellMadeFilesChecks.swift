@@ -163,13 +163,15 @@ enum ShellMadeFilesChecks {
     // MARK: Restore through the real tile
 
     static func restored(_ fixture: Fixture, stillsDirectory: URL?) throws {
-        let cases: [(String, RehydratedTranscript, [URL], [URL], String)] = [
+        // The header counts lines of text only: a picture has none to count, so it
+        // never reads "· 1 file without counts".
+        let cases: [(String, RehydratedTranscript, [URL], [URL], String, String)] = [
             ("claude Bash", ClaudeSessionTranscriptReader.parse(lines: fixture.claudeLines, threadId: "shell-made-claude"),
-             fixture.claudeShown, fixture.claudeHidden, "Captured the sidebar and wrote the review."),
+             fixture.claudeShown, fixture.claudeHidden, "Captured the sidebar and wrote the review.", "2 files · +5"),
             ("codex exec", CodexSessionTranscriptReader.parse(lines: fixture.codexLines, threadId: "shell-made-codex"),
-             fixture.codexShown, [], "The page, the notes and the small shot are in."),
+             fixture.codexShown, [], "The page, the notes and the small shot are in.", "3 files · +4"),
         ]
-        for (label, transcript, shown, hidden, closing) in cases {
+        for (label, transcript, shown, hidden, closing, header) in cases {
             for dark in stillsDirectory == nil ? [true] : [false, true] {
                 let tile = ManagedAgentTileNSView(tile: Tile(
                     id: UUID(), kind: .managedAgent, title: label, frame: TileFrame(x: 0, y: 0, width: 640, height: 620),
@@ -202,6 +204,8 @@ enum ShellMadeFilesChecks {
                     try expect(!files.contains { $0.displayName.contains(url.lastPathComponent) },
                                "\(label): \(url.lastPathComponent) must not be on the card (read, or temp scratch), got \(described)")
                 }
+                let drawnHeader = AgentDiffSummaryView.countsText(cards[0].files)
+                try expect(drawnHeader == header, "\(label): the card header must read '\(header)', got '\(drawnHeader)'")
                 try expect(canvas.qaFileThumbs.count == shown.count && canvas.qaFileThumbs.allSatisfy(\.hasPicture),
                            "\(label): every made file must have a real thumbnail, got \(canvas.qaFileThumbs.count) of \(shown.count) (pictures \(canvas.qaFileThumbs.filter(\.hasPicture).count))")
                 if let stillsDirectory {

@@ -318,5 +318,31 @@ enum FileCardChecks {
         guard card(mixed).countsLabel.stringValue == "2 files · +3 −1 · 1 file without counts" else {
             throw fail("mixed: '\(card(mixed).countsLabel.stringValue)'")
         }
+        // A picture or pdf has no lines: its missing count is not news.
+        let withPicture = AgentDiffPayload(
+            text: "write", summary: "Write",
+            files: [
+                .init(displayName: "a.swift", addedLineCount: 3, removedLineCount: 1, action: .edit),
+                .init(displayName: "shot.png", action: .add),
+            ])
+        guard card(withPicture).countsLabel.stringValue == "2 files · +3 −1" else {
+            throw fail("picture: a picture must not read as a file without counts, got '\(card(withPicture).countsLabel.stringValue)'")
+        }
+        let picturesOnly = AgentDiffPayload(
+            text: "write", summary: "Write",
+            files: [.init(displayName: "shot.png", action: .add), .init(displayName: "doc.pdf", action: .add)])
+        guard card(picturesOnly).countsLabel.stringValue == "2 files" else {
+            throw fail("pictures only: '\(card(picturesOnly).countsLabel.stringValue)'")
+        }
+        let pictureAndUnknownText = AgentDiffPayload(
+            text: "write", summary: "Write",
+            files: [
+                .init(displayName: "a.swift", addedLineCount: 3, removedLineCount: 1, action: .edit),
+                .init(displayName: "shot.png", action: .add),
+                .init(displayName: "b.swift", action: .edit),
+            ])
+        guard card(pictureAndUnknownText).countsLabel.stringValue == "3 files · +3 −1 · 1 file without counts" else {
+            throw fail("picture + unknown text: '\(card(pictureAndUnknownText).countsLabel.stringValue)'")
+        }
     }
 }
