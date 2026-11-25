@@ -1197,17 +1197,15 @@ enum UIProbeGeometry {
         try require(wide.qaAccessibilityLabel.contains("Account 5-hour usage 82 percent left")
                         && wide.qaAccessibilityLabel.contains("Account: Claude Max, personal@example.com"),
                     "the row must announce which account and what is left of it, got \"\(wide.qaAccessibilityLabel)\"")
-        // THE CARD, NOT TEXT, OVER THE PILLS. The plain tooltip used to open
-        // there with paragraphs per window; now the account card does, and the
-        // tooltip must stay out of its way while still serving the rest of the
-        // row.
-        guard let pills = wide.qaAccountPillsFrame else { throw fail("compactStatusRow.accountElements: account pills frame missing") }
-        try require(wide.qaToolTip(at: NSPoint(x: pills.midX, y: pills.midY)).isEmpty,
-                    "the text tooltip must not open over the account pills, got \"\(wide.qaToolTip(at: NSPoint(x: pills.midX, y: pills.midY)))\"")
-        try require(wide.qaToolTip(at: NSPoint(x: 4, y: pills.midY)).contains("Activity phase"),
-                    "the rest of the row keeps its tooltip")
-        try require(!wide.qaToolTip.contains("Account 5-hour"),
-                    "a window drawn on screen belongs to the card, not the row tooltip")
+        // NO HOVER TEXT. The row once opened a system tooltip of paragraphs
+        // after a long dwell; the plan line and the account card are its hover
+        // UI now, so neither the row nor any label carries detail text.
+        guard wide.qaAccountPillsFrame != nil else { throw fail("compactStatusRow.accountElements: account pills frame missing") }
+        try require(!((wide as AnyObject) is NSViewToolTipOwner) && wide.toolTip == nil
+                        && !wide.qaToolTips.contains { $0.contains("Activity phase") || $0.contains("Home:") || $0.contains("Account 5-hour") },
+                    "the status row still carries hover text: \(wide.qaToolTips)")
+        try require(!wide.qaAccessibilityHelp.contains("Account 5-hour"),
+                    "a window drawn on screen belongs to the card, not the row's help")
         let card = wide.qaAccountPresentation?.card
         try require(card?.title == "Claude · Max" && card?.subtitle == "personal@example.com"
                         && card?.windows.map(\.valueText) == ["82% left", "6% left"]
@@ -1226,13 +1224,13 @@ enum UIProbeGeometry {
             try require(narrow.qaQuotaText(dropped).isEmpty,
                         "a dropped chip must not still be drawing")
         }
-        // The 5-hour reading survives in speech and in the tooltip even at a
-        // width that cannot draw it.
+        // The 5-hour reading survives in speech and in the row's help even at
+        // a width that cannot draw it.
         try require(narrow.qaAccessibilityLabel.contains("Account 5-hour usage 82 percent left"),
                     "a dropped element must still be announced, got \"\(narrow.qaAccessibilityLabel)\"")
         if narrow.qaDroppedElements.contains(.quotaFiveHour) {
-            try require(narrow.qaToolTip.contains("Account 5-hour usage: 82% left"),
-                        "a dropped window must still be in the tooltip, got \"\(narrow.qaToolTip)\"")
+            try require(narrow.qaAccessibilityHelp.contains("Account 5-hour usage: 82% left"),
+                        "a dropped window must still be in the row's help, got \"\(narrow.qaAccessibilityHelp)\"")
         }
 
         // WIDENING RESTORES. A drop is a width constraint, not a latch.
