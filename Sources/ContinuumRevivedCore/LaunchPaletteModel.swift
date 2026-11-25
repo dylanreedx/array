@@ -871,7 +871,7 @@ public enum LaunchPaletteModel {
         case .newBoard: return item(row, .create, "Board", "Add a kanban board", "rectangle.split.3x1", ["new", "kanban"], true, true, "action:new-board")
         case .newBrowser: return item(row, .create, "Browser", "Open a web tile", "globe", ["new", "web"], true, true, "action:new-browser")
         case .newIOSPreview: return item(row, .create, "iOS Preview", "Run an iPhone or iPad simulator on the canvas", "iphone", ["simulator", "device", "ipad"], true, true, "action:ios-preview")
-        case .openFile: return item(row, .create, "Editor", "Open a project file to edit", "doc", ["open file", "text editor", "code editor"], true, true, "action:open-file")
+        case .openFile: return item(row, .create, "Open file…", "Search every file in this project", "doc", ["editor", "text editor", "code editor"], true, true, "action:open-file")
         case .openFileTree: return item(row, .create, "File tree", "Browse project files", "list.bullet.indent", ["open"], true, true, "action:file-tree")
         case .newDiffReview: return item(row, .create, "Diff review", "Review working changes", "plusminus", ["git", "new"], true, true, "action:diff-review")
         case .shareArea: return item(row, .actions, "Share…", "Share the selected tiles, or drag over what to share", "square.and.arrow.up", ["link", "invite", "collaborate"], false, false, "action:share")

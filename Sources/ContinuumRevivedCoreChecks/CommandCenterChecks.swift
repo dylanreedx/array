@@ -21,7 +21,7 @@ func runCommandCenterChecks() {
         let results = LaunchPaletteModel.makeSections(rows: rows, query: query).flatMap(\.items)
         expect(results.contains { $0.row == .action(.openFile) }, "\(query) finds editor creation with the existing file-open dispatch")
     }
-    expect(home.flatMap(\.items).contains { $0.row == .action(.openFile) && $0.title == "Editor" && $0.category == .create }, "Editor is visible among default creation actions")
+    expect(home.flatMap(\.items).contains { $0.row == .action(.openFile) && $0.title == "Open file…" && $0.subtitle == "Search every file in this project" && $0.category == .create }, "Open file… is visible among default creation actions")
     let editorTile = JumpTileRow(id: UUID(), title: "README.md", kind: .file)
     let editorRows = LaunchPaletteModel.makeRows(profiles: [], jumpTiles: [editorTile])
     expect(LaunchPaletteModel.makeSections(rows: editorRows, query: "editor").flatMap(\.items).contains { $0.row == .jumpToTile(editorTile) }, "editor search also finds existing file tiles")
