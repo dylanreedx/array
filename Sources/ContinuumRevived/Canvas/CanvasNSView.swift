@@ -7483,6 +7483,136 @@ final class CanvasNSView: NSView, TokenThemed {
         return top
     }
 
+    // MARK: - Pinned head drag camera
+
+    /// A drag from a pinned head moves a tile taller than the screen. The camera
+    /// eases out around the pointer until the whole tile fits below it, the
+    /// tile's real header coming up under the hand; the drop eases it back to
+    /// the zoom it had with the point first grabbed under the pointer again.
+    /// Both eases solve the camera from the tile and the pointer each step: the
+    /// tile point under the pointer and the zoom move together, so the tile stays
+    /// in the hand however the pointer moves meanwhile. Nothing per tile.
+    private final class PinnedHeadDragCamera {
+        /// The tile's world origin while dragged (or settling) and the pointer,
+        /// in canvas coordinates. Nil ends the ease where it stands.
+        let anchor: () -> (origin: CGPoint, pointer: CGPoint)?
+        /// The camera at the press, for a drop that moved nothing.
+        let original: CanvasViewport
+        /// The world offset, from the tile's origin, grabbed at the press.
+        let grabbed: CGPoint
+        var ease: (from: (point: CGPoint, zoom: Double), to: (point: CGPoint, zoom: Double), started: TimeInterval)?
+        var timer: Timer?
+        /// The return ease: the camera is released when it lands.
+        var ending = false
+
+        init(anchor: @escaping () -> (origin: CGPoint, pointer: CGPoint)?, original: CanvasViewport, grabbed: CGPoint) {
+            self.anchor = anchor
+            self.original = original
+            self.grabbed = grabbed
+        }
+    }
+
+    private var pinnedHeadDragCamera: PinnedHeadDragCamera?
+    static let pinnedHeadDragEaseSeconds: TimeInterval = 0.28
+
+    /// QA: a pinned-head drag holds the camera (eased out, or easing).
+    var qaPinnedHeadDragCameraActive: Bool { pinnedHeadDragCamera != nil }
+
+    /// Ease out for a pinned head's move. `anchor` reads the dragged tile's world
+    /// origin and the pointer (window coordinates) live; `headerY` is the world
+    /// offset of the real header's middle from the tile's top. Does nothing when
+    /// the tile already fits below the pointer at the current zoom.
+    func beginPinnedHeadDragCamera(tileHeight: Double, headerY: Double,
+                                   anchor: @escaping () -> (origin: CGPoint, pointerWindow: NSPoint)?) {
+        pinnedHeadDragCamera?.timer?.invalidate()
+        pinnedHeadDragCamera = nil
+        let toCanvas: () -> (origin: CGPoint, pointer: CGPoint)? = { [weak self] in
+            guard let self, let read = anchor() else { return nil }
+            return (read.origin, self.convert(read.pointerWindow, from: nil))
+        }
+        guard let now = toCanvas() else { return }
+        let start = viewport
+        let pointerWorld = CanvasEngine.screenToWorld(now.pointer, viewport: start)
+        let grabbed = CGPoint(x: pointerWorld.x - now.origin.x, y: pointerWorld.y - now.origin.y)
+        let below = tileHeight - headerY
+        guard below > 0 else { return }
+        let room = Double(bounds.height) - CameraFraming.tilePaddingScreenPx - Double(now.pointer.y)
+        let fitted = max(CanvasEngine.defaultZoomRange.lowerBound, min(start.zoom, room / below))
+        guard fitted < start.zoom - 0.001 else { return }
+        let camera = PinnedHeadDragCamera(anchor: toCanvas, original: start, grabbed: grabbed)
+        pinnedHeadDragCamera = camera
+        runPinnedHeadDragEase(camera, to: (CGPoint(x: grabbed.x, y: headerY), fitted))
+    }
+
+    /// The drag ended. `restoring` false: the tile moved, so the camera returns
+    /// to its zoom with the grabbed point under the pointer. True: the tile went
+    /// nowhere (a reference, a cancel), so the camera returns exactly.
+    func endPinnedHeadDragCamera(restoring: Bool) {
+        guard let camera = pinnedHeadDragCamera, let now = camera.anchor() else {
+            pinnedHeadDragCamera?.timer?.invalidate()
+            pinnedHeadDragCamera = nil
+            return
+        }
+        let point: CGPoint
+        if restoring {
+            let world = CanvasEngine.screenToWorld(now.pointer, viewport: camera.original)
+            point = CGPoint(x: world.x - now.origin.x, y: world.y - now.origin.y)
+        } else {
+            point = camera.grabbed
+        }
+        runPinnedHeadDragEase(camera, to: (point, camera.original.zoom), ending: true)
+    }
+
+    private func runPinnedHeadDragEase(_ camera: PinnedHeadDragCamera, to target: (point: CGPoint, zoom: Double), ending: Bool = false) {
+        camera.timer?.invalidate()
+        camera.timer = nil
+        guard let now = camera.anchor() else { pinnedHeadDragCamera = nil; return }
+        let world = CanvasEngine.screenToWorld(now.pointer, viewport: viewport)
+        let from = (CGPoint(x: world.x - now.origin.x, y: world.y - now.origin.y), viewport.zoom)
+        camera.ease = (from, target, ProcessInfo.processInfo.systemUptime)
+        camera.ending = ending
+        if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            applyPinnedHeadDragCamera(camera, progress: 1)
+            finishPinnedHeadDragEase(camera)
+            return
+        }
+        let timer = Timer(timeInterval: 1.0 / 120, target: self, selector: #selector(pinnedHeadDragEaseTick(_:)),
+                          userInfo: nil, repeats: true)
+        camera.timer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    @objc private func pinnedHeadDragEaseTick(_ timer: Timer) {
+        guard let camera = pinnedHeadDragCamera, camera.timer === timer, let ease = camera.ease else {
+            timer.invalidate()
+            return
+        }
+        let p = min(1, (ProcessInfo.processInfo.systemUptime - ease.started) / Self.pinnedHeadDragEaseSeconds)
+        // Ease in-out (cubic): no jolt as the drag starts, a soft landing.
+        let e = p < 0.5 ? 4 * p * p * p : 1 - pow(-2 * p + 2, 3) / 2
+        if !applyPinnedHeadDragCamera(camera, progress: e) || p >= 1 { finishPinnedHeadDragEase(camera) }
+    }
+
+    private func finishPinnedHeadDragEase(_ camera: PinnedHeadDragCamera) {
+        camera.timer?.invalidate()
+        camera.timer = nil
+        camera.ease = nil
+        if camera.ending, pinnedHeadDragCamera === camera { pinnedHeadDragCamera = nil }
+    }
+
+    /// One step: the camera that puts the eased tile point under the pointer at
+    /// the eased zoom. False when the drag's anchor is gone.
+    @discardableResult
+    private func applyPinnedHeadDragCamera(_ camera: PinnedHeadDragCamera, progress e: Double) -> Bool {
+        guard let ease = camera.ease, let now = camera.anchor() else { return false }
+        let zoom = exp(log(ease.from.zoom) + (log(ease.to.zoom) - log(ease.from.zoom)) * e)
+        let x = Double(ease.from.point.x) + Double(ease.to.point.x - ease.from.point.x) * e
+        let y = Double(ease.from.point.y) + Double(ease.to.point.y - ease.from.point.y) * e
+        setViewport(CanvasViewport(x: Double(now.origin.x) + x - Double(now.pointer.x) / zoom,
+                                   y: Double(now.origin.y) + y - Double(now.pointer.y) / zoom, zoom: zoom))
+        return true
+    }
+
     /// Geometry equality for layout short-circuits. The tolerance is far below
     /// one device pixel, so a difference this small can never be visible — but it
     /// is large enough to absorb the float round-trip AppKit performs through the

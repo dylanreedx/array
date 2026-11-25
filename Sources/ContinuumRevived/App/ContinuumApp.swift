@@ -1591,6 +1591,18 @@ enum ContinuumApp {
             }
         }
 
+        if CommandLine.arguments.contains("--sticky-head-gesture-check") {
+            do {
+                _ = NSApplication.shared
+                print(try StickyHeadGestureChecks.run())
+                print("ContinuumRevivedStickyHeadGestureChecks passed: a pinned head clicks, moves and references like the header, and the unpinned header is unchanged")
+                Foundation.exit(0)
+            } catch {
+                fputs("FAIL: \(error)\n", stderr)
+                Foundation.exit(1)
+            }
+        }
+
         if CommandLine.arguments.contains("--agent-jump-composer-check") {
             do {
                 _ = NSApplication.shared

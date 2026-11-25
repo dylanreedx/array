@@ -1003,6 +1003,7 @@ if [[ "$STICKY_HEAD_ONLY" -eq 1 ]]; then
   run swift build --product Array -j 2
   run_leg scripts/check-matrix-inventory.sh
   run_app_check .build/debug/Array --sticky-head-performance-check
+  run_app_check .build/debug/Array --sticky-head-gesture-check
   run_app_check .build/debug/Array --agent-jump-composer-check
   run_app_check .build/debug/Array --tile-agent-bubble-check
   run_app_check .build/debug/Array --tile-agent-bubble-drag-check
@@ -2726,6 +2727,7 @@ run_app_check .build/debug/Array --sidebar-row-reveal-check
 # fits is framed whole; the setting off restores the old jump.
 run_app_check .build/debug/Array --agent-jump-composer-check
 run_app_check .build/debug/Array --sticky-head-performance-check
+run_app_check .build/debug/Array --sticky-head-gesture-check
 # With auto-layout OFF, a zone's automatic placement clamped only the camera, so
 # a tile could be framed past the zone's edge; auto-layout's settle grew the zone
 # over it and hid that. Toolbar spawns into one zone until it is full, asserting

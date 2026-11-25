@@ -1253,7 +1253,16 @@ class TileNSView: NSView, TokenThemed {
         guard let stickyHead else { return }
         defer { placeAgentBubble() }
         guard let top = stickyHeadTop, let titleBar else {
-            if !stickyHead.isHidden { stickyHead.isHidden = true }
+            // A head under a press only turns invisible. AppKit delivers a
+            // press's drags and release to the view that took the press, and
+            // never to a hidden one: hiding it the moment the real header came
+            // back on screen stranded the move half-done, its gesture never
+            // ended. The release hides it (`stickyHeadPressEnded`).
+            if stickyHead.isPressing {
+                if stickyHead.alphaValue != 0 { stickyHead.alphaValue = 0 }
+            } else if !stickyHead.isHidden {
+                stickyHead.isHidden = true
+            }
             return
         }
         let frame = NSRect(x: titleBar.frame.minX, y: top, width: titleBar.frame.width, height: titleBar.frame.height)
@@ -1268,16 +1277,21 @@ class TileNSView: NSView, TokenThemed {
             stickyHead.isHidden = false
             stickyHead.needsDisplay = true
         }
+        if stickyHead.alphaValue != 1 { stickyHead.alphaValue = 1 }
     }
+
+    /// The head is pinned and showing: not hidden, and not the invisible
+    /// leftover of a press whose header came back on screen.
+    private var stickyHeadShowing: Bool { stickyHeadTop != nil && stickyHead?.isHidden == false }
 
     /// QA: the pinned head as shown — nil while hidden.
     var qaStickyHead: (frame: NSRect, title: String)? {
-        guard let stickyHead, !stickyHead.isHidden, let titleBar else { return nil }
+        guard let stickyHead, stickyHeadShowing, let titleBar else { return nil }
         return (stickyHead.frame, titleBar.snapshot.title)
     }
     /// The floating icon takes the same press route as the pinned label. This
     /// bypasses a managed tile's resting-control redelivery outside its bounds.
-    var pinnedHeaderPressTarget: NSView? { stickyHead.flatMap { $0.isHidden ? nil : $0 } }
+    var pinnedHeaderPressTarget: NSView? { stickyHeadShowing ? stickyHead : nil }
     var qaStickyHeadView: NSView? { pinnedHeaderPressTarget }
     var qaStickyHeadForwardedPresses: Int { stickyHead?.qaForwardedPressCount ?? 0 }
 
@@ -1285,6 +1299,29 @@ class TileNSView: NSView, TokenThemed {
     /// title bar does — focus on a click, move on a drag — without a subclass's
     /// redelivery of presses meant for its drawn controls.
     fileprivate func stickyHeadMouseDown(with event: NSEvent) { tilePress(with: event, onPinnedHead: true) }
+
+    /// Pointer travel before a pinned head's press is a drag that eases the
+    /// camera out; a click's jitter stays a click.
+    static let pinnedHeadDragSlop: CGFloat = 3
+
+    /// The tile is taller than the screen: ease out until it fits, its real
+    /// header coming up under the pointer (`CanvasNSView`'s pinned head drag
+    /// camera). The camera follows the tile where the pointer holds it, and once
+    /// it is let go, where it settled.
+    private func beginPinnedHeadDragCamera(on canvas: CanvasNSView) {
+        let world = canvas.worldFrame(forTileFrame: tile.frame, tileId: tile.id)
+        let scale = bounds.height > 0 ? world.height / Double(bounds.height) : 1
+        canvas.beginPinnedHeadDragCamera(tileHeight: world.height, headerY: Double(chromeBarHeight) * scale / 2) { [weak self] in
+            guard let self, let canvas = self.canvas, !self.hasRetiredFromScene else { return nil }
+            let held: TileFrame
+            if case .move = self.dragKind, let free = self.moveFreeWorldFrame { held = free }
+            else { held = canvas.worldFrame(forTileFrame: self.tile.frame, tileId: self.tile.id) }
+            return (CGPoint(x: held.x, y: held.y), self.dragLastWindowPoint)
+        }
+    }
+
+    /// The pinned head's press ended: a head that unpinned under it hides now.
+    fileprivate func stickyHeadPressEnded() { layoutStickyHead() }
 
     func acquireFocus(reason: FocusRequest) -> Bool {
         canvas?.bringToFront(tileId: tile.id)
@@ -1425,7 +1462,7 @@ class TileNSView: NSView, TokenThemed {
         // The pinned head is opaque and drawn over everything on the tile, the
         // real bar's controls included while it takes over from that bar: what
         // it covers cannot be pressed through it. Its press is the header's.
-        if let stickyHead, !stickyHead.isHidden, stickyHead.frame.contains(local) {
+        if let stickyHead, stickyHeadShowing, stickyHead.frame.contains(local) {
             return stickyHead
         }
         // The agent's bubble is a grab handle drawn over everything on the tile:
@@ -1485,6 +1522,10 @@ class TileNSView: NSView, TokenThemed {
     /// composer end; a click there selects and never reframes
     /// (`--agent-jump-composer-check`).
     private var pressWasOnPinnedHead = false
+    /// Where a pinned head was pressed, and whether its drag has eased the
+    /// camera out (`CanvasNSView.beginPinnedHeadDragCamera`).
+    private var pinnedHeadPressWindowPoint: NSPoint = .zero
+    private var pinnedHeadDragCameraStarted = false
 
     /// A plain single click on the header (no drag) focuses the tile with as
     /// much of it on screen as fits, when Settings allows. On the title it waits
@@ -1523,6 +1564,8 @@ class TileNSView: NSView, TokenThemed {
         pendingHeaderClickFocus?.cancel()
         pendingHeaderClickFocus = nil
         pressWasOnPinnedHead = onPinnedHead
+        pinnedHeadPressWindowPoint = event.locationInWindow
+        pinnedHeadDragCameraStarted = false
         agentReferenceDrag?.end()
         agentReferenceDrag = nil
         canvas?.tileSelection.preparePointerDown()
@@ -1617,6 +1660,12 @@ class TileNSView: NSView, TokenThemed {
             freeTile.frame = moveFreeWorldFrame ?? canvas.worldFrame(forTileFrame: tile.frame, tileId: tile.id)
             let free = CanvasEngine.tile(freeTile, draggedByScreenDelta: delta, viewport: canvas.viewport).frame
             moveFreeWorldFrame = free
+            if pressWasOnPinnedHead, !pinnedHeadDragCameraStarted,
+               hypot(event.locationInWindow.x - pinnedHeadPressWindowPoint.x,
+                     event.locationInWindow.y - pinnedHeadPressWindowPoint.y) >= Self.pinnedHeadDragSlop {
+                pinnedHeadDragCameraStarted = true
+                beginPinnedHeadDragCamera(on: canvas)
+            }
             if let referenceDrag = agentReferenceDrag {
                 let pointer = CanvasEngine.screenToWorld(canvas.convert(event.locationInWindow, from: nil), viewport: canvas.viewport)
                 referenceDrag.setRecipient(referenceDrag.recipient(atWorld: pointer, event: event))
@@ -1770,6 +1819,14 @@ class TileNSView: NSView, TokenThemed {
         }
         if case .move = completedDragKind { _ = canvas?.commitGeometryEdit() }
         if case .resize = completedDragKind { _ = canvas?.commitGeometryEdit() }
+        // A pinned head's eased-out camera goes back once the drop has settled
+        // the tile, with the point grabbed under the pointer. (A reference
+        // returns it exactly, through `cancelActiveGeometryGesture`.)
+        if pinnedHeadDragCameraStarted {
+            pinnedHeadDragCameraStarted = false
+            dragLastWindowPoint = event.locationInWindow
+            canvas?.endPinnedHeadDragCamera(restoring: false)
+        }
 
         super.mouseUp(with: event)
     }
@@ -1778,6 +1835,13 @@ class TileNSView: NSView, TokenThemed {
     /// the matching mouse-up. The canvas restores the model snapshot; the tile
     /// clears gesture-only state so a later event cannot recommit the preview.
     func cancelActiveGeometryGesture() {
+        let pinnedCamera = pinnedHeadDragCameraStarted
+        pinnedHeadDragCameraStarted = false
+        defer {
+            // After the gesture state is cleared, so the camera returns against
+            // the tile where it rests, not where the pointer last held it.
+            if pinnedCamera { canvas?.endPinnedHeadDragCamera(restoring: true) }
+        }
         agentReferenceDrag?.end()
         agentReferenceDrag = nil
         dragKind = .none
@@ -4662,6 +4726,8 @@ private final class TileStickyHeadView: NSView {
     private weak var tile: TileNSView?
     private weak var bar: TitleBarView?
     private var pressing = false
+    /// Between this head's press and its release.
+    var isPressing: Bool { pressing }
 
     init(tile: TileNSView, bar: TitleBarView) {
         self.tile = tile
@@ -4715,6 +4781,7 @@ private final class TileStickyHeadView: NSView {
         guard pressing, let tile else { return }
         pressing = false
         tile.mouseUp(with: event)
+        tile.stickyHeadPressEnded()
     }
 
     override func menu(for event: NSEvent) -> NSMenu? { bar?.makeTileContextMenu() }
