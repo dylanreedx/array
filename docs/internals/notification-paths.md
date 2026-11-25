@@ -389,8 +389,17 @@ rail's Resume does the same. Only with no room is a message `held`, and its
 returns …`), or a usage reading with no stated reset, or a person's Resume
 when automatic resume is off. Before this the tick held every helper with a
 lead whatever the notice said, and a lead's message was held for usage while
-the note told it the message would resume the helper. Witness:
-`--usage-hold-truth-check`.
+the note told it the message would resume the helper. Held agent messages are
+never replayed after the agent has been resumed on its session: when a
+`retryOf` continuation or a usage resume starts the agent's next turn, every
+agent message held in its paused queue rides that turn as ONE note (`Note:
+these messages were held while you were paused … Act on each one, in order,
+unless this turn's work already covers it or a later one replaces it`), and
+each sender's outbox entry settles with the reason `Delivered as a note with
+the retry that resumed it` (or `…with its usage resume turn`). Typed input,
+steers, helper notes and helper results stay queued as before. Before this,
+two messages held at 11:07 each ran as a turn of their own after a retry had
+finished the brief. Witness: `--usage-hold-truth-check` (case 4).
 
 Progress text and output emitted after a result was delivered (the +16 s case,
 or a report filed after the turn) become durable queue NOTES (`helperNote`), one

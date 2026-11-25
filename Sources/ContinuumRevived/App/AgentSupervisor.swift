@@ -10525,7 +10525,8 @@ final class AgentSupervisor {
         }
         usagePauses[id] = nil
         usageFreed.remove(id)
-        let accepted = send(Self.usageContinuationPrompt, to: id)
+        let backlog = heldAgentMessageBacklog(for: id)
+        let accepted = send(foldHeldBacklog(backlog, into: Self.usageContinuationPrompt), to: id)
         guard accepted else {
             // Refused (busy, not ready): it waits for a person rather than
             // retrying every tick.
@@ -10537,6 +10538,7 @@ final class AgentSupervisor {
             return false
         }
         usageResumeLogForQA.append(id)
+        retireFoldedBacklog(backlog, for: id, reason: "Delivered as a note with its usage resume turn, not as a turn of its own.")
         resumeQueue(for: id)
         appendAgentDiagnostics("usage resumed on the same session", agentID: id)
         for lead in helperParents(id) where records[lead] != nil {
@@ -10568,6 +10570,47 @@ final class AgentSupervisor {
         }
     }
 
+    /// Agent messages held in `id`'s paused queue. When a retry or a usage
+    /// resume continues the agent on its session, they ride that turn as one
+    /// note instead of replaying afterwards as turns of their own (2026-11-25:
+    /// two messages held in the morning each re-ran a brief a retry had
+    /// already finished). Typed input, steers, notes and results stay queued.
+    private func heldAgentMessageBacklog(for id: AgentID) -> [AgentComposerQueuedMessage] {
+        guard pausedQueues.contains(id) else { return [] }
+        return (queuedWorkItemsCache[id] ?? []).compactMap { item in
+            guard case .prompt(let m) = item, !m.isSteer, !m.steerUncertain, !m.helperNote, !m.helperCompletion else { return nil }
+            if m.agentMessageContext != nil { return m }
+            if case .agentMessage = AgentMessageEnvelope.classify(m.text) { return m }
+            return nil
+        }
+    }
+
+    private func foldHeldBacklog(_ backlog: [AgentComposerQueuedMessage], into prompt: String) -> String {
+        guard !backlog.isEmpty else { return prompt }
+        let lines = backlog.map { m -> String in
+            if case .agentMessage(let payload) = AgentMessageEnvelope.classify(m.text) {
+                return "- From \(payload.senderName): \(AgentMessageEnvelope.excerpt(payload.text, limit: 500))"
+            }
+            let name = m.agentMessageContext.flatMap { records[$0.caller]?.humanDisplayName } ?? "Agent"
+            return "- From \(name): \(AgentMessageEnvelope.excerpt(m.text, limit: 500))"
+        }
+        return prompt + "\n\nNote: these messages were held while you were paused. They arrive with this turn and will not run as turns of their own. Act on each one, in order, unless this turn's work already covers it or a later one replaces it.\n" + lines.joined(separator: "\n")
+    }
+
+    /// The folded messages left the queue with the turn that carried them: their
+    /// senders are told so, and nothing replays them.
+    private func retireFoldedBacklog(_ backlog: [AgentComposerQueuedMessage], for id: AgentID, reason: String) {
+        guard !backlog.isEmpty, let store = submissionRecoveryStore else { return }
+        for m in backlog {
+            _ = cancelAgentMessage(m, for: id, reason: reason)
+            updateCompanionTasks { try $0.cancelQueued(m.id) }
+            queuedWorkItemsCache[id]?.removeAll { $0.id == m.id }
+            runQueueOp(for: id) { _ = await store.removeQueuedMessage(id: m.id, for: id) }
+        }
+        appendAgentDiagnostics("held agent messages folded into the resumed turn: count=\(backlog.count)", agentID: id)
+        notifyTurnCapabilitiesChanged(id)
+    }
+
     // MARK: - Retrying a helper on its own session
 
     /// A lead's `retryOf` can continue `id` itself when its Claude session
@@ -10590,10 +10633,12 @@ final class AgentSupervisor {
         let pause = usagePauses[id]
         usagePauses[id] = nil
         usageFreed.remove(id)
-        guard send(prompt, to: id) else {
+        let backlog = heldAgentMessageBacklog(for: id)
+        guard send(foldHeldBacklog(backlog, into: prompt), to: id) else {
             if let pause { usagePauses[id] = pause }
             return false
         }
+        retireFoldedBacklog(backlog, for: id, reason: "Delivered as a note with the retry that resumed it, not as a turn of its own.")
         resumeQueue(for: id)
         appendAgentDiagnostics("retry continued the same session", agentID: id)
         usagePausesChanged(id)

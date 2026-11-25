@@ -17,7 +17,9 @@ import Foundation
 /// 2. usage is back and the helper was held for its lead: the lead's message
 ///    is delivered, not held, and resumes it on its own session;
 /// 3. no account has room: the message is held, and the hold says when the
-///    helper resumes.
+///    helper resumes;
+/// 4. the same sender sends newer instructions, then a retryOf resumes it:
+///    the held messages ride the retry turn as one note and never replay.
 @MainActor
 func runUsageHoldTruthChecks() async throws {
     struct Failure: Error, CustomStringConvertible { let description: String }
@@ -178,5 +180,34 @@ func runUsageHoldTruthChecks() async throws {
     try require(!received("WAIT-FOR-RESET") && supervisor.usageResumeLogForQA.count == atSpent,
                 "a held message must not run into a spent account; \(state())")
     print("usage-hold-truth-check: 3 no room holds with a time: PASS")
+
+    // 4. The same sender sends newer instructions, then resumes it with a
+    //    retry. The held messages ride the retry turn as a note and never
+    //    replay afterwards as turns of their own.
+    try require(supervisor.deliverAgentMessage("NEWER-INSTRUCTION", from: lead, to: helper, hops: 1).delivery == .held,
+                "the newer message is held too")
+    func frames(_ needle: String) -> [String] {
+        AgentSteeringQAFakes.receivedFrames(in: claudeBin).compactMap { frame in
+            guard let data = try? JSONSerialization.data(withJSONObject: frame) else { return nil }
+            let text = String(decoding: data, as: UTF8.self)
+            return text.contains(needle) ? text : nil
+        }
+    }
+    try exhaust([])
+    try require(supervisor.canContinueSessionForRetry(helper, harness: .claudeCode, model: nil, effort: nil),
+                "retryOf can continue the helper's session; \(state())")
+    try require(supervisor.continueSessionForRetry(helper, prompt: "RETRY-BRIEF"), "the retry was refused; \(state())")
+    try await waitFor("the retry turn settles with nothing left to replay; \(state())") {
+        !supervisor.isRunning(helper) && supervisor.queuedMessages(for: helper).isEmpty
+            && supervisor.records[helper]?.latestTerminalEvent?.outcome == .succeeded
+    }
+    try await Task.sleep(for: .milliseconds(500))
+    try require(!supervisor.isRunning(helper), "no turn starts after the retry; \(state())")
+    for needle in ["WAIT-FOR-RESET", "NEWER-INSTRUCTION"] {
+        let carried = frames(needle)
+        try require(carried.count == 1 && carried[0].contains("RETRY-BRIEF") && carried[0].contains("held while you were paused"),
+                    "\(needle) rides the retry turn as a note, once, got \(carried.count) frame(s): \(carried.map { String($0.prefix(600)) })")
+    }
+    print("usage-hold-truth-check: 4 a retry carries held messages, no replay: PASS")
     print("usage-hold-truth-check: PASS")
 }
