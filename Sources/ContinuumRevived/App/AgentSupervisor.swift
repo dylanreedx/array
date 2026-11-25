@@ -1730,6 +1730,17 @@ final class AgentSupervisor {
     /// step. Channel-scoped like the rest of the app's own state.
     let agentMadeFiles = AgentMadeFileLog(
         fileURL: WorkspaceStore.defaultApplicationSupportDirectory().appendingPathComponent("agent-made-files.json"))
+    /// Each helper result's files as its lead received them, for a restored
+    /// lead's card (`AgentHelperFiles`). Channel-scoped like the log above.
+    let helperFilesLog = AgentHelperFiles.Log(
+        fileURL: WorkspaceStore.defaultApplicationSupportDirectory().appendingPathComponent("helper-files.json"))
+    /// What each helper created or rewrote since its lead last received a result.
+    private var helperFileTrackers: [AgentID: AgentHelperFiles.Tracker] = [:]
+    /// Received results' files waiting for the lead's turn to open.
+    private var pendingHelperFiles: [AgentID: [AgentHelperFiles.Delivery]] = [:]
+    /// The thread of each agent's open turn, while one is open.
+    private var openTurnThreads: [AgentID: String] = [:]
+    private var startingTurns: Set<AgentID> = []
     /// Prompt-derived naming context stays in memory only. It is deliberately not
     /// an AgentRecord field and never reaches AgentInventory or the companion.
     private var firstPromptByAgent: [AgentID: String] = [:]
@@ -3283,6 +3294,7 @@ final class AgentSupervisor {
             }
             if !made.isEmpty { agentMadeFiles.record(made, agent: id.rawValue, checkoutRoot: record.checkoutRoot) }
         }
+        if record.parentAgentID != nil { helperFileTrackers[id, default: .init()].ingest(observation) }
         ensureLocationProjector(for: record)
         locationProjectors[id]?.ingest(observation)
         // The projector and the transcript list consume the same sanitized,
@@ -4512,7 +4524,8 @@ final class AgentSupervisor {
             homeURL: homeURL,
             codexThreadId: record.codexThreadId,
             codexHomeURL: codexHomeURL,
-            claudeSessionId: record.providerSessionId)
+            claudeSessionId: record.providerSessionId,
+            helperDeliveries: helperFilesLog.deliveries(lead: id.rawValue))
     }
 
     // MARK: - Lifecycle
@@ -9525,7 +9538,31 @@ final class AgentSupervisor {
             helperReceiptRun[helper] = run
             helperReceiptConfirmedAt[helper] = nil
             helperReceiptFailed.remove(helper)
+            stageHelperFiles(from: helper, to: lead)
             onHelperResultDelivered?(helper)
+        }
+    }
+
+    /// The helper's created and rewritten files since its last received result
+    /// join the lead's turn: now if a turn is open, else when the next starts.
+    private func stageHelperFiles(from helper: AgentID, to lead: AgentID) {
+        guard let files = helperFileTrackers[helper]?.take(madeBy: helper.rawValue), !files.isEmpty else { return }
+        let delivery = AgentHelperFiles.Delivery(lead: lead.rawValue, helper: helper.rawValue, at: Date(), files: files)
+        helperFilesLog.record(delivery)
+        pendingHelperFiles[lead, default: []].append(delivery)
+        flushHelperFiles(for: lead)
+    }
+
+    /// One file-change item per received result, inside the lead's open turn,
+    /// in the shape a translator gives a made file: its facts, then the item.
+    private func flushHelperFiles(for lead: AgentID) {
+        guard !startingTurns.contains(lead), let threadId = openTurnThreads[lead],
+              let deliveries = pendingHelperFiles.removeValue(forKey: lead) else { return }
+        for delivery in deliveries {
+            let itemID = AgentHelperFiles.itemID(delivery)
+            ingestRuntimeObservation(.toolDetail(itemId: itemID, detail: AgentHelperFiles.observation(delivery, at: Date())), for: lead)
+            deliver(.itemStarted(threadId: threadId, itemId: itemID, kind: .fileChange, title: nil), to: lead)
+            deliver(.itemCompleted(threadId: threadId, itemId: itemID, kind: .fileChange, status: .completed), to: lead)
         }
     }
 
@@ -16398,6 +16435,32 @@ final class AgentSupervisor {
     private func deliver(
         _ incomingEvent: AgentRuntimeEvent, to id: AgentID, now: Date = Date(), meterPublished: Bool = false
     ) {
+        // A received helper result's files belong to the turn it opened or
+        // joined: placed once the turn has started, and before it ends.
+        // The result a starting turn consumes is received while that start is
+        // still being delivered. A tile takes events through an async stream
+        // but tool facts at once, so the files wait one main-queue hop, until
+        // the tile has the turn the facts belong to (or the turn's end, if
+        // that comes first).
+        var opensTurn = false
+        if case let .turnStarted(threadId, _) = incomingEvent {
+            openTurnThreads[id] = threadId; startingTurns.insert(id); opensTurn = true
+        }
+        defer {
+            if opensTurn {
+                if pendingHelperFiles[id]?.isEmpty == false {
+                    DispatchQueue.main.async { [weak self] in
+                        self?.startingTurns.remove(id)
+                        self?.flushHelperFiles(for: id)
+                    }
+                } else {
+                    startingTurns.remove(id)
+                }
+            }
+        }
+        if case .turnCompleted = incomingEvent {
+            startingTurns.remove(id); flushHelperFiles(for: id); openTurnThreads[id] = nil
+        }
         var event = incomingEvent
         // The account ran out: a pause, not a failure. Decided before the
         // transient retry, the failure signal, the helper result and the queue

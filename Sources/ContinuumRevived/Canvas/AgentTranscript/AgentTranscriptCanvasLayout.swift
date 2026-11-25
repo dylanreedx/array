@@ -77,6 +77,13 @@ extension AgentTranscriptCanvasView {
                 hasher.combine(sender.hasTile)
                 hasher.combine(sender.identityColorName)
             }
+        case let .diff(diff):
+            // A helper's file draws its helper's orb and name, read at draw time.
+            for id in diff.files.compactMap(\.madeByAgentID) {
+                let sender = renderContext.agentMessageSenders.current(id)
+                hasher.combine(sender?.identityColorName)
+                hasher.combine(sender?.name)
+            }
         default:
             break
         }
@@ -787,12 +794,12 @@ extension AgentTranscriptCanvasView {
         let factsFont = AgentFileStripView.factsFont(zoom: zoom)
         let padding = AgentFileStripView.bandPadding(zoom: zoom)
         let dark = theme == .dark
-        func fitted(_ text: String, font: NSFont, color: NSColor, room: CGFloat) -> CTLine {
+        func fitted(_ text: String, font: NSFont, color: NSColor, room: CGFloat, cut: CTLineTruncationType = .middle) -> CTLine {
             let line = Self.line(text, font: font, color: color)
             guard Self.width(of: line) > room else { return line }
             // The ellipsis in the line's own colour, or it draws black.
             let ellipsis = Self.line("\u{2026}", font: font, color: color)
-            return CTLineCreateTruncatedLine(line, Double(room), .middle, ellipsis) ?? line
+            return CTLineCreateTruncatedLine(line, Double(room), cut, ellipsis) ?? line
         }
         var x = inset
         for file in files {
@@ -803,12 +810,18 @@ extension AgentTranscriptCanvasView {
             let thumbWidth = min(AgentFileStripView.thumbWidth(aspect: picture?.aspect, zoom: zoom), max(1, width - inset - x))
             let rect = CGRect(x: x, y: top, width: thumbWidth, height: height)
             let room = max(1, thumbWidth - padding * 2)
-            let facts = AgentFileStripView.facts(url, picture: picture, font: factsFont, width: room)
+            if let maker = file.madeByAgentID { subscribeSender(maker, blockID: blockID) }
+            let sender = file.madeByAgentID.flatMap { renderContext.agentMessageSenders.current($0) }
+            let maker = file.madeByAgentID == nil ? nil : (sender?.name ?? "Helper")
+            let facts = AgentFileStripView.facts(url, picture: picture, font: factsFont, width: room, maker: maker)
+            let nameRoom = max(1, thumbWidth - padding - AgentFileStripView.nameInset(hasOrb: file.madeByAgentID != nil, zoom: zoom))
             body.builder.decorations.append(.fileThumb(FileThumb(
                 picture: picture,
-                name: fitted(url.lastPathComponent, font: nameFont, color: primary, room: room),
-                facts: fitted(facts, font: factsFont, color: secondary, room: room),
-                nameText: url.lastPathComponent, factsText: facts), rect))
+                name: fitted(url.lastPathComponent, font: nameFont, color: primary, room: nameRoom),
+                facts: fitted(facts, font: factsFont, color: secondary, room: room, cut: maker == nil ? .middle : .end),
+                nameText: url.lastPathComponent, factsText: facts,
+                orb: file.madeByAgentID.map { _ in AgentFileStripView.orbColor(sender, tokens: renderContext.tokens, theme: theme) },
+                madeBy: file.madeByAgentID), rect))
             body.builder.controls.append(Control(
                 rect: rect, title: url.lastPathComponent,
                 style: .region(hoverFill: nil, pressedFill: nil, radius: CGFloat(zoom.scaled(CornerRole.artifact.radius))),

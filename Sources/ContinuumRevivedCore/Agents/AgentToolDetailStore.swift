@@ -461,7 +461,7 @@ public struct AgentToolDetailSanitizer: Sendable {
             // measured from.
             return .init(action: change.action, path: path, renamePath: rename, diffPreview: diff,
                 addedLines: change.addedLines, removedLines: change.removedLines,
-                countsAreLowerBound: change.countsAreLowerBound)
+                countsAreLowerBound: change.countsAreLowerBound, madeBy: change.madeBy)
         }
     }
 
@@ -483,7 +483,7 @@ public struct AgentToolDetailSanitizer: Sendable {
                 unique[key] = .init(action: change.action, path: change.path,
                     renamePath: change.renamePath, diffPreview: selectedDiff,
                     addedLines: counts.addedLines, removedLines: counts.removedLines,
-                    countsAreLowerBound: counts.countsAreLowerBound)
+                    countsAreLowerBound: counts.countsAreLowerBound, madeBy: change.madeBy ?? prior.madeBy)
             } else {
                 unique[key] = change
             }
@@ -1133,7 +1133,7 @@ public enum AgentToolDetailPresenter {
             return AgentToolDetailObservation.FileChange(
                 action: change.action, path: path, renamePath: rename, diffPreview: diff,
                 addedLines: change.addedLines, removedLines: change.removedLines,
-                countsAreLowerBound: change.countsAreLowerBound)
+                countsAreLowerBound: change.countsAreLowerBound, madeBy: change.madeBy)
         })
         sanitized.parentItemID = AgentToolDetailDisplaySanitizer.parentItemID(record.parentItemID)
         sanitized.observedParentItemIDs = Set(sanitized.parentItemID.map { [$0] } ?? [])
@@ -1363,7 +1363,8 @@ public enum AgentToolDetailPresenter {
                 removedLineCount: change.removedLines,
                 countsAreLowerBound: change.countsAreLowerBound,
                 action: diffAction(change.action),
-                fileURL: fileURL
+                fileURL: fileURL,
+                madeByAgentID: change.madeBy
             ))
         }
         for url in availableURLs.prefix(max(0, maxObservableFiles - result.count)) {

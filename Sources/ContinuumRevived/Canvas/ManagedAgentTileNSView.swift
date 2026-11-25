@@ -4636,7 +4636,8 @@ final class ManagedAgentTileNSView: TileNSView, CornerStyled {
         return AgentMessageSenderSource(
             current: { [weak supervisor] rawAgentID in
                 guard let record = supervisor?.records[AgentID(rawValue: rawAgentID)] else { return nil }
-                return .init(identityColorName: record.identityColor, hasTile: record.tileId != nil)
+                return .init(identityColorName: record.identityColor, hasTile: record.tileId != nil,
+                             name: record.humanDisplayName)
             },
             subscribe: { [weak supervisor] rawAgentID, callback in
                 supervisor?.addMessageSenderObserver(for: AgentID(rawValue: rawAgentID), callback)

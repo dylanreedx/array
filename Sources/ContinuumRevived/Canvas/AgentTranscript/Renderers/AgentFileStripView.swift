@@ -65,6 +65,23 @@ final class AgentFileStripView: NSView, NSDraggingSource {
         return (nameBaseline, nameBaseline + ceil(-name.descender) + CGFloat(zoom.scaled(Space.xs)) + ceil(facts.ascender))
     }
 
+    /// The helper's orb: a small disc in its identity colour, leading the name
+    /// of a file a helper made, centred on the name's capitals.
+    static func orbRect(in rect: CGRect, zoom: AgentPageZoom) -> CGRect {
+        let side = CGFloat(zoom.scaled(8))
+        let centre = baselines(in: rect, zoom: zoom).name - nameFont(zoom: zoom).capHeight / 2
+        return CGRect(x: rect.minX + bandPadding(zoom: zoom), y: centre - side / 2, width: side, height: side)
+    }
+    /// Where the name starts: after the orb when there is one.
+    static func nameInset(hasOrb: Bool, zoom: AgentPageZoom) -> CGFloat {
+        bandPadding(zoom: zoom) + (hasOrb ? CGFloat(zoom.scaled(8 + Space.xs)) : 0)
+    }
+    /// The orb's colour: the helper's identity colour, or quiet text when it has none.
+    static func orbColor(_ maker: AgentMessageSenderSource.Sender?, tokens: AgentRenderTokens, theme: TokenTheme) -> CGColor {
+        maker?.identityColorName.map { ZoneChromeNSView.color(named: $0).cgColor }
+            ?? tokens.secondaryText.color.cgColor(for: theme)
+    }
+
     /// What kind of file it is, in words.
     static func kindName(_ url: URL) -> String {
         let ext = url.pathExtension.lowercased()
@@ -83,14 +100,17 @@ final class AgentFileStripView: NSView, NSDraggingSource {
     }
 
     /// The facts line: kind, an image's pixel size, the file's size, and its
-    /// folder when that still fits `width` in `font`.
-    static func facts(_ url: URL, picture: FilePreviewPicture?, font: NSFont, width: CGFloat) -> String {
+    /// folder when that still fits `width` in `font`. A file a helper made
+    /// leads with the helper's name instead of ending with the folder; the
+    /// line is then cut at its end, so the name is what stays.
+    static func facts(_ url: URL, picture: FilePreviewPicture?, font: NSFont, width: CGFloat, maker: String? = nil) -> String {
         var parts = [kindName(url)]
         if let size = picture?.pixelSize { parts.append("\(Int(size.width))×\(Int(size.height))") }
         if let bytes = picture?.byteCount {
             parts.append(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))
         }
         let base = parts.joined(separator: " · ")
+        if let maker { return maker + " · " + base }
         let folder = url.deletingLastPathComponent().lastPathComponent
         guard !folder.isEmpty, folder != "/" else { return base }
         let withFolder = base + " · " + folder
@@ -106,6 +126,8 @@ final class AgentFileStripView: NSView, NSDraggingSource {
         let fade = CAGradientLayer()
         let name = CATextLayer()
         let facts = CATextLayer()
+        let orb = CALayer()
+        var maker: AgentMessageSenderSource.Sender?
         var file: AgentDiffFileSummary?
         var preview: FilePreviewPicture?
         var frame: CGRect = .zero
@@ -139,7 +161,8 @@ final class AgentFileStripView: NSView, NSDraggingSource {
 
     func apply(
         files: [AgentDiffFileSummary], tokens: AgentRenderTokens, theme: TokenTheme, zoom: AgentPageZoom,
-        perform: @escaping (AgentRenderAction) -> Void, blockID: AgentNodeID?
+        perform: @escaping (AgentRenderAction) -> Void, blockID: AgentNodeID?,
+        senders: AgentMessageSenderSource = .unavailable
     ) {
         self.tokens = tokens; self.theme = theme; self.zoom = zoom
         self.perform = perform; self.blockID = blockID
@@ -157,7 +180,8 @@ final class AgentFileStripView: NSView, NSDraggingSource {
                 text.contentsScale = window?.backingScaleFactor ?? 2
                 text.actions = ["contents": NSNull()]
             }
-            [thumb.picture, thumb.blur, thumb.fade, thumb.name, thumb.facts].forEach(thumb.container.addSublayer)
+            thumb.orb.actions = ["backgroundColor": NSNull(), "hidden": NSNull()]
+            [thumb.picture, thumb.blur, thumb.fade, thumb.orb, thumb.name, thumb.facts].forEach(thumb.container.addSublayer)
             layer?.addSublayer(thumb.container)
             thumbs.append(thumb)
         }
@@ -168,6 +192,9 @@ final class AgentFileStripView: NSView, NSDraggingSource {
             guard index < files.count, let url = files[index].fileURL,
                   let kind = AgentDiffSummaryView.previewKind(files[index]) else { continue }
             thumb.file = files[index]
+            thumb.maker = files[index].madeByAgentID.flatMap { senders.current($0) }
+            thumb.orb.isHidden = files[index].madeByAgentID == nil
+            thumb.orb.backgroundColor = Self.orbColor(thumb.maker, tokens: tokens, theme: theme)
             thumb.container.applyCorner(.artifact, zoom: zoom)
             thumb.container.borderWidth = CGFloat(LineWidth.hairline)
             thumb.container.borderColor = tokens.decorativeLine.color.cgColor(for: theme)
@@ -183,7 +210,10 @@ final class AgentFileStripView: NSView, NSDraggingSource {
             }
             applyContents(thumb)
         }
-        accessibilityNames = files.map { $0.fileURL?.lastPathComponent ?? $0.displayName }
+        accessibilityNames = files.map { file in
+            let name = file.fileURL?.lastPathComponent ?? file.displayName
+            return file.madeByAgentID.flatMap { senders.current($0)?.name }.map { "\(name), made by \($0)" } ?? name
+        }
         needsLayout = true
         needsDisplay = true
         window?.invalidateCursorRects(for: self)
@@ -205,7 +235,9 @@ final class AgentFileStripView: NSView, NSDraggingSource {
         if let url = thumb.file?.fileURL {
             // The picture's natural width, known without laying out.
             let width = max(1, Self.thumbWidth(aspect: thumb.preview?.aspect, zoom: zoom) - Self.bandPadding(zoom: zoom) * 2)
-            thumb.facts.string = Self.facts(url, picture: thumb.preview, font: Self.factsFont(zoom: zoom), width: width)
+            let maker = thumb.file?.madeByAgentID == nil ? nil : (thumb.maker?.name ?? "Helper")
+            thumb.facts.string = Self.facts(url, picture: thumb.preview, font: Self.factsFont(zoom: zoom), width: width, maker: maker)
+            thumb.facts.truncationMode = maker == nil ? .middle : .end
         }
         if let preview = thumb.preview {
             thumb.picture.contents = preview.image
@@ -247,8 +279,11 @@ final class AgentFileStripView: NSView, NSDraggingSource {
             let padding = Self.bandPadding(zoom: zoom)
             let lines = Self.baselines(in: local, zoom: zoom)
             let nameFont = Self.nameFont(zoom: zoom), factsFont = Self.factsFont(zoom: zoom)
-            thumb.name.frame = CGRect(x: padding, y: lines.name - ceil(nameFont.ascender),
-                                      width: max(1, local.width - padding * 2), height: ceil(nameFont.ascender - nameFont.descender))
+            let nameX = Self.nameInset(hasOrb: !thumb.orb.isHidden, zoom: zoom)
+            thumb.name.frame = CGRect(x: nameX, y: lines.name - ceil(nameFont.ascender),
+                                      width: max(1, local.width - nameX - padding), height: ceil(nameFont.ascender - nameFont.descender))
+            thumb.orb.frame = Self.orbRect(in: local, zoom: zoom)
+            thumb.orb.cornerRadius = thumb.orb.frame.height / 2
             thumb.facts.frame = CGRect(x: padding, y: lines.facts - ceil(factsFont.ascender),
                                        width: max(1, local.width - padding * 2), height: ceil(factsFont.ascender - factsFont.descender))
             x += width + gap
@@ -278,7 +313,7 @@ final class AgentFileStripView: NSView, NSDraggingSource {
         hoveredIndex = index
         for (i, thumb) in thumbs.prefix(count).enumerated() {
             let target: Float = i == index ? 0 : 1
-            for layer in [thumb.blur, thumb.fade, thumb.name, thumb.facts] {
+            for layer in [thumb.blur, thumb.fade, thumb.orb, thumb.name, thumb.facts] {
                 let from = layer.presentation()?.opacity ?? layer.opacity
                 layer.opacity = target
                 guard AgentTranscriptMotion.shouldAnimate, from != target else { continue }

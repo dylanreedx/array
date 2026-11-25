@@ -140,6 +140,9 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         /// The same two lines as text, before truncation (for checks).
         var nameText = ""
         var factsText = ""
+        /// The orb of the helper that made the file, on its lead's card.
+        var orb: CGColor? = nil
+        var madeBy: UUID? = nil
     }
 
     /// A thumbnail's hover identity: its block and where it sits in it.
@@ -1415,7 +1418,12 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
                 canOpenReview = canOpenReview || member.canOpenReview
                 for file in member.files {
                     let key = file.fileURL?.path ?? file.displayName
-                    if let index = slot[key] { files[index] = file } else { slot[key] = files.count; files.append(file) }
+                    if let index = slot[key] {
+                        // Made in this turn and then rewritten is still made in this turn.
+                        var latest = file
+                        if files[index].action == .add, file.action == .write { latest.action = .add }
+                        files[index] = latest
+                    } else { slot[key] = files.count; files.append(file) }
                 }
                 if block.id != leader.id { fold.followers.insert(block.id) }
             }
@@ -1851,6 +1859,16 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         }
     }
 
+    /// Every drawn thumbnail's maker and whether its orb is drawn, in document order.
+    var qaFileThumbMakers: [(madeBy: UUID?, hasOrb: Bool)] {
+        qaPlaced.flatMap { item in
+            item.block.decorations.compactMap { decoration -> (UUID?, Bool)? in
+                guard case let .fileThumb(thumb, _) = decoration else { return nil }
+                return (thumb.madeBy, thumb.orb != nil)
+            }
+        }
+    }
+
     private func thumbKey(for key: ControlKey?) -> ThumbKey? {
         guard let key, let control = control(for: key), case .perform(.openLocalFile) = control.action else { return nil }
         return ThumbKey(blockID: key.blockID, rect: control.rect)
@@ -1931,9 +1949,14 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
             }
             let padding = AgentFileStripView.bandPadding(zoom: zoom)
             let lines = AgentFileStripView.baselines(in: rect, zoom: zoom)
-            for (line, baseline) in [(thumb.name, lines.name), (thumb.facts, lines.facts)] {
+            if let orb = thumb.orb {
+                context.setFillColor(orb)
+                context.fillEllipse(in: AgentFileStripView.orbRect(in: rect, zoom: zoom))
+            }
+            let nameX = AgentFileStripView.nameInset(hasOrb: thumb.orb != nil, zoom: zoom)
+            for (line, x, baseline) in [(thumb.name, nameX, lines.name), (thumb.facts, padding, lines.facts)] {
                 guard let line else { continue }
-                context.textPosition = CGPoint(x: rect.minX + padding, y: baseline)
+                context.textPosition = CGPoint(x: rect.minX + x, y: baseline)
                 CTLineDraw(line, context)
             }
         }

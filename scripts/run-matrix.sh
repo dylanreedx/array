@@ -2778,6 +2778,10 @@ run_app_check .build/debug/Array --file-card-check
 # restored through the real tile must show every made file, and no file the
 # command only read or left in a temp folder.
 run_app_check .build/debug/Array --transcript-file-strip-check
+# A helper's created files on its lead's turn: the real supervisor, a helper
+# streamed through the real claude translator (a Write and a shell-made PNG),
+# its result waking the lead, live and after a relaunch.
+run_app_check .build/debug/Array --lead-helper-files-check
 run_app_check .build/debug/Array --shell-tool-row-check
 # The host-local tool-detail supply: immutable scope, expiry, and the real
 # translator sequences (claude search + delegation, pi delegation, codex exit

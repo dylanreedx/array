@@ -227,6 +227,10 @@ public struct AgentDiffFileSummary: Codable, Equatable, Sendable {
     /// wrote the file, composed from the tool-detail store at presentation time.
     /// It lets a card offer to open, reveal or drag the file; it grants nothing.
     public var fileURL: URL?
+    /// The helper agent that made the file, when the card belongs to the lead
+    /// it reported to. Host-local like `fileURL` and not in `CodingKeys`: the
+    /// card resolves the helper's current name and colour when it is drawn.
+    public var madeByAgentID: UUID?
 
     /// Both counts measured. Kept as a computed property so no caller can set
     /// availability independently of the values it describes.
@@ -262,9 +266,11 @@ public struct AgentDiffFileSummary: Codable, Equatable, Sendable {
         removedLineCount: UInt? = nil,
         countsAreLowerBound: Bool = false,
         action: AgentDiffFileAction? = nil,
-        fileURL: URL? = nil
+        fileURL: URL? = nil,
+        madeByAgentID: UUID? = nil
     ) {
         self.fileURL = fileURL
+        self.madeByAgentID = madeByAgentID
         self.displayName = displayName
         self.addedLineCount = addedLineCount
         self.removedLineCount = removedLineCount

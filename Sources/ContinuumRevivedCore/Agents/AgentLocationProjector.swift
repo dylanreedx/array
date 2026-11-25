@@ -318,6 +318,9 @@ public struct AgentToolDetailObservation: Equatable, Sendable {
         /// The counts were measured from a preview that had already been cut to
         /// a byte/line bound, so they are a floor rather than a total.
         public let countsAreLowerBound: Bool
+        /// The agent that made this file, when it is not the one whose turn
+        /// shows it: a helper's file on its lead's card (`AgentHelperFiles`).
+        public let madeBy: UUID?
 
         public init(
             action: FileAction,
@@ -326,7 +329,8 @@ public struct AgentToolDetailObservation: Equatable, Sendable {
             diffPreview: String? = nil,
             addedLines: UInt? = nil,
             removedLines: UInt? = nil,
-            countsAreLowerBound: Bool = false
+            countsAreLowerBound: Bool = false,
+            madeBy: UUID? = nil
         ) {
             self.action = action
             self.path = AgentToolDetailDisplaySanitizer.path(path) ?? ""
@@ -335,6 +339,7 @@ public struct AgentToolDetailObservation: Equatable, Sendable {
             self.addedLines = addedLines
             self.removedLines = removedLines
             self.countsAreLowerBound = countsAreLowerBound
+            self.madeBy = madeBy
         }
 
         public var hasAnyMeasuredCount: Bool { addedLines != nil || removedLines != nil }

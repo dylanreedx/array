@@ -494,6 +494,9 @@ extension ManagedTranscriptRehydrator {
         /// a session moved in from another app, a fork, a `/clear`. nil reads
         /// the id Array derives from the agent.
         public var claudeSessionId: String?
+        /// The helper results this agent received with files, placed back into
+        /// the turns they landed in (`AgentHelperFiles.inject`).
+        public var helperDeliveries: [AgentHelperFiles.Delivery]
 
         public init(
             agentUUID: UUID,
@@ -505,7 +508,8 @@ extension ManagedTranscriptRehydrator {
             codexThreadId: String? = nil,
             codexHomeURL: URL? = nil,
             limits: RehydrationLimits = RehydrationLimits(),
-            claudeSessionId: String? = nil
+            claudeSessionId: String? = nil,
+            helperDeliveries: [AgentHelperFiles.Delivery] = []
         ) {
             self.agentUUID = agentUUID
             self.cwd = cwd
@@ -518,6 +522,7 @@ extension ManagedTranscriptRehydrator {
                 ?? homeURL.appendingPathComponent(".codex", isDirectory: true)
             self.limits = limits
             self.claudeSessionId = claudeSessionId
+            self.helperDeliveries = helperDeliveries
         }
     }
 
@@ -529,6 +534,10 @@ extension ManagedTranscriptRehydrator {
     ///
     /// Call OFF the main thread: session files run to hundreds of messages.
     public static func rehydrate(_ inputs: Inputs) -> RehydratedTranscript? {
+        readTranscript(inputs).map { AgentHelperFiles.inject($0, deliveries: inputs.helperDeliveries) }
+    }
+
+    private static func readTranscript(_ inputs: Inputs) -> RehydratedTranscript? {
         let threadId = "rehydrated-\(inputs.agentUUID.uuidString)"
         let claudeURL = ClaudeSessionTranscriptReader.sessionFileURL(
             homeURL: inputs.homeURL,

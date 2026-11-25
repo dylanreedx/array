@@ -410,7 +410,8 @@ final class AgentDiffSummaryView: NSView, CornerStyled {
         }
         fileStrip.apply(
             files: previewed.map(\.element), tokens: context.tokens, theme: effectiveTokenTheme,
-            zoom: context.pageZoom, perform: context.actions.perform, blockID: blockID)
+            zoom: context.pageZoom, perform: context.actions.perform, blockID: blockID,
+            senders: context.agentMessageSenders)
     }
 
     func applyAccessibility(payload: AgentDiffPayload) {

@@ -233,6 +233,7 @@ check --layout-commit-scope-check
 check --layout-commit-truth-check
 check --lead-character-check
 check --lead-checkout-ledger-check
+check --lead-helper-files-check
 check --lead-plan-model-check
 check --lead-plan-steady-check
 check --leader-activation-check
@@ -813,6 +814,7 @@ leg run_app_check .build/debug/Array --layout-commit-scope-check
 leg run_app_check .build/debug/Array --layout-commit-truth-check
 leg run_app_check .build/debug/Array --lead-character-check
 leg run_app_check .build/debug/Array --lead-checkout-ledger-check
+leg run_app_check .build/debug/Array --lead-helper-files-check
 leg run_app_check .build/debug/Array --lead-plan-model-check
 leg run_app_check .build/debug/Array --lead-plan-steady-check
 leg run_app_check .build/debug/Array --leader-activation-check

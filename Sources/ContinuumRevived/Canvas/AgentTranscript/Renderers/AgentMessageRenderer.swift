@@ -11,6 +11,8 @@ struct AgentMessageSenderSource: @unchecked Sendable {
         /// A palette name (`ZoneColorConfig.palette`), nil when it has none.
         var identityColorName: String?
         var hasTile: Bool
+        /// The agent's name now, for a file it made on another agent's card.
+        var name: String? = nil
     }
 
     let current: (UUID) -> Sender?

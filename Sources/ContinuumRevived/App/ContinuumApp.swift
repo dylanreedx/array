@@ -3384,6 +3384,24 @@ enum ContinuumApp {
                 Foundation.exit(1)
             }
         }
+        if CommandLine.arguments.contains("--lead-helper-files-check")
+            || CommandLine.arguments.contains("--lead-helper-files-stills") {
+            _ = NSApplication.shared
+            let index = CommandLine.arguments.firstIndex(of: "--lead-helper-files-stills")
+            let stills = index.flatMap { $0 + 1 < CommandLine.arguments.count ? URL(fileURLWithPath: CommandLine.arguments[$0 + 1]) : nil }
+            Task { @MainActor in
+                do {
+                    // A helper's created files show on its lead's turn, live and restored.
+                    try await LeadHelperFilesChecks.run(stillsDirectory: stills)
+                    print("LeadHelperFilesChecks passed")
+                    Foundation.exit(0)
+                } catch {
+                    fputs("FAIL: \(error)\n", stderr)
+                    Foundation.exit(1)
+                }
+            }
+            NSApp.run()
+        }
         if let index = CommandLine.arguments.firstIndex(of: "--transcript-file-strip-stills"),
            index + 1 < CommandLine.arguments.count {
             _ = NSApplication.shared
