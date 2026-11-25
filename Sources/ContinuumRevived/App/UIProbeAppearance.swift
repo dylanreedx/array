@@ -1237,6 +1237,13 @@ enum UIProbeAppearance {
             return [hex((kind == .background || kind == .fill
                          ? SurfaceToken.overlay.color : LineToken.borderStrong.color).cgColor(for: theme))]
         }
+        if owner == "CommandCenterSkeletonCell", theme == .dark, kind == .background || kind == .fill {
+            // Dark skeleton bars: the primary ink at two low alphas, lighter than the
+            // translucent palette, which every dark surface fill sits below.
+            let ink = TextToken.textPrimary.color.nsColor(for: theme)
+            return values.union([CommandCenterSkeletonCell.darkRestingAlpha, CommandCenterSkeletonCell.darkBandAlpha]
+                .map { hex(ink.withAlphaComponent($0).cgColor) })
+        }
         if owner == "KanbanColumnView" {
             return [hex(SurfaceToken.tileBody.color.cgColor(for: theme))]
         }

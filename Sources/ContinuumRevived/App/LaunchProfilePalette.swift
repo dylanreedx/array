@@ -1919,6 +1919,9 @@ final class CommandCenterSkeletonCell: NSTableCellView, TokenThemed {
     static let period: CFTimeInterval = InboxShimmerOverlay.period * 1.5
     static let band: CGFloat = 160
     static let animationKey = "palette.skeleton.shimmer"
+    /// Dark appearance: `textPrimary` at these alphas, registered with the ui-probe census.
+    static let darkRestingAlpha: CGFloat = 0.08
+    static let darkBandAlpha: CGFloat = 0.14
     private static let nameWidths: [CGFloat] = [176, 132, 204, 152]
     private static let folderWidths: [CGFloat] = [112, 88, 136, 100]
 
@@ -1953,11 +1956,20 @@ final class CommandCenterSkeletonCell: NSTableCellView, TokenThemed {
     }
 
     func applyTokens() {
-        // The palette is a translucent panel (~#FDFDFD light, ~#2E2E2E dark), lighter than
-        // every dark card fill: dark bars sit a step BELOW it, light bars a step under white.
-        let dark = effectiveTokenTheme == .dark
-        let resting = (dark ? SurfaceToken.tileBody : .cardUserMessage).color.nsColor(in: self).cgColor
-        let lit = SurfaceToken.tileChrome.color.nsColor(in: self).cgColor
+        // The palette is a translucent panel (~#FDFDFD light, ~#2E2E2E dark). Light bars sit
+        // a step under white on card fills; no dark surface sits far enough above the panel,
+        // so dark bars are the primary text ink at a low alpha, a lighter tint, and the band
+        // lighter still.
+        let resting: CGColor
+        let lit: CGColor
+        if effectiveTokenTheme == .dark {
+            let ink = TextToken.textPrimary.color.nsColor(in: self)
+            resting = ink.withAlphaComponent(Self.darkRestingAlpha).cgColor
+            lit = ink.withAlphaComponent(Self.darkBandAlpha).cgColor
+        } else {
+            resting = SurfaceToken.cardUserMessage.color.nsColor(in: self).cgColor
+            lit = SurfaceToken.tileChrome.color.nsColor(in: self).cgColor
+        }
         base.sublayers?.forEach { $0.backgroundColor = resting }
         highlight.sublayers?.forEach { $0.backgroundColor = lit }
     }
