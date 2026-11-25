@@ -418,6 +418,142 @@ enum PlanOrbHover {
     }
 }
 
+/// Orb hover: a small card centred above the hovered orb. A child panel
+/// of the tile's window, placed in screen coordinates, so neither the tile nor
+/// the canvas can clip or misplace it; it wears the choice popover's surface
+/// and edge and never takes the mouse.
+@MainActor
+final class PlanOrbTip {
+    private(set) var panel: NSPanel?
+    private(set) var view: PlanOrbTipView?
+    private var dwell: DispatchWorkItem?
+    /// The status row's account card and the sidebar's agent card wait this long.
+    static let dwellTime: TimeInterval = 0.15
+
+    func show(_ h: PlanGlance.Helper, over orb: NSView, zoom: AgentPageZoom) {
+        dwell?.cancel()
+        dwell = nil
+        // Already up: it follows the pointer from orb to orb at once.
+        if panel?.isVisible == true { place(h, over: orb, zoom: zoom); return }
+        let work = DispatchWorkItem { [weak self, weak orb] in
+            MainActor.assumeIsolated { if let orb { self?.place(h, over: orb, zoom: zoom) } }
+        }
+        dwell = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.dwellTime, execute: work)
+    }
+
+    func dismiss(animated: Bool) {
+        dwell?.cancel()
+        dwell = nil
+        guard let panel, panel.isVisible else { return }
+        panel.parent?.removeChildWindow(panel)
+        panel.orderOut(nil)
+    }
+
+    private func place(_ h: PlanGlance.Helper, over orb: NSView, zoom: AgentPageZoom) {
+        dwell = nil
+        guard let window = orb.window else { return }
+        let view = self.view ?? PlanOrbTipView()
+        self.view = view
+        view.appearance = window.effectiveAppearance
+        view.apply(h, zoom: zoom)
+        let size = view.intrinsicContentSize
+        let panel = self.panel ?? {
+            let p = NSPanel(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless, .nonactivatingPanel],
+                            backing: .buffered, defer: false)
+            p.isOpaque = false
+            p.backgroundColor = .clear
+            p.hasShadow = false
+            p.level = .popUpMenu
+            p.ignoresMouseEvents = true
+            p.collectionBehavior = [.transient, .moveToActiveSpace]
+            p.contentView = ChoicePanelShadowView(surface: view)
+            p.setAccessibilityElement(false)
+            return p
+        }()
+        self.panel = panel
+        panel.appearance = window.effectiveAppearance
+        let anchor = window.convertToScreen(orb.convert(orb.bounds, to: nil))
+        let gap = PlanMetrics.s(Space.xs, zoom)
+        var frame = NSRect(x: (anchor.midX - size.width / 2).rounded(), y: (anchor.maxY + gap).rounded(),
+                           width: size.width, height: size.height)
+        if let screen = window.screen?.visibleFrame {
+            frame.origin.x = min(max(frame.minX, screen.minX), screen.maxX - size.width)
+            if frame.maxY > screen.maxY { frame.origin.y = anchor.minY - gap - size.height }
+        }
+        let margin = ChoicePanelShadowView.margin
+        panel.setFrame(frame.insetBy(dx: -margin, dy: -margin), display: true)
+        panel.contentView?.needsLayout = true
+        if panel.parent !== window {
+            panel.parent?.removeChildWindow(panel)
+            window.addChildWindow(panel, ordered: .above)
+        }
+        panel.orderFront(nil)
+    }
+}
+
+/// The tip's surface: the choice popover's overlay fill, hairline and corner,
+/// the helper's name and its state on two caption lines.
+@MainActor
+final class PlanOrbTipView: NSView {
+    private(set) var helper: PlanGlance.Helper?
+    private var zoom: AgentPageZoom = .default
+    override var isFlipped: Bool { true }
+    private var font: NSFont { .token(.caption, zoom: zoom) }
+    private var padH: CGFloat { PlanMetrics.s(Space.m, zoom) }
+    private var padV: CGFloat { PlanMetrics.s(Space.s, zoom) }
+    private var lineGap: CGFloat { PlanMetrics.s(Space.xs, zoom) }
+    private var maxText: CGFloat { PlanMetrics.s(220, zoom) }
+    private var lineHeight: CGFloat { ceil(font.ascender - font.descender) }
+    private var radius: CGFloat { CGFloat(zoom.scaled(CornerStyle.current.radius(CornerRole.popover.base))) }
+
+    func apply(_ h: PlanGlance.Helper, zoom: AgentPageZoom) {
+        helper = h
+        self.zoom = zoom
+        wantsLayer = true
+        layer?.cornerRadius = radius
+        invalidateIntrinsicContentSize()
+        needsDisplay = true
+    }
+
+    var qaLines: [String] { helper.map { [$0.name, PlanOrbHover.stateText($0)] } ?? [] }
+    var qaSymbol: String? { helper.flatMap { PlanOrbHover.symbol($0.phase) } }
+
+    private var glyphSide: CGFloat { font.pointSize }
+
+    override var intrinsicContentSize: NSSize {
+        guard let h = helper else { return .zero }
+        let state = (PlanOrbHover.symbol(h.phase) == nil ? 0 : glyphSide + lineGap) + PlanInk.width(PlanOrbHover.stateText(h), font)
+        let w = min(maxText, max(PlanInk.width(h.name, font), state))
+        return NSSize(width: ceil(w + 2 * padH), height: ceil(2 * lineHeight + lineGap + 2 * padV))
+    }
+
+    override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); needsDisplay = true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let h = helper else { return }
+        let theme = effectiveTokenTheme
+        let edge = ChoiceListView.panelBorderWidth
+        let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: edge / 2, dy: edge / 2), xRadius: radius, yRadius: radius)
+        SurfaceToken.overlay.color.nsColor(for: theme).setFill()
+        shape.fill()
+        AgentLineRole.decorativeHairline.color.nsColor(for: theme).setStroke()
+        shape.lineWidth = edge
+        shape.stroke()
+        let maxX = bounds.maxX - padH
+        let first = padV + lineHeight / 2, second = first + lineHeight + lineGap
+        PlanInk.text(h.name, x: padH, midY: first, maxX: maxX, font: font, color: PlanInk.primary(theme))
+        let ink = PlanOrbHover.stateInk(h.phase, theme: theme)
+        var x = padH
+        if let glyph = PlanOrbHover.glyph(h.phase, pointSize: glyphSide, ink: ink) {
+            glyph.draw(in: NSRect(x: x, y: (second - glyph.size.height / 2).rounded(), width: glyph.size.width, height: glyph.size.height),
+                       from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+            x += glyph.size.width + lineGap
+        }
+        PlanInk.text(PlanOrbHover.stateText(h), x: x, midY: second, maxX: maxX, font: font, color: ink)
+    }
+}
+
 // MARK: - The popover
 
 /// The plan in the popover: a title with "n of m done", the lead's decision

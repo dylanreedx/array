@@ -527,6 +527,19 @@ extension ManagedLeadPlanChecks {
         let lineFill = try fill("line-hover")
         try expect(isHoverInk(lineFill), "hover(\(name)): the hovered line paints \(String(describing: lineFill)), not the hover step \(hoverInk)")
         try expect(line.hoveredOrb == nil, "hover(\(name)): an orb is hovered over the words")
+        /// The line's words, pixel for pixel: an orb hover must leave them alone.
+        func wordsBand() throws -> [UInt8] {
+            let rep = try lineBitmap(line, appearance: appearance, still: nil)
+            let k = CGFloat(rep.pixelsWide) / line.bounds.width
+            let x0 = Int((pile[3].frame.maxX + 4) * k), x1 = Int((line.bounds.maxX - 4) * k)
+            var out: [UInt8] = []
+            for y in 0..<rep.pixelsHigh { for x in x0..<x1 {
+                let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB)
+                out += [c?.redComponent ?? 0, c?.greenComponent ?? 0, c?.blueComponent ?? 0, c?.alphaComponent ?? 0].map { UInt8(($0 * 255).rounded()) }
+            } }
+            return out
+        }
+        let wordsAtRest = try wordsBand()
 
         // Across the pile, back to front and back again: one line, never left.
         let crossed = line.qaCrossings
@@ -550,20 +563,38 @@ extension ManagedLeadPlanChecks {
         guard let front = helper(2) else { throw WorkspaceAgentReportChecks.Failure(description: "hover(\(name)): orb 2 has no helper") }
         let failedIndex = (0..<pile.count).first { helper($0)?.phase == .failed }
         var said: [String] = []
-        // A: the sentence gives way to the helper, in place; no floating surface.
-        try await Task.sleep(for: .milliseconds(fade))
-        try expect(line.qaInlineHelper?.id == front.id && line.swapAmount > 0.99,
-                   "hover(\(name)): the line does not show orb 2's helper: \(line.qaInlineHelper?.name ?? "nil") at \(line.swapAmount)")
+        // A card above the hovered orb, in a child panel of the window, after
+        // the dwell; the line's own words do not change.
+        try await AgentPresenceChecks.eventually("hover(\(name)): no orb card after the dwell") { line.qaTipPanel?.isVisible == true }
+        guard let panel = line.qaTipPanel, let card = line.qaTipView else { throw WorkspaceAgentReportChecks.Failure(description: "hover(\(name)): no orb card") }
+        func cardSits(over i: Int) -> (NSRect, NSRect, Bool) {
+            let surface = panel.frame.insetBy(dx: ChoicePanelShadowView.margin, dy: ChoicePanelShadowView.margin)
+            let orb = window.convertToScreen(pile[i].convert(pile[i].bounds, to: nil))
+            return (surface, orb, panel.parent === window && abs(surface.midX - orb.midX) <= 1 && surface.minY >= orb.maxY
+                    && surface.minY - orb.maxY <= PlanMetrics.s(Space.m, line.zoom))
+        }
+        let (surface, orbOnScreen, above) = cardSits(over: 2)
+        try expect(above, "hover(\(name)): the card \(surface) is not centred just above orb 2 \(orbOnScreen)")
+        try expect(card.qaLines == [front.name, PlanOrbHover.stateText(front)], "hover(\(name)): the card says \(card.qaLines)")
+        try expect(card.qaSymbol == PlanOrbHover.symbol(front.phase), "hover(\(name)): the card's glyph is \(card.qaSymbol ?? "none") for \(front.phase)")
+        let wordsHovered = try wordsBand()
+        try expect(wordsHovered == wordsAtRest, "hover(\(name)): the orb hover changed the line's words")
         _ = try fill("orb-hover")
-        said.append("\(front.name) · \(PlanOrbHover.stateText(front))")
+        if let chrome = panel.contentView { try snap(chrome, "orb-card-\(name).png") }
+        said.append(card.qaLines.joined(separator: " / "))
         if let f = failedIndex {
             try move(centre(f))
-            try await Task.sleep(for: .milliseconds(fade))
-            try expect(line.qaInlineHelper?.phase == .failed && PlanOrbHover.symbol(.failed) == "exclamationmark.triangle.fill",
-                       "hover(\(name)): the failed orb does not show Failed with the warning glyph")
-            _ = try fill("orb-failed")
-            said.append("failed orb \(f) with \(PlanOrbHover.symbol(.failed) ?? "-")")
+            let (moved, failedOrb, followed) = cardSits(over: f)
+            try expect(followed && card.qaSymbol == "exclamationmark.triangle.fill",
+                       "hover(\(name)): the failed orb's card has \(card.qaSymbol ?? "no glyph") at \(moved) for \(failedOrb)")
+            if let chrome = panel.contentView { try snap(chrome, "orb-card-failed-\(name).png") }
+            said.append("failed orb \(f) with \(card.qaSymbol ?? "-")")
         }
+        // The plan open: no card over it.
+        line.open()
+        try expect(line.isOpen && panel.isVisible == false, "hover(\(name)): the orb card stayed up over the open plan")
+        line.close()
+        try await Task.sleep(for: .milliseconds(fade))
 
         // Leaving: the fill, the hover, the card and the cut all go back.
         try crossing(.mouseExited, NSPoint(x: line.bounds.maxX + 40, y: line.bounds.midY))
@@ -571,7 +602,7 @@ extension ManagedLeadPlanChecks {
         try expect(line.qaLineFillRole == nil && line.hoveredOrb == nil && pile.allSatisfy { !$0.qaIsHovered },
                    "hover(\(name)): leaving did not restore the line")
         try expect(try fill("left") == nil, "hover(\(name)): the line kept a fill after the pointer left")
-        try expect(line.qaInlineHelper == nil, "hover(\(name)): the helper outlived the hover")
+        try expect(line.qaTipPanel?.isVisible != true, "hover(\(name)): the orb card outlived the hover")
         _ = try orbCut(line, appearance: appearance, still: nil)
         return "\(name): line fill the sidebar hover step then nil; orb 2 front with \(cut); shows \(said); 0 crossings over the pile; \(handed) crossings and \(movesHanded) moves handed to the line after NSApp.sendEvent"
     }

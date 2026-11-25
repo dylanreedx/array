@@ -316,24 +316,11 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         }
         let start = pileWidth + (orbs.isEmpty ? 0 : gap)
         let mid = bounds.midY
-        // Inline orb hover: the sentence gives way to the hovered helper, in
-        // place, over the line hover's own fade.
-        let swap = shownHelper == nil ? 0 : min(1, max(0, swapAmount))
-        let context = NSGraphicsContext.current?.cgContext
-        if swap < 1 {
-            context?.saveGState(); context?.setAlpha(1 - swap)
-            var x = start
-            for (i, (s, phase)) in parts.enumerated() {
-                if i > 0 { x += PlanInk.text(separator, x: x, midY: mid, maxX: bounds.maxX, font: font, color: PlanInk.secondary(theme)) }
-                if let phase { x += PlanInk.pill(s, phase, x: x, midY: mid, font: font, theme: theme, zoom: zoom) }
-                else { x += PlanInk.text(s, x: x, midY: mid, maxX: bounds.maxX, font: font, color: PlanInk.secondary(theme)) }
-            }
-            context?.restoreGState()
-        }
-        if swap > 0, let helper = shownHelper {
-            context?.saveGState(); context?.setAlpha(swap)
-            drawHelper(helper, x: start, maxX: bounds.maxX - chevronSize, midY: mid, theme: theme)
-            context?.restoreGState()
+        var x = start
+        for (i, (s, phase)) in parts.enumerated() {
+            if i > 0 { x += PlanInk.text(separator, x: x, midY: mid, maxX: bounds.maxX, font: font, color: PlanInk.secondary(theme)) }
+            if let phase { x += PlanInk.pill(s, phase, x: x, midY: mid, font: font, theme: theme, zoom: zoom) }
+            else { x += PlanInk.text(s, x: x, midY: mid, maxX: bounds.maxX, font: font, color: PlanInk.secondary(theme)) }
         }
         guard let chevron = CanvasSymbolImage.image(named: isOpen ? "chevron.down" : "chevron.up",
                                                     pointSize: PlanMetrics.s(10, zoom), weight: .semibold) else { return }
@@ -346,26 +333,6 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         let r = NSRect(x: bounds.maxX - chevronSize + (chevronSize - chevron.size.width) / 2,
                        y: (mid - chevron.size.height / 2).rounded(), width: chevron.size.width, height: chevron.size.height)
         tinted.draw(in: r, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
-    }
-
-    /// "Name · ⚠ Failed · 27 min ago": the helper's name, truncated to what is
-    /// left, then its state in the sidebar's glyph and the plan's state ink.
-    private func drawHelper(_ h: PlanGlance.Helper, x: CGFloat, maxX: CGFloat, midY: CGFloat, theme: TokenTheme) {
-        let state = PlanOrbHover.stateText(h)
-        let ink = PlanOrbHover.stateInk(h.phase, theme: theme)
-        let glyph = PlanOrbHover.glyph(h.phase, pointSize: font.pointSize, ink: ink)
-        let glyphGap = PlanMetrics.s(Space.xs, zoom)
-        let stateWidth = (glyph.map { $0.size.width + glyphGap } ?? 0) + PlanInk.width(state, font)
-        let sepWidth = PlanInk.width(separator, font)
-        let nameMax = max(x, maxX - stateWidth - sepWidth)
-        var cursor = x + PlanInk.text(h.name, x: x, midY: midY, maxX: nameMax, font: font, color: PlanInk.primary(theme))
-        cursor += PlanInk.text(separator, x: cursor, midY: midY, maxX: maxX, font: font, color: PlanInk.secondary(theme))
-        if let glyph {
-            glyph.draw(in: NSRect(x: cursor, y: (midY - glyph.size.height / 2).rounded(), width: glyph.size.width, height: glyph.size.height),
-                       from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
-            cursor += glyph.size.width + glyphGap
-        }
-        PlanInk.text(state, x: cursor, midY: midY, maxX: maxX, font: font, color: ink)
     }
 
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); applyTokens() }
@@ -383,21 +350,20 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
     /// pointer entered and left it.
     var qaTrackingArea: NSTrackingArea? { hoverArea }
     private(set) var qaCrossings = (entered: 0, exited: 0)
-    /// Checks only: the helper the line is showing in place of its sentence.
-    var qaInlineHelper: PlanGlance.Helper? { swapTarget > 0 ? shownHelper : nil }
+    /// Checks only: the orb card's panel and view while it is up.
+    var qaTipPanel: NSPanel? { tip.panel }
+    var qaTipView: PlanOrbTipView? { tip.view }
 
     private var hoverArea: NSTrackingArea?
     private var lineHovered = false
     private var isPressed = false { didSet { if isPressed != oldValue { needsDisplay = true } } }
     /// 0 at rest, 1 hovered: the hover fill's strength, faded like a sidebar row's.
     @objc dynamic var hoverAmount: CGFloat = 0 { didSet { needsDisplay = true } }
-    /// The helper the line shows while an orb is hovered; kept through the fade out.
-    private var shownHelper: PlanGlance.Helper?
-    @objc dynamic var swapAmount: CGFloat = 0 { didSet { needsDisplay = true } }
-    private var swapTarget: CGFloat = 0
+    /// The hovered orb's card, in its own child panel above the orb.
+    private let tip = PlanOrbTip()
 
     override class func defaultAnimation(forKey key: NSAnimatablePropertyKey) -> Any? {
-        key == "hoverAmount" || key == "swapAmount" ? CABasicAnimation() : super.defaultAnimation(forKey: key)
+        key == "hoverAmount" ? CABasicAnimation() : super.defaultAnimation(forKey: key)
     }
 
     /// The sidebar's hover pill: `textPrimary` at the hover step's strength,
@@ -440,7 +406,7 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         lineHovered = false
         hoverAmount = 0
         setHoveredOrb(nil)
-        swapAmount = 0; swapTarget = 0; shownHelper = nil
+        tip.dismiss(animated: false)
     }
 
     private func setLineHovered(_ on: Bool) {
@@ -476,21 +442,11 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         return glance?.helpers.first { $0.id == id }
     }
 
-    /// The hovered orb's helper takes the sentence's place in the line.
+    /// The hovered orb's helper, in a card above that orb; none while the
+    /// plan is open.
     private func showOrbHover() {
-        let h = isOpen ? nil : helper(for: hoveredOrb)
-        if let h { shownHelper = h }
-        fadeSwap(to: h == nil ? 0 : 1)
-    }
-
-    private func fadeSwap(to target: CGFloat) {
-        guard target != swapTarget else { needsDisplay = true; return }
-        swapTarget = target
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = window == nil ? 0 : AgentInboxCardView.fillFadeDuration
-            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            animator().swapAmount = target
-        }
+        if !isOpen, let h = helper(for: hoveredOrb), let orb = hoveredOrb { tip.show(h, over: orb, zoom: zoom) }
+        else { tip.dismiss(animated: true) }
     }
 
     /// Anywhere on the section, an orb included, opens or closes the plan;
@@ -498,6 +454,7 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
     override func mouseDown(with event: NSEvent) {
         // The popover's own outside-click handling closed it on this very
         // click: that click was the close.
+        tip.dismiss(animated: false)
         if closedThisTurn { return }
         isPressed = true
         toggle()
@@ -518,7 +475,7 @@ final class AgentLeadPlanView: NSView, NativeVectorDrawnContent {
         let list = PlanListView(glance, zoom: zoom)
         list.onReveal = { [weak self] id in self?.close(); self?.onRevealOwner?(id) }
         list.onChoose = { [weak self] answer in self?.close(); self?.onChoose?(answer) }
-        fadeSwap(to: 0)
+        tip.dismiss(animated: false)
         let surface = PlanPopoverSurfaceView(list)
         surface.onCancel = { [weak self] in self?.close() }
         let size = list.preferredSize(maxWidth: popoverMaxWidth)
