@@ -18,7 +18,9 @@ import Foundation
 struct HelperEvidence {
     struct FileFact: Codable, Equatable {
         var path: String
-        /// after, before, none, orderUnknown, unknown, unmapped, unchanged, editNotObserved.
+        /// after, before, none, orderUnknown, unknown, unmapped, unchanged. Older
+        /// rows may also hold editNotObserved (unattributed paths), which the
+        /// one-time ledger compaction removes.
         var status: String
         var reasons: [String]?
         /// The covering check's manifest invocation (never the command run).
@@ -349,7 +351,11 @@ struct HelperEvidence {
         var summary: [String: String] = ["observed": "sinceDelegation", "checkout": shared ? "shared" : "own",
                                          "reportCallObserved": String(reportSeen)]
         var changed: Set<String>?
-        if let base, let names = try? WorktreeManager().changedFiles(repo: root, since: base) {
+        // A shared checkout's diff is everyone's: tens of thousands of paths in
+        // a busy repo, none attributable to this helper. Git is not asked.
+        if shared {
+            summary["changes"] = "unavailable"; summary["changesReason"] = "sharedCheckout"
+        } else if let base, let names = try? WorktreeManager().changedFiles(repo: root, since: base) {
             changed = Set(names); summary["changes"] = "git"
         } else {
             summary["changes"] = "unavailable"; summary["changesReason"] = base == nil ? "noBaseline" : "gitFailed"
@@ -371,7 +377,10 @@ struct HelperEvidence {
         }
         summary["outsideCheckoutEdits"] = String(outside)
         let touched = Set(edits.keys).union(changed ?? [])
-        let files = touched.sorted().map { path in fact(path, edits: edits[path] ?? [], changed: changed, touched: touched) }
+        // Facts only for paths the host saw this helper edit. Every other changed
+        // path is a count: a list of them made single rows megabytes.
+        if let changed { summary["otherChangedFiles"] = String(changed.subtracting(edits.keys).count) }
+        let files = edits.keys.sorted().map { path in fact(path, edits: edits[path]!, changed: changed, touched: touched) }
         return (files, summary)
     }
 
@@ -379,11 +388,7 @@ struct HelperEvidence {
 
     private func fact(_ path: String, edits: [Call], changed: Set<String>?, touched: Set<String>) -> FileFact {
         var fact = FileFact(path: path, status: "unknown")
-        guard let last = edits.max(by: { $0.start < $1.start }) else {
-            fact.status = "editNotObserved"
-            if shared { fact.reasons = ["sharedCheckout"] }
-            return fact
-        }
+        let last = edits.max(by: { $0.start < $1.start })!
         fact.editCall = last.id; fact.editStart = last.start; fact.editEnd = last.end
         if let changed, !changed.contains(path) { fact.status = "unchanged"; return fact }
         guard let manifest = manifest, manifestProblem == nil else { fact.reasons = [manifestProblem ?? "noManifest"]; return fact }
@@ -417,8 +422,8 @@ struct HelperEvidence {
             // cannot bracket tool execution. Preserve observed order and exit,
             // but do not claim freshness without a trusted write boundary.
             var reasons: [String] = ["checkWritesUnobserved"]
-            if changed == nil { reasons.append("changesUnverifiable") }
             if shared { reasons.append("sharedCheckout") }
+            else if changed == nil { reasons.append("changesUnverifiable") }
             if !reportSeen { reasons.append("observationsInFlight") }
             reasons += activity(after: run.start, excluding: run.id, path: path)
             if calls.contains(where: { $0.end == nil && $0.id != run.id && !isReport($0) }) { reasons.append("callStillRunning") }

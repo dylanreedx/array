@@ -361,8 +361,11 @@ enum HelperEvidenceChecks {
         for name in ["claude", "codex"] {
             let row = row(name), facts = files(row), claude = name == "claude"
             let summary = row["evidence"] as? [String: String] ?? [:]
-            expectFact(name, facts, "Sources/Eps.swift", "editNotObserved", "a shell write the host never saw edited looked clean")
-            if claude { expectFact(name, facts, "Sources/Sub.swift", "editNotObserved", "a subagent's edit looked clean") }
+            // A shell write or subagent edit the host never saw is counted, never listed.
+            check(facts["Sources/Eps.swift"] == nil && facts["Sources/Sub.swift"] == nil,
+                  "\(name): a path the host never saw edited was listed: \(facts.keys.sorted())")
+            check((Int(summary["otherChangedFiles"] ?? "") ?? 0) >= (claude ? 2 : 1),
+                  "\(name): unobserved changes not counted: \(summary)")
             expectFact(name, facts, "Sources/Zeta.swift", "unknown", reasons: ["possibleRun"], exactly: true, "grep or a guarded command counted as a run")
             expectFact(name, facts, "Sources/Eta.swift", "unknown", reasons: ["possibleRun"], exactly: true, "a syntax check or a same-named script counted as a run")
             expectFact(name, facts, "Sources/Mu.swift", "none", "a check that failed to start counted as a run")
@@ -417,6 +420,19 @@ enum HelperEvidenceChecks {
             check(false, "codex: file change activities not observed: \(reported.keys.sorted())")
         }
         let sharedRow = row("shared")
+        // The busy shared checkout: thousands of others' changes, one small row,
+        // the helper's own edit with its full facts.
+        let sharedID = on.helpers.first { $0.name == "shared" }!.id!.rawValue.uuidString
+        let sharedLine = on.ledger.split(separator: "\n").first { $0.contains("\"helperEvidence\"") && $0.contains(sharedID) } ?? ""
+        let sharedSummary = sharedRow["evidence"] as? [String: String] ?? [:]
+        print("helper-evidence: shared-checkout row \(sharedLine.utf8.count) bytes over \(2 * noiseCount) unrelated changed paths")
+        check(!sharedLine.isEmpty && sharedLine.utf8.count < 1_024, "shared: row is \(sharedLine.utf8.count) bytes")
+        check(Array(files(sharedRow).keys) == ["Sources/Theta.swift"], "shared: row lists paths it never edited: \(files(sharedRow).count)")
+        check(sharedSummary["changes"] == "unavailable" && sharedSummary["changesReason"] == "sharedCheckout"
+              && sharedSummary["otherChangedFiles"] == nil, "shared: whole-checkout git ran: \(sharedSummary)")
+        check(!on.rows.contains { row in
+            row["kind"] as? String == "helperEvidence" && (row["files"] as? [[String: Any]] ?? []).contains { ($0["path"] as? String)?.hasPrefix("noise/") == true }
+        }, "a helper row lists the shared checkout's unrelated changes")
         expectFact("shared", files(sharedRow), "Sources/Theta.swift", "unknown", reasons: ["checkWritesUnobserved", "sharedCheckout"], exactly: true, "a shared checkout gave after")
         let lost = row("lost"), lostFacts = files(lost), lostSummary = lost["evidence"] as? [String: String] ?? [:]
         check(lostSummary["changes"] == "unavailable" && lostSummary["changesReason"] == "gitFailed", "lost: git failure not recorded: \(lostSummary)")
@@ -460,7 +476,7 @@ enum HelperEvidenceChecks {
             check(Set(row.keys).isSubset(of: ManagedRunLedgerChecks.allowedKeys), "unexpected row keys: \(row.keys.sorted())")
         }
         if !failures.isEmpty { throw WorkspaceAgentReportChecks.Failure(description: "helper-evidence:\n- " + failures.joined(separator: "\n- ")) }
-        print("Helper evidence passed: Claude and Codex: unobserved shell and subagent edits recorded editNotObserved; grep, guarded, syntax-check and same-named-script commands are possible runs; a failed start is no run; one Claude batch is orderUnknown; no rebuild, a rebuild of another product or no reported build exit is buildFreshnessUnknown; a check file's edit is covered by its check; every path of a Codex file change is an observed edit and other paths alone change no location activity; a shell after the check, a background job started before it, a shared checkout, git failure, a call still running and no report call seen each block after; checks with unobserved internal writes remain unknown while retaining call order and exit; manifest read from the baseline with its edit, check-file edit and unparsed entry recorded; lead input and report replies match the base behaviour on and off; nothing shown to any agent; nothing sensitive stored")
+        print("Helper evidence passed: Claude and Codex: unobserved shell and subagent edits counted, never listed; a busy shared checkout runs no whole-checkout git and writes a row under 1 KB; grep, guarded, syntax-check and same-named-script commands are possible runs; a failed start is no run; one Claude batch is orderUnknown; no rebuild, a rebuild of another product or no reported build exit is buildFreshnessUnknown; a check file's edit is covered by its check; every path of a Codex file change is an observed edit and other paths alone change no location activity; a shell after the check, a background job started before it, a shared checkout, git failure, a call still running and no report call seen each block after; checks with unobserved internal writes remain unknown while retaining call order and exit; manifest read from the baseline with its edit, check-file edit and unparsed entry recorded; lead input and report replies match the base behaviour on and off; nothing shown to any agent; nothing sensitive stored")
         try await timing()
     }
 
@@ -556,12 +572,24 @@ enum HelperEvidenceChecks {
         return root
     }
 
+    static let noiseCount = 2_000
+
     static func scenario(recording: Bool) async throws -> Outcome {
         let b = try ManagedModeChecks.bench("helper-evidence")
         defer { b.tearDown() }
         let restoreCodex = ManagedCodexChecks.runEnvironment(b)
         defer { restoreCodex() }
         let (lead, root) = try prepare(b)
+        // The lead's checkout, which the first helper shares, is busy: thousands
+        // of tracked files changed and untracked files no helper touches.
+        let noise = root.appendingPathComponent("noise")
+        try FileManager.default.createDirectory(at: noise, withIntermediateDirectories: true)
+        for n in 0..<noiseCount { try Data("a\n".utf8).write(to: noise.appendingPathComponent("tracked-\(n).txt")) }
+        try git(["add", "-A"], root); try git(["commit", "-q", "-m", "noise"], root)
+        for n in 0..<noiseCount {
+            try Data("b\n".utf8).write(to: noise.appendingPathComponent("tracked-\(n).txt"))
+            try Data("u\n".utf8).write(to: noise.appendingPathComponent("untracked-\(n).txt"))
+        }
         let supervisor = b.supervisor
         supervisor.qaRunLedgerRecording = recording
         defer { supervisor.qaRunLedgerRecording = true }
