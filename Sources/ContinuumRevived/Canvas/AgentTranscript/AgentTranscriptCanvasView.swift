@@ -134,6 +134,12 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
     /// index of its hit control, which carries its hover state.
     struct FileThumb {
         let picture: FilePreviewPicture?
+        /// The file's name and its facts line, set for the frosted band.
+        var name: CTLine? = nil
+        var facts: CTLine? = nil
+        /// The same two lines as text, before truncation (for checks).
+        var nameText = ""
+        var factsText = ""
     }
 
     /// A thumbnail's hover identity: its block and where it sits in it.
@@ -1835,6 +1841,16 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         }
     }
 
+    /// Every drawn thumbnail's band text, in document order.
+    var qaFileThumbText: [(name: String, facts: String)] {
+        qaPlaced.flatMap { item in
+            item.block.decorations.compactMap { decoration -> (String, String)? in
+                guard case let .fileThumb(thumb, _) = decoration else { return nil }
+                return (thumb.nameText, thumb.factsText)
+            }
+        }
+    }
+
     private func thumbKey(for key: ControlKey?) -> ThumbKey? {
         guard let key, let control = control(for: key), case .perform(.openLocalFile) = control.action else { return nil }
         return ThumbKey(blockID: key.blockID, rect: control.rect)
@@ -1870,46 +1886,56 @@ final class AgentTranscriptCanvasView: NSView, AgentTranscriptSurface, NSMenuIte
         context.saveGState()
         context.addPath(path)
         context.clip()
+        let cover = thumb.picture == nil ? 1 : 1 - thumbHoverValue(key)
+        func fill(_ image: CGImage) {
+            let iw = CGFloat(image.width), ih = CGFloat(image.height)
+            let scale = max(rect.width / iw, rect.height / ih)
+            let target = CGRect(x: rect.midX - iw * scale / 2, y: rect.midY - ih * scale / 2,
+                                width: iw * scale, height: ih * scale)
+            NSImage(cgImage: image, size: NSSize(width: iw, height: ih))
+                .draw(in: target, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+        }
         if let picture = thumb.picture {
-            let cover = 1 - thumbHoverValue(key)
-            func fill(_ image: CGImage) {
-                let iw = CGFloat(image.width), ih = CGFloat(image.height)
-                let scale = max(rect.width / iw, rect.height / ih)
-                let target = CGRect(x: rect.midX - iw * scale / 2, y: rect.midY - ih * scale / 2,
-                                    width: iw * scale, height: ih * scale)
-                NSImage(cgImage: image, size: NSSize(width: iw, height: ih))
-                    .draw(in: target, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
-            }
             context.interpolationQuality = .high
             fill(picture.image)
-            if cover > 0 {
-                let share = AgentFileStripView.fadedShare
-                let from = CGPoint(x: rect.midX, y: rect.minY + rect.height * (1 - share))
-                let to = CGPoint(x: rect.midX, y: rect.maxY)
-                context.setAlpha(cover)
-                // The blurred copy, only over the lower part.
+        } else {
+            // A quiet placeholder while the picture is made: no spinner.
+            context.setFillColor(AgentSurfaceRole.codeSubdued.color.cgColor(for: theme))
+            context.fill(rect)
+        }
+        if cover > 0 {
+            // The frosted band: the picture's own blurred copy, then a tint of the
+            // card surface, both coming in over a short feather above the band.
+            let (band, feather) = AgentFileStripView.band(in: rect, zoom: zoom)
+            let from = CGPoint(x: rect.midX, y: band.minY - feather)
+            let to = CGPoint(x: rect.midX, y: band.minY)
+            context.setAlpha(cover)
+            if let picture = thumb.picture {
                 context.beginTransparencyLayer(in: rect, auxiliaryInfo: nil)
                 fill(picture.blurred)
                 context.setBlendMode(.destinationIn)
                 if let mask = CGGradient(colorsSpace: CGColorSpaceCreateDeviceGray(),
                                          colors: [CGColor(gray: 0, alpha: 0), CGColor(gray: 0, alpha: 1)] as CFArray,
                                          locations: [0, 1]) {
-                    context.drawLinearGradient(mask, start: from, end: to, options: [.drawsBeforeStartLocation])
+                    // Clear above the feather, full below it: the blur is the band only.
+                    context.drawLinearGradient(mask, start: from, end: to, options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
                 }
                 context.endTransparencyLayer()
-                // The fade into the card.
-                let surface = renderContext.tokens.artifactSurface.color.cgColor(for: theme)
-                if let fade = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
-                                         colors: [surface.copy(alpha: 0) ?? surface,
-                                                  surface.copy(alpha: AgentFileStripView.fadeEndAlpha) ?? surface] as CFArray,
-                                         locations: [0, 1]) {
-                    context.drawLinearGradient(fade, start: from, end: to, options: [])
-                }
             }
-        } else {
-            // A quiet placeholder while the picture is made: no spinner.
-            context.setFillColor(AgentSurfaceRole.codeSubdued.color.cgColor(for: theme))
-            context.fill(rect)
+            let surface = renderContext.tokens.artifactSurface.color.cgColor(for: theme)
+            if let tint = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
+                                     colors: [surface.copy(alpha: 0) ?? surface,
+                                              surface.copy(alpha: AgentFileStripView.bandTintAlpha) ?? surface] as CFArray,
+                                     locations: [0, 1]) {
+                context.drawLinearGradient(tint, start: from, end: to, options: [.drawsAfterEndLocation])
+            }
+            let padding = AgentFileStripView.bandPadding(zoom: zoom)
+            let lines = AgentFileStripView.baselines(in: rect, zoom: zoom)
+            for (line, baseline) in [(thumb.name, lines.name), (thumb.facts, lines.facts)] {
+                guard let line else { continue }
+                context.textPosition = CGPoint(x: rect.minX + padding, y: baseline)
+                CTLineDraw(line, context)
+            }
         }
         context.restoreGState()
         context.setStrokeColor(renderContext.tokens.decorativeLine.color.cgColor(for: theme))

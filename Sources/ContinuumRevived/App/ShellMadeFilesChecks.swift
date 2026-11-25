@@ -1,6 +1,7 @@
 #if ARRAY_CHECKS
 import AppKit
 import ContinuumRevivedAgentContent
+import ContinuumRevivedAgentUI
 import ContinuumRevivedCore
 import Foundation
 
@@ -29,6 +30,9 @@ enum ShellMadeFilesChecks {
         let codexLines: [String]
         /// What each restore must show, in order of appearance.
         let claudeShown: [URL]
+        /// A very bright picture and a long name: the band must stay readable.
+        let edgeLines: [String]
+        let edgeShown: [URL]
         let claudeHidden: [URL]
         let codexShown: [URL]
         let claudeCommand: String
@@ -140,8 +144,31 @@ enum ShellMadeFilesChecks {
                 "type": "item_completed", "item": ["type": "AgentMessage", "id": "a1",
                                                    "content": [["type": "Text", "text": "The page, the notes and the small shot are in."]]]]]),
         ]
+        // A white-hot capture and a long-named recap, made in one heredoc turn.
+        let edgeStart = Date()
+        let bright = captures.appendingPathComponent("very-bright-launch-hero-flash.png")
+        try picture(NSColor(calibratedRed: 1, green: 1, blue: 0.94, alpha: 1)).write(to: bright)
+        let night = captures.appendingPathComponent("night-mode-dashboard.png")
+        try picture(NSColor(calibratedWhite: 0.04, alpha: 1)).write(to: night)
+        let recap = review.appendingPathComponent("ufc-qatar-press-conference-and-weigh-in-recap.md")
+        try Data("# UFC Qatar: press conference and weigh-in recap\n\nEvery fighter made weight on the first attempt.\n".utf8).write(to: recap)
+        let edgeEnd = Date()
+        let edgeCommand = "screencapture -x \(bright.path) && screencapture -x \(night.path) && cat > \(recap.path) <<'EOF'\n# UFC Qatar recap\nEOF"
+        let edgeLines = [
+            json(["type": "user", "cwd": cwd, "timestamp": stamp(edgeStart.addingTimeInterval(-3)),
+                  "message": ["role": "user", "content": "Grab the hero and the night dashboard, and write the recap."]]),
+            json(["type": "assistant", "cwd": cwd, "timestamp": stamp(edgeStart.addingTimeInterval(-1)),
+                  "message": ["role": "assistant", "content": [
+                    ["type": "tool_use", "id": "toolu_edge", "name": "Bash",
+                     "input": ["command": edgeCommand, "description": "Capture the hero and write the recap"]]]]]),
+            json(["type": "user", "cwd": cwd, "timestamp": stamp(edgeEnd.addingTimeInterval(0.5)),
+                  "message": ["role": "user", "content": [["type": "tool_result", "tool_use_id": "toolu_edge", "content": "saved"]]]]),
+            json(["type": "assistant", "cwd": cwd, "timestamp": stamp(edgeEnd.addingTimeInterval(1)),
+                  "message": ["role": "assistant", "content": [["type": "text", "text": "The hero and the recap are saved."]]]]),
+        ]
         return Fixture(root: root, claudeLines: claudeLines, codexLines: codexLines,
-                       claudeShown: [shot, report], claudeHidden: [oldNotes, scratch],
+                       claudeShown: [shot, report], edgeLines: edgeLines, edgeShown: [bright, night, recap],
+                       claudeHidden: [oldNotes, scratch],
                        codexShown: [landing, notes, small],
                        claudeCommand: claudeCommand, codexCommand: codexCommand)
     }
@@ -166,6 +193,8 @@ enum ShellMadeFilesChecks {
         // The header counts lines of text only: a picture has none to count, so it
         // never reads "· 1 file without counts".
         let cases: [(String, RehydratedTranscript, [URL], [URL], String, String)] = [
+            ("edge bright", ClaudeSessionTranscriptReader.parse(lines: fixture.edgeLines, threadId: "shell-made-edge"),
+             fixture.edgeShown, [], "The hero and the recap are saved.", "3 files · +3"),
             ("claude Bash", ClaudeSessionTranscriptReader.parse(lines: fixture.claudeLines, threadId: "shell-made-claude"),
              fixture.claudeShown, fixture.claudeHidden, "Captured the sidebar and wrote the review.", "2 files · +5"),
             ("codex exec", CodexSessionTranscriptReader.parse(lines: fixture.codexLines, threadId: "shell-made-codex"),
@@ -190,6 +219,23 @@ enum ShellMadeFilesChecks {
                     tile.layoutSubtreeIfNeeded(); canvas.flushPendingVisualUpdate(); canvas.layoutSubtreeIfNeeded()
                     RunLoop.main.run(until: Date().addingTimeInterval(0.05))
                 } while (canvas.qaFileThumbs.count < shown.count || canvas.qaFileThumbs.contains { !$0.hasPicture }) && Date() < settle
+                // Once made, the pictures stay. A warm preview cache (the checks
+                // before this one made dozens) used to evict what a card showed,
+                // so its thumbnails churned through regeneration and never
+                // settled. Settled = no picture made for half a second.
+                var generated = FilePreviewStore.shared.generationCount
+                var quietSince = Date()
+                let quietLimit = Date().addingTimeInterval(8)
+                while Date() < quietLimit, Date().timeIntervalSince(quietSince) < 0.5 {
+                    tile.layoutSubtreeIfNeeded(); canvas.flushPendingVisualUpdate(); canvas.layoutSubtreeIfNeeded()
+                    RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+                    if FilePreviewStore.shared.generationCount != generated {
+                        generated = FilePreviewStore.shared.generationCount
+                        quietSince = Date()
+                    }
+                }
+                try expect(Date().timeIntervalSince(quietSince) >= 0.5 && canvas.qaFileThumbs.allSatisfy(\.hasPicture),
+                           "\(label): the card's pictures must settle and stay; still regenerating (\(FilePreviewStore.shared.generationCount) made, \(FilePreviewStore.shared.failureCount) failed), pictures \(canvas.qaFileThumbs.map(\.hasPicture))")
                 try expect(canvas.qaLaidOutText.contains(closing),
                            "\(label): the restored text must draw; drew '\(canvas.qaLaidOutText.prefix(200))'")
                 let cards = canvas.qaChangesCards
@@ -206,6 +252,25 @@ enum ShellMadeFilesChecks {
                 }
                 let drawnHeader = AgentDiffSummaryView.countsText(cards[0].files)
                 try expect(drawnHeader == header, "\(label): the card header must read '\(header)', got '\(drawnHeader)'")
+                // The name and its facts live in each picture's frosted band, so
+                // the strip carries no caption row beneath the pictures.
+                try expect(AgentDiffSummaryView.stripHeight(cards[0].files, zoom: .default)
+                               == AgentFileStripView.thumbHeight(zoom: .default) + CGFloat(AgentPageZoom.default.scaled(Space.s)),
+                           "\(label): the strip must be the pictures alone, with no caption row under them")
+                let bands = canvas.qaFileThumbText
+                for url in shown {
+                    guard let band = bands.first(where: { $0.name == url.lastPathComponent }) else {
+                        throw Failure(description: "\(label): \(url.lastPathComponent) must be named inside its picture, got \(bands.map(\.name))")
+                    }
+                    let kind = AgentFileStripView.kindName(url)
+                    let bytes = ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.int64Value ?? -1
+                    let size = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+                    try expect(band.facts.hasPrefix(kind + " · ") && band.facts.contains(size),
+                               "\(label): \(url.lastPathComponent)'s band must read its kind and size, got '\(band.facts)'")
+                    if url.pathExtension == "png" {
+                        try expect(band.facts.contains("480×300"), "\(label): a picture's band must read its pixel size, got '\(band.facts)'")
+                    }
+                }
                 try expect(canvas.qaFileThumbs.count == shown.count && canvas.qaFileThumbs.allSatisfy(\.hasPicture),
                            "\(label): every made file must have a real thumbnail, got \(canvas.qaFileThumbs.count) of \(shown.count) (pictures \(canvas.qaFileThumbs.filter(\.hasPicture).count))")
                 if let stillsDirectory {

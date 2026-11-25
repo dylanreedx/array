@@ -3,23 +3,26 @@ import ContinuumRevivedAgentContent
 import ContinuumRevivedAgentUI
 
 /// The Changes card's row of file previews: one small picture per one-off file
-/// (image, pdf, page, a document or source file the operation created), with the
-/// file's name under it. One view for the whole strip and one pooled layer
-/// stack per picture; no view per file, and nothing measured in `layout()`
-/// beyond the aspect ratio the store already knows.
+/// (image, pdf, page, a document or source file the operation created). One
+/// view for the whole strip and one pooled layer stack per picture; no view per
+/// file, and nothing measured in `layout()` beyond the aspect ratio the store
+/// already knows.
 ///
-/// A picture's lower part fades into the card and blurs slightly, so it reads
-/// as the top of something longer. Hovering a picture animates that away, over
+/// A picture's lower part is a frosted band — the picture's own blurred copy
+/// under a tint of the card surface — and the file's name and a quiet line of
+/// facts (kind, pixel size, size, folder) sit inside it, so the strip carries
+/// no caption row. Hovering a picture animates the band away, over
 /// the transcript's own `emphasis` duration with the same ease-out the sidebar's
 /// hover card uses. Clicking opens the file in a tile beside the agent
 /// (`AgentRenderAction.openLocalFile`, which the app resolves and places);
 /// dragging hands the real file to Mail, Slack or Finder.
 @MainActor
 final class AgentFileStripView: NSView, NSDraggingSource {
-    static func thumbHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(72)) }
+    static func thumbHeight(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(80)) }
     private static func maxWidth(_ zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(240)) }
-    private static func minWidth(_ zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(96)) }
-    private static func placeholderWidth(_ zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(115)) }
+    /// Wide enough that the facts line ("PNG · 1280×800 · 212 KB") fits.
+    private static func minWidth(_ zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(128)) }
+    private static func placeholderWidth(_ zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(128)) }
     /// One picture's width: its own proportions, clamped; a quiet fixed width
     /// until the picture exists. Shared with the drawn transcript.
     static func thumbWidth(aspect: CGFloat?, zoom: AgentPageZoom) -> CGFloat {
@@ -28,11 +31,72 @@ final class AgentFileStripView: NSView, NSDraggingSource {
     }
     /// Gap between pictures.
     static func thumbGap(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.m)) }
-    /// How much of the picture's height the fade and blur cover, from the bottom.
-    static let fadedShare: CGFloat = 0.55
-    /// How opaque the fade is at the picture's bottom edge.
-    static let fadeEndAlpha: CGFloat = 0.8
+    /// How opaque the card-surface tint over the band's blur is: enough that the
+    /// facts line holds its contrast over a white picture in dark mode and a
+    /// black one in light mode.
+    static let bandTintAlpha: CGFloat = 0.86
     static let fadeKey = "file-strip-fade"
+
+    // MARK: the band: shared with the drawn transcript
+
+    static func nameFont(zoom: AgentPageZoom) -> NSFont {
+        .monospacedSystemFont(ofSize: NSFont.token(.label, zoom: zoom).pointSize, weight: .regular)
+    }
+    static func factsFont(zoom: AgentPageZoom) -> NSFont { NSFont.token(.caption, zoom: zoom) }
+    /// Inset of the band's text from the picture's sides and top; the bottom is `Space.s`.
+    static func bandPadding(zoom: AgentPageZoom) -> CGFloat { CGFloat(zoom.scaled(Space.s + Space.xs)) }
+    private static func lineHeight(_ font: NSFont) -> CGFloat { ceil(font.ascender - font.descender) }
+    /// The frosted band's height: padding, the name, a 2pt gap, the facts, padding.
+    static func bandHeight(zoom: AgentPageZoom) -> CGFloat {
+        bandPadding(zoom: zoom) + lineHeight(nameFont(zoom: zoom)) + CGFloat(zoom.scaled(Space.xs))
+            + lineHeight(factsFont(zoom: zoom)) + CGFloat(zoom.scaled(Space.s))
+    }
+    /// The band's top, and the short feather above it where the blur comes in.
+    static func band(in rect: CGRect, zoom: AgentPageZoom) -> (band: CGRect, feather: CGFloat) {
+        let height = min(rect.height, bandHeight(zoom: zoom))
+        return (CGRect(x: rect.minX, y: rect.maxY - height, width: rect.width, height: height),
+                CGFloat(zoom.scaled(Space.l + Space.xs)))
+    }
+    /// Baselines of the name and the facts, in the same space as `rect` (y down).
+    static func baselines(in rect: CGRect, zoom: AgentPageZoom) -> (name: CGFloat, facts: CGFloat) {
+        let band = band(in: rect, zoom: zoom).band
+        let name = nameFont(zoom: zoom), facts = factsFont(zoom: zoom)
+        let nameBaseline = band.minY + bandPadding(zoom: zoom) + ceil(name.ascender)
+        return (nameBaseline, nameBaseline + ceil(-name.descender) + CGFloat(zoom.scaled(Space.xs)) + ceil(facts.ascender))
+    }
+
+    /// What kind of file it is, in words.
+    static func kindName(_ url: URL) -> String {
+        let ext = url.pathExtension.lowercased()
+        switch ext {
+        case "md", "markdown": return "Markdown"
+        case "jpg", "jpeg": return "JPEG"
+        case "webp": return "WebP"
+        case "htm", "html": return "HTML"
+        case "swift": return "Swift"
+        case "ts": return "TypeScript"
+        case "js": return "JavaScript"
+        case "py": return "Python"
+        case "sh": return "Shell"
+        default: return ext.isEmpty ? "File" : ext.uppercased()
+        }
+    }
+
+    /// The facts line: kind, an image's pixel size, the file's size, and its
+    /// folder when that still fits `width` in `font`.
+    static func facts(_ url: URL, picture: FilePreviewPicture?, font: NSFont, width: CGFloat) -> String {
+        var parts = [kindName(url)]
+        if let size = picture?.pixelSize { parts.append("\(Int(size.width))×\(Int(size.height))") }
+        if let bytes = picture?.byteCount {
+            parts.append(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))
+        }
+        let base = parts.joined(separator: " · ")
+        let folder = url.deletingLastPathComponent().lastPathComponent
+        guard !folder.isEmpty, folder != "/" else { return base }
+        let withFolder = base + " · " + folder
+        let measured = (withFolder as NSString).size(withAttributes: [.font: font]).width
+        return measured <= width ? withFolder : base
+    }
 
     private final class Thumb {
         let container = CALayer()
@@ -40,6 +104,8 @@ final class AgentFileStripView: NSView, NSDraggingSource {
         let blur = CALayer()
         let blurMask = CAGradientLayer()
         let fade = CAGradientLayer()
+        let name = CATextLayer()
+        let facts = CATextLayer()
         var file: AgentDiffFileSummary?
         var preview: FilePreviewPicture?
         var frame: CGRect = .zero
@@ -85,12 +151,13 @@ final class AgentFileStripView: NSView, NSDraggingSource {
             thumb.picture.masksToBounds = true
             thumb.blur.contentsGravity = .resizeAspectFill
             thumb.blurMask.colors = [CGColor(gray: 0, alpha: 0), CGColor(gray: 0, alpha: 1)]
-            thumb.blurMask.startPoint = CGPoint(x: 0.5, y: 1 - Self.fadedShare)
-            thumb.blurMask.endPoint = CGPoint(x: 0.5, y: 1)
             thumb.blur.mask = thumb.blurMask
-            thumb.fade.startPoint = CGPoint(x: 0.5, y: 1 - Self.fadedShare)
-            thumb.fade.endPoint = CGPoint(x: 0.5, y: 1)
-            [thumb.picture, thumb.blur, thumb.fade].forEach(thumb.container.addSublayer)
+            for text in [thumb.name, thumb.facts] {
+                text.truncationMode = .middle
+                text.contentsScale = window?.backingScaleFactor ?? 2
+                text.actions = ["contents": NSNull()]
+            }
+            [thumb.picture, thumb.blur, thumb.fade, thumb.name, thumb.facts].forEach(thumb.container.addSublayer)
             layer?.addSublayer(thumb.container)
             thumbs.append(thumb)
         }
@@ -104,7 +171,13 @@ final class AgentFileStripView: NSView, NSDraggingSource {
             thumb.container.applyCorner(.artifact, zoom: zoom)
             thumb.container.borderWidth = CGFloat(LineWidth.hairline)
             thumb.container.borderColor = tokens.decorativeLine.color.cgColor(for: theme)
-            thumb.fade.colors = [surface.copy(alpha: 0) ?? surface, surface.copy(alpha: Self.fadeEndAlpha) ?? surface]
+            thumb.fade.colors = [surface.copy(alpha: 0) ?? surface, surface.copy(alpha: Self.bandTintAlpha) ?? surface]
+            let nameFont = Self.nameFont(zoom: zoom), factsFont = Self.factsFont(zoom: zoom)
+            thumb.name.font = nameFont; thumb.name.fontSize = nameFont.pointSize
+            thumb.name.foregroundColor = tokens.primaryText.color.cgColor(for: theme)
+            thumb.name.string = url.lastPathComponent
+            thumb.facts.font = factsFont; thumb.facts.fontSize = factsFont.pointSize
+            thumb.facts.foregroundColor = tokens.secondaryText.color.cgColor(for: theme)
             thumb.preview = FilePreviewStore.shared.preview(url, kind: kind, dark: dark) { [weak self] in
                 self?.previewArrived()
             }
@@ -129,19 +202,22 @@ final class AgentFileStripView: NSView, NSDraggingSource {
 
     private func applyContents(_ thumb: Thumb) {
         CATransaction.begin(); CATransaction.setDisableActions(true)
+        if let url = thumb.file?.fileURL {
+            // The picture's natural width, known without laying out.
+            let width = max(1, Self.thumbWidth(aspect: thumb.preview?.aspect, zoom: zoom) - Self.bandPadding(zoom: zoom) * 2)
+            thumb.facts.string = Self.facts(url, picture: thumb.preview, font: Self.factsFont(zoom: zoom), width: width)
+        }
         if let preview = thumb.preview {
             thumb.picture.contents = preview.image
             thumb.picture.backgroundColor = nil
             thumb.blur.contents = preview.blurred
             thumb.blur.isHidden = false
-            thumb.fade.isHidden = false
         } else {
             // A quiet placeholder while the picture is made: the card's own
             // recessed surface, no spinner.
             thumb.picture.contents = nil
             thumb.picture.backgroundColor = AgentSurfaceRole.codeSubdued.color.cgColor(for: theme)
             thumb.blur.isHidden = true
-            thumb.fade.isHidden = true
         }
         CATransaction.commit()
     }
@@ -149,7 +225,6 @@ final class AgentFileStripView: NSView, NSDraggingSource {
     // MARK: layout
 
     private var gap: CGFloat { CGFloat(zoom.scaled(Space.m)) }
-    private var captionTop: CGFloat { Self.thumbHeight(zoom: zoom) + CGFloat(zoom.scaled(Space.s)) / 2 }
 
     override func layout() {
         super.layout()
@@ -163,27 +238,22 @@ final class AgentFileStripView: NSView, NSDraggingSource {
             thumb.container.frame = frame
             let local = CGRect(origin: .zero, size: frame.size)
             [thumb.picture, thumb.blur, thumb.fade, thumb.blurMask].forEach { $0.frame = local }
+            // The band, in the container's flipped space: blur and tint come in
+            // over a short feather and hold to the bottom edge.
+            let (band, feather) = Self.band(in: local, zoom: zoom)
+            let start = CGPoint(x: 0.5, y: max(0, band.minY - feather) / max(1, local.height))
+            let end = CGPoint(x: 0.5, y: band.minY / max(1, local.height))
+            for gradient in [thumb.blurMask, thumb.fade] { gradient.startPoint = start; gradient.endPoint = end }
+            let padding = Self.bandPadding(zoom: zoom)
+            let lines = Self.baselines(in: local, zoom: zoom)
+            let nameFont = Self.nameFont(zoom: zoom), factsFont = Self.factsFont(zoom: zoom)
+            thumb.name.frame = CGRect(x: padding, y: lines.name - ceil(nameFont.ascender),
+                                      width: max(1, local.width - padding * 2), height: ceil(nameFont.ascender - nameFont.descender))
+            thumb.facts.frame = CGRect(x: padding, y: lines.facts - ceil(factsFont.ascender),
+                                       width: max(1, local.width - padding * 2), height: ceil(factsFont.ascender - factsFont.descender))
             x += width + gap
         }
         CATransaction.commit()
-    }
-
-    // MARK: caption
-
-    override func draw(_ dirtyRect: NSRect) {
-        let font = NSFont.monospacedSystemFont(ofSize: NSFont.token(.caption, zoom: zoom).pointSize, weight: .regular)
-        let style = NSMutableParagraphStyle(); style.lineBreakMode = .byTruncatingMiddle
-        // NSTextField paints text 2pt inside its frame; so does the card's header.
-        let inset: CGFloat = 2
-        for thumb in thumbs.prefix(count) {
-            guard let name = thumb.file?.fileURL?.lastPathComponent else { continue }
-            let h = ceil(font.ascender - font.descender + font.leading)
-            let row = AgentDiffSummaryView.fileRowHeight(zoom: zoom)
-            (name as NSString).draw(
-                in: NSRect(x: thumb.frame.minX, y: captionTop + (row - h) / 2, width: thumb.frame.width + inset, height: h),
-                withAttributes: [.font: font, .paragraphStyle: style,
-                                 .foregroundColor: tokens.primaryText.color.nsColor(for: theme)])
-        }
     }
 
     // MARK: hover
@@ -202,13 +272,13 @@ final class AgentFileStripView: NSView, NSDraggingSource {
     override func mouseMoved(with event: NSEvent) { setHovered(thumbIndex(at: convert(event.locationInWindow, from: nil))) }
     override func mouseExited(with event: NSEvent) { setHovered(nil) }
 
-    /// Fade and blur leave the hovered picture; they come back when it is left.
+    /// The band (blur, tint, name and facts) leaves the hovered picture; it comes back when it is left.
     func setHovered(_ index: Int?) {
         guard hoveredIndex != index else { return }
         hoveredIndex = index
         for (i, thumb) in thumbs.prefix(count).enumerated() {
             let target: Float = i == index ? 0 : 1
-            for layer in [thumb.blur, thumb.fade] {
+            for layer in [thumb.blur, thumb.fade, thumb.name, thumb.facts] {
                 let from = layer.presentation()?.opacity ?? layer.opacity
                 layer.opacity = target
                 guard AgentTranscriptMotion.shouldAnimate, from != target else { continue }
@@ -285,6 +355,10 @@ final class AgentFileStripView: NSView, NSDraggingSource {
     var qaThumbFrames: [CGRect] { thumbs.prefix(count).map(\.frame) }
     var qaThumbCount: Int { count }
     var qaPlaceholderCount: Int { thumbs.prefix(count).filter { $0.preview == nil }.count }
+    /// Each picture's name and facts as the band shows them.
+    var qaBandText: [(name: String, facts: String)] {
+        thumbs.prefix(count).map { ($0.name.string as? String ?? "", $0.facts.string as? String ?? "") }
+    }
     func qaFadeOpacity(at index: Int) -> Float { thumbs[index].fade.opacity }
     func qaBlurOpacity(at index: Int) -> Float { thumbs[index].blur.opacity }
     func qaHasFadeAnimation(at index: Int) -> Bool { thumbs[index].fade.animation(forKey: Self.fadeKey) != nil }

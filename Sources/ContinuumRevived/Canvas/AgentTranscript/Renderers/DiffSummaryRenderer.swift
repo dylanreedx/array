@@ -68,7 +68,8 @@ final class AgentDiffSummaryView: NSView, CornerStyled {
     /// row rhythm. Zero when no file earns a preview.
     static func stripHeight(_ files: [AgentDiffFileSummary], zoom: AgentPageZoom) -> CGFloat {
         guard files.contains(where: { previewKind($0) != nil }) else { return 0 }
-        return AgentFileStripView.thumbHeight(zoom: zoom) + fileRowHeight(zoom: zoom) + CGFloat(zoom.scaled(Space.s))
+        // The name and facts sit inside each picture's band: no caption row.
+        return AgentFileStripView.thumbHeight(zoom: zoom) + CGFloat(zoom.scaled(Space.s))
     }
     /// The proportional add/remove bar, git `--stat` style.
     static func statBarWidth(zoom: AgentPageZoom = .default) -> CGFloat {

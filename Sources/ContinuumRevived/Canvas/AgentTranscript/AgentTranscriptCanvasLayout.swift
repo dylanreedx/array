@@ -778,15 +778,22 @@ extension AgentTranscriptCanvasView {
         return body
     }
 
-    /// `AgentFileStripView`, drawn: each previewed file's picture, its name under
-    /// it, and one hit area that opens it beside this agent.
+    /// `AgentFileStripView`, drawn: each previewed file's picture with its name
+    /// and facts in the frosted band, and one hit area that opens it beside this agent.
     func appendFileStrip(into body: inout Body, files: [AgentDiffFileSummary], blockID: AgentNodeID,
                          top: CGFloat, width: CGFloat, inset: CGFloat) {
         let height = AgentFileStripView.thumbHeight(zoom: zoom)
-        let row = AgentDiffSummaryView.fileRowHeight(zoom: zoom)
-        let captionFont = NSFont.monospacedSystemFont(ofSize: NSFont.token(.caption, zoom: zoom).pointSize, weight: .regular)
-        let captionTop = top + height + S(Space.s) / 2
+        let nameFont = AgentFileStripView.nameFont(zoom: zoom)
+        let factsFont = AgentFileStripView.factsFont(zoom: zoom)
+        let padding = AgentFileStripView.bandPadding(zoom: zoom)
         let dark = theme == .dark
+        func fitted(_ text: String, font: NSFont, color: NSColor, room: CGFloat) -> CTLine {
+            let line = Self.line(text, font: font, color: color)
+            guard Self.width(of: line) > room else { return line }
+            // The ellipsis in the line's own colour, or it draws black.
+            let ellipsis = Self.line("\u{2026}", font: font, color: color)
+            return CTLineCreateTruncatedLine(line, Double(room), .middle, ellipsis) ?? line
+        }
         var x = inset
         for file in files {
             guard let url = file.fileURL, let kind = AgentDiffSummaryView.previewKind(file) else { continue }
@@ -795,16 +802,13 @@ extension AgentTranscriptCanvasView {
             }
             let thumbWidth = min(AgentFileStripView.thumbWidth(aspect: picture?.aspect, zoom: zoom), max(1, width - inset - x))
             let rect = CGRect(x: x, y: top, width: thumbWidth, height: height)
-            body.builder.decorations.append(.fileThumb(FileThumb(picture: picture), rect))
-            var caption = Self.line(url.lastPathComponent, font: captionFont, color: primary)
-            let room = thumbWidth + 2
-            if Self.width(of: caption) > room {
-                let ellipsis = CTLineCreateWithAttributedString(NSAttributedString(string: "\u{2026}", attributes: [.font: captionFont]))
-                if let truncated = CTLineCreateTruncatedLine(caption, Double(room), .middle, ellipsis) { caption = truncated }
-            }
-            // NSTextField paints text 2pt inside its frame; so does the card's header.
-            body.builder.decorations.append(.text(caption, CGPoint(
-                x: x + 2, y: Self.centredBaseline(font: captionFont, top: captionTop, height: row))))
+            let room = max(1, thumbWidth - padding * 2)
+            let facts = AgentFileStripView.facts(url, picture: picture, font: factsFont, width: room)
+            body.builder.decorations.append(.fileThumb(FileThumb(
+                picture: picture,
+                name: fitted(url.lastPathComponent, font: nameFont, color: primary, room: room),
+                facts: fitted(facts, font: factsFont, color: secondary, room: room),
+                nameText: url.lastPathComponent, factsText: facts), rect))
             body.builder.controls.append(Control(
                 rect: rect, title: url.lastPathComponent,
                 style: .region(hoverFill: nil, pressedFill: nil, radius: CGFloat(zoom.scaled(CornerRole.artifact.radius))),

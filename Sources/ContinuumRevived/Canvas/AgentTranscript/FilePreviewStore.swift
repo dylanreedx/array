@@ -35,6 +35,10 @@ enum FilePreviewKind: Equatable {
 struct FilePreviewPicture {
     let image: CGImage
     let blurred: CGImage
+    /// The file's size on disk, read with the picture (off the main actor).
+    var byteCount: Int? = nil
+    /// An image's own pixel size, from its header (ImageIO properties, no decode).
+    var pixelSize: CGSize? = nil
     /// Width over height of the picture.
     var aspect: CGFloat { CGFloat(image.width) / max(1, CGFloat(image.height)) }
 }
@@ -42,6 +46,12 @@ struct FilePreviewPicture {
 /// Thumbnails for the Changes card, made off the main thread and cached by
 /// path and modification time (and appearance, for drawn text). Bounded, so a
 /// long session cannot grow it: 32 pictures or about 20 MB, whichever first.
+///
+/// Least recently used goes first, and every request counts as a use, so the
+/// pictures a card is showing are the last to go. It was an `NSCache`, which
+/// may evict whatever it likes: once a session had made a few dozen pictures it
+/// dropped the ones on screen, each re-layout asked for them again, and a
+/// card's thumbnails churned through regeneration and could stay blank.
 ///
 /// `preview(...)` returns what is cached and otherwise starts the work and
 /// returns nil; `onReady` fires on the main actor when a picture lands, so the
@@ -54,14 +64,60 @@ final class FilePreviewStore {
     nonisolated static let sourceHeight: CGFloat = 112
     nonisolated static let scale: CGFloat = 2
 
-    private let cache = NSCache<NSString, Box>()
+    static let countLimit = 32
+    static let costLimit = 20 * 1_048_576
+    private var entries: [String: (picture: FilePreviewPicture, cost: Int)] = [:]
+    /// Keys, least recently used first.
+    private var recency: [String] = []
+    private var totalCost = 0
     private var pending: [String: [() -> Void]] = [:]
+    /// Keys whose picture could not be made (the file is gone, or unreadable).
+    /// The key carries the modification time, so a file that changes is tried
+    /// again; one that does not is not. Retrying it on every layout, and
+    /// re-laying the card out on every failure, was a loop that never ended.
+    private var failed: Set<String> = []
+    private var failedOrder: [String] = []
     private(set) var generationCount = 0
-    private final class Box { let value: FilePreviewPicture; init(_ value: FilePreviewPicture) { self.value = value } }
+    private(set) var failureCount = 0
 
-    init() { cache.countLimit = 32; cache.totalCostLimit = 20 * 1_048_576 }
+    init() {}
 
-    func resetForChecks() { cache.removeAllObjects(); pending = [:]; generationCount = 0 }
+    func resetForChecks() {
+        entries = [:]; recency = []; totalCost = 0; pending = [:]; generationCount = 0
+        failed = []; failedOrder = []; failureCount = 0
+    }
+
+    private func use(_ key: String) -> FilePreviewPicture? {
+        guard let entry = entries[key] else { return nil }
+        if recency.last != key, let index = recency.firstIndex(of: key) {
+            recency.remove(at: index)
+            recency.append(key)
+        }
+        return entry.picture
+    }
+
+    private func insert(_ picture: FilePreviewPicture, key: String) {
+        let cost = picture.image.bytesPerRow * picture.image.height + picture.blurred.bytesPerRow * picture.blurred.height
+        if let old = entries.removeValue(forKey: key) {
+            totalCost -= old.cost
+            recency.removeAll { $0 == key }
+        }
+        entries[key] = (picture, cost)
+        recency.append(key)
+        totalCost += cost
+        // The newest is never evicted for its own arrival.
+        while recency.count > 1, recency.count > Self.countLimit || totalCost > Self.costLimit {
+            let oldest = recency.removeFirst()
+            totalCost -= entries.removeValue(forKey: oldest)?.cost ?? 0
+        }
+    }
+
+    private func recordFailure(_ key: String) {
+        failureCount += 1
+        guard failed.insert(key).inserted else { return }
+        failedOrder.append(key)
+        if failedOrder.count > 256 { failed.remove(failedOrder.removeFirst()) }
+    }
 
     private func key(_ url: URL, kind: FilePreviewKind, dark: Bool) -> String {
         // Not `URL.resourceValues`: a URL value caches what it read.
@@ -71,23 +127,27 @@ final class FilePreviewStore {
     }
 
     func cached(_ url: URL, kind: FilePreviewKind, dark: Bool) -> FilePreviewPicture? {
-        cache.object(forKey: key(url, kind: kind, dark: dark) as NSString)?.value
+        use(key(url, kind: kind, dark: dark))
     }
 
     func preview(_ url: URL, kind: FilePreviewKind, dark: Bool, onReady: @escaping () -> Void) -> FilePreviewPicture? {
         let key = key(url, kind: kind, dark: dark)
-        if let hit = cache.object(forKey: key as NSString) { return hit.value }
+        if let hit = use(key) { return hit }
+        if failed.contains(key) { return nil }
         if pending[key] != nil { pending[key]?.append(onReady); return nil }
         pending[key] = [onReady]
         generationCount += 1
         Task.detached(priority: .utility) {
             let made = await Self.generate(url, kind: kind, dark: dark)
             await MainActor.run {
-                if let made {
-                    let cost = made.image.bytesPerRow * made.image.height * 2
-                    FilePreviewStore.shared.cache.setObject(Box(made), forKey: key as NSString, cost: cost)
+                let store = FilePreviewStore.shared
+                let waiting = store.pending.removeValue(forKey: key) ?? []
+                guard let made else {
+                    // Nothing changed for the card: it keeps its placeholder.
+                    store.recordFailure(key)
+                    return
                 }
-                let waiting = FilePreviewStore.shared.pending.removeValue(forKey: key) ?? []
+                store.insert(made, key: key)
                 waiting.forEach { $0() }
             }
         }
@@ -110,7 +170,8 @@ final class FilePreviewStore {
             guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
             picture = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceThumbnailMaxPixelSize: 720,
+                // The widest a thumbnail draws is 240pt, 480px at 2x.
+                kCGImageSourceThumbnailMaxPixelSize: 480,
                 kCGImageSourceCreateThumbnailWithTransform: true] as CFDictionary)
         case .pdf:
             guard let page = PDFDocument(url: url)?.page(at: 0) else { return nil }
@@ -146,7 +207,19 @@ final class FilePreviewStore {
             }
         }
         guard let picture, let blurred = blurredCopy(of: picture) else { return nil }
-        return FilePreviewPicture(image: picture, blurred: blurred)
+        let bytes = ((try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? NSNumber)?.intValue
+        return FilePreviewPicture(image: picture, blurred: blurred, byteCount: bytes,
+                                  pixelSize: kind == .image ? pixelSize(of: url) : nil)
+    }
+
+    /// Width and height from the image's header, upright (EXIF orientations 5–8 swap them).
+    nonisolated private static func pixelSize(of url: URL) -> CGSize? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.doubleValue,
+              let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.doubleValue else { return nil }
+        let orientation = (properties[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
+        return orientation >= 5 ? CGSize(width: height, height: width) : CGSize(width: width, height: height)
     }
 
     nonisolated private static func readHead(_ url: URL) -> String? {
@@ -164,7 +237,7 @@ final class FilePreviewStore {
 
     nonisolated private static func blurredCopy(of image: CGImage) -> CGImage? {
         let input = CIImage(cgImage: image)
-        guard let blur = CIFilter(name: "CIGaussianBlur", parameters: [kCIInputImageKey: input.clampedToExtent(), kCIInputRadiusKey: 5]),
+        guard let blur = CIFilter(name: "CIGaussianBlur", parameters: [kCIInputImageKey: input.clampedToExtent(), kCIInputRadiusKey: 9]),
               let out = blur.outputImage?.cropped(to: input.extent) else { return nil }
         return CIContext(options: [.useSoftwareRenderer: true]).createCGImage(out, from: input.extent)
     }
