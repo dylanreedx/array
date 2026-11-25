@@ -291,7 +291,111 @@ final class ManagedRunLedger: @unchecked Sendable {
         return (kind, source)
     }
 
+    // MARK: One-time compaction
+
+    /// Present once this ledger has been compacted: the compaction never reruns.
+    private var compactedMarker: URL { url.deletingLastPathComponent().appendingPathComponent("compacted-v1") }
+    private var compactingURL: URL { url.deletingLastPathComponent().appendingPathComponent("ledger.jsonl.compacting") }
+    /// Checks only: recover as the code before the compaction did.
+    nonisolated(unsafe) static var qaSkipCompaction = false
+    /// The last compaction's file sizes and rewritten rows, nil when none ran.
+    private(set) var qaCompaction: (before: Int, after: Int, rows: Int)?
+
+    /// `helperEvidence` rows written before the writer stopped listing every
+    /// path git called changed held one `editNotObserved` fact per path: in a
+    /// shared checkout tens of thousands, 10 MB in one row, 1.8 GB in one
+    /// ledger. Rewrites those rows once, without those facts and with their
+    /// count in `evidence.otherChangedFiles`, as the writer now records them.
+    /// Every other byte, a torn final append included, is copied unchanged.
+    ///
+    /// Streams from a mapping into a temporary file only once a row needs it,
+    /// fsyncs, then renames over the ledger. A quit mid-way leaves the ledger
+    /// untouched and only the temporary file, removed on the next launch; a quit
+    /// after the rename and before the marker reruns to the same bytes.
+    private func compactOnce() {
+        let fm = FileManager.default
+        try? fm.removeItem(at: compactingURL)
+        guard !fm.fileExists(atPath: compactedMarker.path) else { return }
+        do {
+            if let data = try? Data(contentsOf: url, options: .alwaysMapped) {
+                let rows = try data.withUnsafeBytes { try compact($0) }
+                if rows > 0 {
+                    guard Darwin.rename(compactingURL.path, url.path) == 0 else { throw CocoaError(.fileWriteUnknown) }
+                    let dir = Darwin.open(url.deletingLastPathComponent().path, O_RDONLY)
+                    if dir >= 0 { fsync(dir); Darwin.close(dir) }
+                    let after = (try? fm.attributesOfItem(atPath: url.path)[.size] as? Int) ?? -1
+                    qaCompaction = (data.count, after, rows)
+                    NSLog("Run ledger compacted: %ld rows, %ld -> %ld bytes", rows, data.count, after)
+                }
+            }
+            try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data().write(to: compactedMarker, options: .atomic)
+        } catch {
+            try? fm.removeItem(at: compactingURL)
+            NSLog("Run ledger compaction failed: %@", String(describing: error))
+        }
+    }
+
+    /// Writes the compacted copy to `compactingURL` when any row needs it.
+    /// Returns the rows rewritten (0: nothing written).
+    private func compact(_ raw: UnsafeRawBufferPointer) throws -> Int {
+        var out: FileHandle?
+        var buffer = Data()
+        var copied = 0, rows = 0, start = 0
+        // Copies unchanged bytes in chunks: memory stays a few MB whatever the file.
+        func flush(through end: Int) throws {
+            repeat {
+                let next = min(end, copied + (4 << 20))
+                if copied < next { buffer.append(contentsOf: UnsafeRawBufferPointer(rebasing: raw[copied..<next])); copied = next }
+                if buffer.count >= 4 << 20 { try out!.write(contentsOf: buffer); buffer.removeAll(keepingCapacity: true) }
+            } while copied < end
+        }
+        while start < raw.count {
+            let length = memchr(raw.baseAddress! + start, 10, raw.count - start)
+                .map { raw.baseAddress!.distance(to: UnsafeRawPointer($0)) - start } ?? raw.count - start
+            defer { start += length + 1 }
+            // A torn final append (no newline) is copied, never rewritten.
+            guard start + length < raw.count else { break }
+            let line = UnsafeRawBufferPointer(rebasing: raw[start..<(start + length)])
+            guard let fixed = Self.compacted(line) else { continue }
+            if out == nil {
+                guard FileManager.default.createFile(atPath: compactingURL.path, contents: nil) else { throw CocoaError(.fileWriteUnknown) }
+                out = try FileHandle(forWritingTo: compactingURL)
+            }
+            try flush(through: start)
+            buffer.append(fixed); buffer.append(10)
+            copied = start + length + 1
+            rows += 1
+        }
+        guard let out else { return 0 }
+        try flush(through: raw.count)
+        try out.write(contentsOf: buffer)
+        try out.synchronize()
+        try out.close()
+        return rows
+    }
+
+    /// A `helperEvidence` row without its `editNotObserved` facts, or nil when
+    /// the row has none (or is not one).
+    static func compacted(_ line: UnsafeRawBufferPointer) -> Data? {
+        func has(_ needle: StaticString) -> Bool {
+            memmem(line.baseAddress!, line.count, needle.utf8Start, needle.utf8CodeUnitCount) != nil
+        }
+        guard line.count > 2, has("\"helperEvidence\""), has("\"editNotObserved\""),
+              var row = (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any],
+              row["kind"] as? String == "helperEvidence", let files = row["files"] as? [[String: Any]] else { return nil }
+        let kept = files.filter { $0["status"] as? String != "editNotObserved" }
+        guard kept.count < files.count else { return nil }
+        row["files"] = kept
+        if var evidence = row["evidence"] as? [String: Any], evidence["changes"] as? String == "git" {
+            evidence["otherChangedFiles"] = String(files.count - kept.count)
+            row["evidence"] = evidence
+        }
+        return try? JSONSerialization.data(withJSONObject: row)
+    }
+
     private func recover() {
+        if !Self.qaSkipCompaction { compactOnce() }
         // Mapped, not read: one helperEvidence row can be megabytes, and a ledger
         // of them was 1.4 GB, split into copies and decoded on every launch.
         if let data = try? Data(contentsOf: url, options: .alwaysMapped) {

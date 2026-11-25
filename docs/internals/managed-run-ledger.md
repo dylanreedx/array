@@ -225,6 +225,32 @@ window.
 fixed words. No command text, output, file contents, diffs or prompt text; an
 edit outside the checkout is only counted.
 
+**Only observed edits are listed.** `files` holds one fact per path the host
+saw this helper edit, and nothing else. In its own worktree, every other path
+git calls changed since the baseline (a shell write, a subagent's edit) is a
+number, `evidence.otherChangedFiles`. In a shared checkout git is not asked at
+all (`changes: unavailable`, `changesReason: sharedCheckout`): the diff is
+everyone's and attributes nothing. Before this, every such path was a
+`status: editNotObserved` fact; in a busy shared checkout one row reached
+10.7 MB (50,410 paths) and one ledger 1.8 GB, of which 2,000 evidence rows
+were 1.86 GB, and the launch replay scanned all of it.
+
+**One-time compaction.** The first `recover()` of a fixed build rewrites those
+old rows on the ledger queue, before the replay: `editNotObserved` facts are
+removed and, where the row ran git, counted in `otherChangedFiles`; every other
+byte, a torn final append included, is copied unchanged. It streams from a
+mapping into `run-ledger/ledger.jsonl.compacting`, opened only when a row needs
+it, fsyncs and renames it over the ledger, then writes the marker
+`run-ledger/compacted-v1`; with the marker present it never runs again. A quit
+mid-way leaves the ledger as it was and a temporary file the next launch
+deletes. Readers are unaffected: `recover()` peeks `helperEvidence` rows
+without decoding them, and `RunLedgerUsageReader` never reads `files`.
+`--ledger-recover-check` drives the production recover over a fixture ledger
+and asserts the shrink, the kept facts and count, the unchanged rows and tail,
+the same usage-page tasks and remembered sources, and no rerun.
+`CONTINUUM_LEDGER_RECOVER_TIMING=<support dir>` on the same flag times recover
+before, during and after compaction over a copied ledger.
+
 `--helper-evidence-provider-check` drives a Managed Claude lead delegating one
 Claude and one Codex helper through the production MCP binary into a temporary
 git checkout with a manifest. CLI doubles replay frames in the recorded fixture
