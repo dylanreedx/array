@@ -21,6 +21,10 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     /// The step's resting sections: files agents made, then recent files.
     var onFileSections: (() -> [(title: String, rows: [PaletteFileRow])])?
     var onOpenFile: ((PaletteFileRow, PaletteFileAction) -> Bool)?
+    /// Called as the Open file step opens, so the app can start listing the project.
+    var onEnterFileStep: (() -> Void)?
+    /// Set when the project's listing stopped at this many files, so a miss says so.
+    var fileSearchCap: Int?
     var onClose: (() -> Void)?
 
     enum PaletteFileAction { case openBesideAgent, reveal, copy }
@@ -36,6 +40,8 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
     private var fileSearchResults: [PaletteFileRow] = []
     /// A search is out for the typed query; a key pressed meanwhile waits for it, so it never acts on the stale list.
     private var fileSearchPending = false
+    /// The list holds search results (or a no-match), not the empty-query sections.
+    private var showingFileResults = false
     private var deferredFileAction: PaletteFileAction?
     private static let recentFilesDefaultsKey = "continuum.commandCenter.recentFiles"
 
@@ -1544,6 +1550,8 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
         searchField.placeholderString = "Open a file…"
         searchField.stringValue = ""
         footerLabel?.stringValue = Self.fileFooter
+        fileSearchCap = nil
+        onEnterFileStep?()
         applyFilter(query: "")
         resizeForEntries()
     }
@@ -1555,19 +1563,29 @@ final class LaunchProfilePalette: NSObject, NSTableViewDataSource, NSTableViewDe
             fileSearchPending = false
             deferredFileAction = nil
             let sections = (onFileSections?() ?? []).filter { !$0.rows.isEmpty }
+            showingFileResults = false
             displayEntries = sections.flatMap { [CommandCenterDisplayEntry.section($0.title)] + $0.rows.map(CommandCenterDisplayEntry.file) }
             reloadFileEntries(emptyText: "Type to search every file in this project.")
             return
         }
         fileSearchToken += 1
         let token = fileSearchToken
+        // Until the first answer, say a search is running: the empty-query rows and the
+        // "Type to search" line read as a search that found nothing (0.7.63).
+        if !showingFileResults || displayEntries.isEmpty {
+            showingFileResults = false
+            displayEntries = []
+            reloadFileEntries(emptyText: "Searching…")
+        }
         fileSearchPending = true
         onSearchFiles?(trimmed) { [weak self] rows in
             guard let self, self.navigationLevel == .files, token == self.fileSearchToken else { return }
             self.fileSearchPending = false
             self.fileSearchResults = rows
+            self.showingFileResults = true
             self.displayEntries = rows.isEmpty ? [] : [.section("Files")] + rows.map(CommandCenterDisplayEntry.file)
-            self.reloadFileEntries(emptyText: "No files match “\(trimmed)”")
+            let capNote = self.fileSearchCap.map { " in the first \($0.formatted()) files" } ?? ""
+            self.reloadFileEntries(emptyText: "No files match “\(trimmed)”" + capNote)
             if let action = self.deferredFileAction { self.deferredFileAction = nil; self.commitFile(action) }
         }
     }

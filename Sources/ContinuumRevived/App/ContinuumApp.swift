@@ -9465,6 +9465,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     private var profilePalette: LaunchProfilePalette?
     private var paletteContextTileId: UUID?
     private let paletteFileIndex = AgentFileIndex(includesAllFiles: true)
+    /// One identity for every Open file query: the index caches a listing per (agent, root),
+    /// and a fresh id per query rescanned the whole project on every keystroke (0.7.63).
+    private let paletteFileIndexAgentID = AgentID(rawValue: UUID())
+    var qaPaletteFileIndexScans: UInt64 { paletteFileIndex.qaScanCount }
     /// Where "Copy file" writes and what "Reveal in Finder" calls: injectable so a check never touches the user's pasteboard or Finder.
     var paletteFilePasteboard: NSPasteboard = .general
     var paletteRevealInFinder: ([URL]) -> Void = { NSWorkspace.shared.activateFileViewerSelecting($0) }
@@ -15044,16 +15048,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, Canv
     // MARK: - Command Center: Open file
 
     private func configureOpenFileStep(_ palette: LaunchProfilePalette) {
-        palette.onSearchFiles = { [weak self] query, deliver in
+        // Scope: the active project — the project of the armed zone the user is in.
+        func searchContext(_ project: Project) -> AgentCompletionContext {
+            let root = URL(fileURLWithPath: project.rootPath, isDirectory: true)
+            return AgentCompletionContext(
+                agentID: paletteFileIndexAgentID, backend: .claudeCode, checkoutRoot: root,
+                gitRoot: root, arrayProjectRoot: root, trustState: .trusted)
+        }
+        // Entering the step lists the project afresh (files made since last time) and
+        // starts that listing now, so the first keystroke waits on one scan, not one each.
+        palette.onEnterFileStep = { [weak self] in
+            guard let self, let project = self.activeProject else { return }
+            let context = searchContext(project)
+            let index = self.paletteFileIndex
+            Task {
+                await index.invalidate(context: context)
+                await index.prepare(for: context)
+            }
+        }
+        palette.onSearchFiles = { [weak self, weak palette] query, deliver in
             guard let self, let project = self.activeProject else { deliver([]); return }
             let root = URL(fileURLWithPath: project.rootPath, isDirectory: true)
-            let context = AgentCompletionContext(
-                agentID: AgentID(rawValue: UUID()), backend: .claudeCode, checkoutRoot: root,
-                gitRoot: root, arrayProjectRoot: root, trustState: .trusted)
+            let context = searchContext(project)
             let index = self.paletteFileIndex
             Task { @MainActor in
                 let found = await index.suggestions(for: AgentCompletionQuery(
                     trigger: "@", text: query, replacementRange: NSRange(location: 0, length: 0), context: context))
+                palette?.fileSearchCap = await index.isTruncated(for: context) ? index.entryCap : nil
                 deliver(found.filter { !$0.title.hasSuffix("/") }.prefix(12).map { completion in
                     let relative = completion.detail ?? completion.title
                     return PaletteFileRow(path: relative, matched: completion.matchedPathIndices,

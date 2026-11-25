@@ -73,6 +73,11 @@ public actor AgentFileIndex {
             lock.withLock { listings[key]?.listing }
         }
 
+        /// How many scans have started: QA reads it to prove a query reuses a listing.
+        var scanCount: UInt64 {
+            lock.withLock { lastScan }
+        }
+
         /// The roots whose listings are held.
         var roots: Set<String> {
             lock.withLock { Set(listings.keys.map(\.root)) }
@@ -156,6 +161,16 @@ public actor AgentFileIndex {
     deinit {
         listings.release(holder: ObjectIdentifier(self), roots: nil)
     }
+
+    /// QA: how many listings this index (or, for a shared one, every production index) has started.
+    public nonisolated var qaScanCount: UInt64 { listings.scanCount }
+
+    /// True when the checkout's listing stopped at `entryLimit`, so a miss may be a file past the cap.
+    public func isTruncated(for context: AgentCompletionContext) async -> Bool {
+        await indexed(for: context, root: context.checkoutRoot.standardizedFileURL).count >= entryLimit
+    }
+
+    public nonisolated var entryCap: Int { entryLimit }
 
     /// QA: the roots whose listings production indexes share right now.
     public static func qaSharedListingRoots() -> Set<String> {

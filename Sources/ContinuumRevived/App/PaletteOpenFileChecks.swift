@@ -64,6 +64,15 @@ enum PaletteOpenFileChecks {
         try Data("<svg xmlns=\"http://www.w3.org/2000/svg\"/>".utf8).write(to: strip.appendingPathComponent("zbadge.svg"))
         try Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]).write(to: outputs.appendingPathComponent("zshot.png"))
         for n in 1...5 { try Data("x\n".utf8).write(to: docs.appendingPathComponent("zebrafile-\(n).txt")) }
+        // The shape of the 0.7.63 miss: an uppercase file four folders down, among a few thousand.
+        let deep = f.pbRoot.appendingPathComponent("alignment-2026-10/mapping-process/whit-compare", isDirectory: true)
+        try FileManager.default.createDirectory(at: deep, withIntermediateDirectories: true)
+        try Data("kevin\n".utf8).write(to: deep.appendingPathComponent("KEVIN-CONTEXT.md"))
+        for d in 0..<30 {
+            let dir = f.pbRoot.appendingPathComponent("bulk/part-\(d)", isDirectory: true)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            for n in 0..<100 { try Data().write(to: dir.appendingPathComponent("note-\(n).md")) }
+        }
         delegate.qaAgentSupervisor.agentMadeFiles.record(
             [.init(action: .write, path: "outputs/q3-report.html")],
             agent: f.agentId.rawValue, checkoutRoot: f.pbRoot.path)
@@ -163,7 +172,7 @@ enum PaletteOpenFileChecks {
         try expect(heights.document <= heights.clip + 0.5, "root-file list overflows its clip view: document \(heights.document) > clip \(heights.clip)")
         // A query nothing matches says so, in the footer's own type.
         palette.typeForQA("qzxjwvk")
-        try pump(palette) { palette.fileEmptyTextForQA != nil }
+        try pump(palette) { palette.fileEmptyTextForQA?.hasPrefix("No files match") == true }
         shot(palette, "live-no-match")
         try expect(palette.fileEmptyTextForQA == "No files match “qzxjwvk”" && palette.fileRowsForQA.isEmpty,
                    "no match must say so, got \(String(describing: palette.fileEmptyTextForQA))")
@@ -208,5 +217,40 @@ enum PaletteOpenFileChecks {
         fourth.typeForQA("open file"); fourth.keyForQA(keyCode: 36)
         fourth.keyForQA(keyCode: 53)
         try expect(!fourth.isChoosingFileForQA && fourth.isVisible, "Esc in the file step goes back to the root, not out of the palette")
+        fourth.close()
+
+        // Dylan's 0.7.63 report: "Kevin-context.md" sat on the empty-query placeholder.
+        // Every keystroke rescanned the whole project (a fresh cache key per query), and
+        // the step said "Type to search" while those scans queued up.
+        // The earlier steps' own listings finish first, so only this step's count.
+        var settled = delegate.qaPaletteFileIndexScans
+        for _ in 0..<50 {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+            if delegate.qaPaletteFileIndexScans == settled { break }
+            settled = delegate.qaPaletteFileIndexScans
+        }
+        let scansBefore = delegate.qaPaletteFileIndexScans
+        guard let fifth = delegate.qaProfilePaletteAfterOpening() else { throw Failure(description: "reopen") }
+        fifth.typeForQA("open file"); fifth.keyForQA(keyCode: 36)
+        fifth.typeForQA("K")
+        try expect(fifth.fileEmptyTextForQA == "Searching…" && fifth.fileRowsForQA.isEmpty,
+                   "a search in flight must say Searching…, not the empty-query rows or placeholder; got text=\(String(describing: fifth.fileEmptyTextForQA)) rows=\(fifth.fileRowsForQA.map(\.path))")
+        shot(fifth, "kevin-searching")
+        fifth.typeForQA("")
+        try typeThroughEvents("Kevin-context.md", in: window)
+        try pump(fifth) { fifth.fileRowsForQA.contains { $0.name == "KEVIN-CONTEXT.md" } }
+        shot(fifth, "kevin-found")
+        try expect(fifth.fileRowsForQA.first?.path == "alignment-2026-10/mapping-process/whit-compare/KEVIN-CONTEXT.md",
+                   "the exact name in another case must rank first, got \(fifth.fileRowsForQA.map(\.path))")
+        let scans = delegate.qaPaletteFileIndexScans - scansBefore
+        try expect(scans <= 1, "typing a 16-letter query must list the project once, not per keystroke; scans=\(scans)")
+        // A whole query arriving at once (a paste) searches without another edit.
+        guard let editor = window.fieldEditor(false, for: nil) as? NSTextView else { throw Failure(description: "no field editor") }
+        editor.insertText("qzxjwvk-none.md", replacementRange: NSRange(location: 0, length: (editor.string as NSString).length))
+        try pump(fifth) { fifth.fileEmptyTextForQA?.hasPrefix("No files match") == true }
+        shot(fifth, "kevin-no-match")
+        editor.insertText("kevin-context.md", replacementRange: NSRange(location: 0, length: (editor.string as NSString).length))
+        try pump(fifth) { fifth.fileRowsForQA.contains { $0.name == "KEVIN-CONTEXT.md" } }
+        try expect(fifth.fileEmptyTextForQA == nil, "results hide the empty line")
     }
 }
