@@ -1914,7 +1914,7 @@ final class CommandCenterSectionCell: NSTableCellView {
 /// palette; a fill one step nearer the palette passes over them in a soft band, the inbox's
 /// working-title shimmer (`InboxShimmerOverlay`) on the same shared clock, so every row's
 /// band moves in step. Reduce Motion leaves the bars still.
-final class CommandCenterSkeletonCell: NSTableCellView, TokenThemed {
+final class CommandCenterSkeletonCell: NSTableCellView, TokenThemed, CornerStyled {
     static let rowCount = 4
     static let period: CFTimeInterval = InboxShimmerOverlay.period * 1.5
     static let band: CGFloat = 160
@@ -1995,11 +1995,9 @@ final class CommandCenterSkeletonCell: NSTableCellView, TokenThemed {
         let frames = barFrames()
         for group in [base, highlight] {
             group.frame = bounds
-            for (bar, frame) in zip(group.sublayers ?? [], frames) {
-                bar.frame = frame
-                bar.cornerRadius = frame.height == 16 ? 4 : frame.height / 2
-            }
+            for (bar, frame) in zip(group.sublayers ?? [], frames) { bar.frame = frame }
         }
+        applyCornerStyle()
         band.bounds = CGRect(x: 0, y: 0, width: Self.band, height: max(1, bounds.height))
         band.position = CGPoint(x: -Self.band, y: bounds.midY)
         CATransaction.commit()
@@ -2009,6 +2007,21 @@ final class CommandCenterSkeletonCell: NSTableCellView, TokenThemed {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         animate()
+    }
+
+    /// The icon stand-in is a small rounded square (Default 4); the bars are capsules.
+    /// Both follow Settings › Corners, Sharp included.
+    func applyCornerStyle() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let icon = CGFloat(CornerRole.radius(base: 4))
+        let capsule = CGFloat(CornerRole.pill.radius)
+        for group in [base, highlight] {
+            for (position, bar) in (group.sublayers ?? []).enumerated() {
+                bar.cornerRadius = position == 0 ? icon : min(capsule, bar.bounds.height / 2)
+            }
+        }
+        CATransaction.commit()
     }
 
     private func animate() {
